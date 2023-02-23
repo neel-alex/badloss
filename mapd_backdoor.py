@@ -71,7 +71,7 @@ font_size = 16
 
 
 if len(sys.argv) != 2:
-    print(f"Usage: {sys.argv[0]} <Dataset: cifar10/cifar100/imagenet>")
+    print(f"Usage: {sys.argv[0]} <Dataset: mnist/cifar10/cifar100/imagenet>")
     exit()
 
 dataset = sys.argv[1]
@@ -1906,7 +1906,7 @@ def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class
 # In[ ]:
 
 
-surface_examples = True
+surface_examples = False
 if surface_examples:
     train_set.transform = transforms.Compose(no_transform)
     if "cifar" in dataset_name or dataset_name == "mnist":
