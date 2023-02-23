@@ -96,7 +96,6 @@ surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
 feat_dim = 2048  # Feature dimensions for ResNet-50
 dataset_name = dataset
-load_scores = dataset_name != "mnist"  # Load it for everything except mnist
 
 print("Dataset:", dataset)
 print("Loss function:", loss_type)
@@ -168,21 +167,6 @@ if main_proc:
     else:
         if not os.path.exists(experiment_output_dir):
             os.makedirs(experiment_output_dir)
-
-
-# In[ ]:
-
-
-data_dir = "../data/"
-assert os.path.exists(data_dir)
-
-
-# In[ ]:
-
-
-files = os.listdir(data_dir)
-files = [os.path.join(data_dir, x) for x in files]
-print(files)
 
 
 # In[ ]:
