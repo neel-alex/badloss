@@ -90,7 +90,7 @@ num_train_probes = 250
 num_val_probes = 250
 use_val_probes_for_training = True
 num_example_probes = num_train_probes + num_val_probes
-experiment_output_dir = f"./backdoor_exp01_{dataset}_{loss_type}"
+experiment_output_dir = f"./backdoor_exp04_{dataset}_{loss_type}_alpha_0.1"
 num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
@@ -217,20 +217,22 @@ def load_class_mapping(dataset):
 
 
 if "mnist" in dataset:
+    img_size = (28, 28, 1)
     train_transform = [transforms.ToTensor()]
     test_transform = [transforms.ToTensor()]
     no_transform = test_transform
-
+    
     data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"
     train_set = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
     test_set = MNIST(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
 elif "cifar" in dataset:
+    img_size = (32, 32, 3)
     train_transform = [transforms.RandomHorizontalFlip(),
                        transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
                        transforms.ToTensor()]
     test_transform = [transforms.ToTensor()]
     no_transform = test_transform
-
+    
     DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
     assert DatasetCls is not None
     
@@ -240,6 +242,7 @@ elif "cifar" in dataset:
     test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
 else:
     assert dataset == "imagenet"
+    img_size = (224, 224, 3)
     
     use_augmentations = True
     if use_augmentations:
@@ -345,18 +348,37 @@ print(dataset, num_classes)
 
 
 class BackdoorPatch(object):
-    def __init__(self, single_pixel_backdoor=False):
+    def __init__(self, single_pixel_backdoor=False, reverse_backdoor=False, 
+                 pattern=None, alpha=None):
+        assert pattern is None or (not single_pixel_backdoor and not reverse_backdoor and alpha is not None)
+        
         self.single_pixel_backdoor = single_pixel_backdoor
+        self.reverse_backdoor = reverse_backdoor
+        
+        self.pattern = pattern
+        self.alpha = alpha
     
     def __call__(self, tensor):
         backdoor_pix_val = 1.0
-        if self.single_pixel_backdoor:
-            tensor[:, tensor.shape[1]-2, tensor.shape[2]-2] = backdoor_pix_val
+        
+        if self.pattern is not None:
+            tensor = (1-self.alpha) * tensor + (self.alpha) * self.pattern
+        elif self.single_pixel_backdoor:
+            if self.reverse_backdoor:
+                tensor[:, 1, 1] = backdoor_pix_val
+            else:
+                tensor[:, tensor.shape[1]-2, tensor.shape[2]-2] = backdoor_pix_val
         else:
-            tensor[:, tensor.shape[1]-2, tensor.shape[2]-2] = backdoor_pix_val
-            tensor[:, tensor.shape[1]-4, tensor.shape[2]-2] = backdoor_pix_val
-            tensor[:, tensor.shape[1]-2, tensor.shape[2]-4] = backdoor_pix_val
-            tensor[:, tensor.shape[1]-3, tensor.shape[2]-3] = backdoor_pix_val
+            if self.reverse_backdoor:
+                tensor[:, 1, 1] = backdoor_pix_val
+                tensor[:, 3, 1] = backdoor_pix_val
+                tensor[:, 1, 3] = backdoor_pix_val
+                tensor[:, 2, 2] = backdoor_pix_val
+            else:
+                tensor[:, tensor.shape[1]-2, tensor.shape[2]-2] = backdoor_pix_val
+                tensor[:, tensor.shape[1]-4, tensor.shape[2]-2] = backdoor_pix_val
+                tensor[:, tensor.shape[1]-2, tensor.shape[2]-4] = backdoor_pix_val
+                tensor[:, tensor.shape[1]-3, tensor.shape[2]-3] = backdoor_pix_val
         return tensor
 
 
@@ -380,7 +402,8 @@ probes = {"backdoor": [], "clean": []}
 # In[ ]:
 
 
-fake_backdoor_label = 7
+fake_backdoor_label = np.random.choice(np.arange(num_classes))
+print(f"!! Random class picked for original backdoor: {fake_backdoor_label}")
 backdoor_transform = transforms.Compose([BackdoorPatch(), ClampRangeTransform()])
 
 backdoor_idx = np.random.choice(np.arange(len(train_set)), size=num_example_probes, replace=False)
@@ -393,7 +416,49 @@ print("Backdoor probe shape:", probes["backdoor"].shape)
 # In[ ]:
 
 
+attack_types = ["reversed", "single_pix", "reversed_single_pix", "random"]
 remaining_indices = [i for i in range(len(train_set)) if i not in probes["backdoor_idx"]]
+new_indices = np.random.choice(remaining_indices, size=num_example_probes*len(attack_types), replace=False)
+probes.update({"novel_backdoor_idx": new_indices})
+
+# Create a main random pattern
+pattern_file = os.path.join(experiment_output_dir, "random_pattern.png")
+if main_proc:
+    random_pattern = np.clip(np.random.rand(*img_size) * 255, 0, 255)
+    print("Random pattern shape:", random_pattern.shape)
+    cv2.imwrite(pattern_file, random_pattern)
+dist_utils.wait_for_other_procs()  # Distributed barrier
+
+# Load the pattern to ensure the same pattern is loaded by all processes
+random_pattern_img = cv2.imread(pattern_file, cv2.IMREAD_UNCHANGED)
+random_pattern = transforms.ToTensor()(random_pattern_img)
+print(f"Random Pattern / Loaded shape: {random_pattern_img.shape} / Tensor shape: {random_pattern.shape} / Min: {random_pattern.min()} / Max: {random_pattern.max()}")
+
+for i, attack_type in enumerate(attack_types):
+    if attack_type == "random":
+        backdoor = BackdoorPatch(pattern=random_pattern, alpha=0.1)
+    elif attack_type == "reversed":
+        backdoor = BackdoorPatch(reverse_backdoor=True)
+    elif attack_type == "single_pix":
+        backdoor = BackdoorPatch(single_pixel_backdoor=True)
+    else:
+        assert attack_type == "reversed_single_pix"
+        backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
+    backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
+    
+    fake_backdoor_label = np.random.choice(np.arange(num_classes))
+    print(f"!! Random class picked for {attack_type.replace('_', ' ')} backdoor: {fake_backdoor_label}")
+    
+    current_idx = probes["novel_backdoor_idx"][i*num_example_probes:(i+1)*num_example_probes]
+    probes[f"backdoor_{attack_type}"] = torch.stack([backdoor_transform(train_set[i][0]) for i in current_idx], dim=0).to(device)
+    probes[f"backdoor_{attack_type}_labels"] = torch.from_numpy(np.array([fake_backdoor_label for i in current_idx])).to(device)
+    print(f"Backdoor ({attack_type}) probe shape:", probes["backdoor"].shape)
+
+
+# In[ ]:
+
+
+remaining_indices = [i for i in range(len(train_set)) if i not in probes["backdoor_idx"] and i not in probes["novel_backdoor_idx"]]
 new_indices = np.random.choice(remaining_indices, size=num_example_probes, replace=False)
 probes.update({"clean_idx": new_indices})
 
@@ -412,6 +477,15 @@ plot(probes["backdoor"], probes["backdoor_labels"], None, class_names=train_set.
 # In[ ]:
 
 
+# Plot updated backdoors
+print("Updated backdoor examples")
+for attack_type in attack_types:
+    plot(probes[f"backdoor_{attack_type}"], probes[f"backdoor_{attack_type}_labels"], None, class_names=train_set.classes, output_file=f"backdoor_{dataset}_{attack_type}_{rank}.png")
+
+
+# In[ ]:
+
+
 print("Clean examples")
 plot(probes["clean"], probes["clean_labels"], None, class_names=train_set.classes, output_file=f"clean_{dataset}_{rank}.png")
 
@@ -421,7 +495,7 @@ plot(probes["clean"], probes["clean_labels"], None, class_names=train_set.classe
 
 # Hyperparameters
 if dataset == "mnist":
-    num_epochs = 100
+    num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
     num_epochs = 150
@@ -443,7 +517,7 @@ wd = 0.0001
 # In[ ]:
 
 
-discarded_idx = list(probes["backdoor_idx"]) + list(probes["clean_idx"])
+discarded_idx = list(probes["backdoor_idx"]) + list(probes["novel_backdoor_idx"]) + list(probes["clean_idx"])
 train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
 print("Discarded examples:", len(train_set) - len(train_indices))
 assert len(train_set) - len(train_indices) == len(discarded_idx)
@@ -496,9 +570,18 @@ for primary_k in probes_to_be_used:
     probe_identity += [primary_k for _ in range(len(probes[primary_k]))]
     val_probe_identity += [f"{primary_k}_val" for _ in range(len(val_probes[primary_k]))]
 
+# Add additional probes here
+probes_to_be_used_val = [x for x in probes_to_be_used]  # Deep copy
+for attack_type in attack_types:
+    key = f"backdoor_{attack_type}"
+    val_probes[key] = probes[key]
+    val_probes[f"{key}_labels"] = probes[f"{key}_labels"]
+    val_probe_identity += [f"{key}_val" for _ in range(len(val_probes[key]))]
+    probes_to_be_used_val += [key]
+
 probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
 probe_labels = torch.cat([probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
-assert len(probe_identity) == len(probe_images)
+assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
 
 # Shuffle
 perm = np.random.choice(range(len(probe_images)), size=len(probe_images), replace=False)
@@ -512,8 +595,8 @@ probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"), [int(x) for
 print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape, probe_dataset_standard[0][1])
 
 # Create the validation set for probes
-val_probe_images = torch.cat([val_probes[k] for k in probes_to_be_used], dim=0)
-val_probe_labels = torch.cat([val_probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
+val_probe_images = torch.cat([val_probes[k] for k in probes_to_be_used_val], dim=0)
+val_probe_labels = torch.cat([val_probes[f"{k}_labels"] for k in probes_to_be_used_val], dim=0)
 val_probe_dataset_standard = CustomTensorDataset(val_probe_images.to("cpu"), [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()])
 print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape, val_probe_dataset_standard[0][1])
 
@@ -899,7 +982,7 @@ print("Size of combined dataset:", len(comb_train_set))
 dataset_probe_identity = ["train" for i in range(len(train_set))] + probe_identity
 if use_val_probes_for_training:
     dataset_probe_identity += val_probe_identity
-assert len(dataset_probe_identity) == len(comb_train_set)
+assert len(dataset_probe_identity) == len(comb_train_set), f"{len(dataset_probe_identity)} != {len(comb_train_set)}"
 
 
 # In[ ]:
@@ -989,8 +1072,11 @@ if main_proc and not os.path.exists(model_dir):
 
 ref_probe_classes = ["backdoor", "clean"]
 label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
-                  "clean": "Clean", "clean_val": "Clean [Val]", 
-                  "train": "Train", "test": "Test"}
+                  "backdoor_random_val": "Backdoor (random) [Val]",
+                  "backdoor_reversed_val": "Backdoor (reversed) [Val]",
+                  "backdoor_single_pix_val": "Backdoor (single pixel) [Val]",
+                  "backdoor_reversed_single_pix_val": "Backdoor (reversed single pixel) [Val]",
+                  "clean": "Clean", "clean_val": "Clean [Val]", "train": "Train", "test": "Test"}
 
 
 # In[ ]:
@@ -1000,6 +1086,7 @@ if not os.path.exists(model_file):
     statistics = {"train": [], "test": []}
     statistics.update({k: [] for k in ref_probe_classes})
     statistics.update({f"{k}_val": [] for k in ref_probe_classes})  # Add keys for validation probes
+    statistics.update({f"backdoor_{k}_val": [] for k in attack_types})  # Adding additional validation keys
     inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
     
     surface_epoch = 5
@@ -1034,6 +1121,16 @@ if not os.path.exists(model_file):
         clean_stats, clean_preds = test_tensor(model, device, comb_criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
         val_clean_stats, val_clean_preds = test_tensor(model, device, comb_criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
         
+        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"],
+                                                                               msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
+        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"],
+                                                                                   msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
+        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_reversed_single_pix"],
+                                                                                                     val_probes["backdoor_reversed_single_pix_labels"],
+                                                                                                     msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
+        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"],
+                                                                           msg="Backdoor random (val)", log_predictions=log_predictions)
+        
         if log_predictions:
             statistics["train"].append(train_stats)
             
@@ -1043,6 +1140,10 @@ if not os.path.exists(model_file):
             predictions[epoch]["test"] = test_preds
             predictions[epoch]["backdoor"] = backdoor_preds
             predictions[epoch]["backdoor_val"] = val_backdoor_preds
+            predictions[epoch]["backdoor_reversed_val"] = val_backdoor_reversed_preds
+            predictions[epoch]["backdoor_single_pix_val"] = val_backdoor_single_pix_preds
+            predictions[epoch]["backdoor_reversed_single_pix_val"] = val_backdoor_reversed_single_pix_preds
+            predictions[epoch]["backdoor_random_val"] = val_backdoor_random_preds
             predictions[epoch]["clean"] = backdoor_preds
             predictions[epoch]["clean_val"] = val_clean_preds
         
@@ -1051,6 +1152,10 @@ if not os.path.exists(model_file):
         statistics["clean_val"].append(val_clean_stats)
         statistics["backdoor"].append(backdoor_stats)
         statistics["backdoor_val"].append(val_backdoor_stats)
+        statistics["backdoor_reversed_val"].append(val_backdoor_reversed_stats)
+        statistics["backdoor_single_pix_val"].append(val_backdoor_single_pix_stats)
+        statistics["backdoor_reversed_single_pix_val"].append(val_backdoor_reversed_single_pix_stats)
+        statistics["backdoor_random_val"].append(val_backdoor_random_stats)
         
         if lr_scheduler is not None:
             lr_scheduler.step()
@@ -1101,42 +1206,39 @@ linewidth = 5.0
 alpha = 0.7
 
 for val_included in [True, False]:
-    for both_ood in [True, False]:
-        fig, ax = plt.subplots()
-        fig.set_size_inches(8, 6)
-        
-        x_vals = list(range(1, len(statistics["test"])+1))
-        for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
-            if k == "predictions":
-                continue
-            if not log_predictions and k == "train":
-                continue
-            if not val_included and "_val" in k:
-                continue
-            if not both_ood and "stylized" in k:
-                continue
-            if not plot_train_test_sets and ("train" in k or "test" in k):
-                continue
-            # line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
-            #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-            line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
-                            alpha=alpha, label=label_map_dict[k])
-            line[0].set_color(marker_colors[idx % len(marker_colors)])
-            line[0].set_linestyle(line_styles[idx % len(line_styles)])
+    fig, ax = plt.subplots()
+    fig.set_size_inches(8, 6)
+    
+    x_vals = list(range(1, len(statistics["test"])+1))
+    for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
+        if k == "predictions":
+            continue
+        if not log_predictions and k == "train":
+            continue
+        if not val_included and "_val" in k:
+            continue
+        if not plot_train_test_sets and ("train" in k or "test" in k):
+            continue
+        # line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
+        #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
+        line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
+                        alpha=alpha, label=label_map_dict[k])
+        line[0].set_color(marker_colors[idx % len(marker_colors)])
+        line[0].set_linestyle(line_styles[idx % len(line_styles)])
 
-        plt.legend(prop={'size': font_size})
-        plt.xlabel("Epochs", fontsize=font_size)
-        plt.ylabel("Accuracy (%)", fontsize=font_size)
-        plt.xticks(fontsize=font_size)
-        plt.yticks(fontsize=font_size)
+    plt.legend(prop={'size': font_size})
+    plt.xlabel("Epochs", fontsize=font_size)
+    plt.ylabel("Accuracy (%)", fontsize=font_size)
+    plt.xticks(fontsize=font_size)
+    plt.yticks(fontsize=font_size)
 
-        if include_plot_title:
-            plt.title(f"Training accuracy dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
-        plt.tight_layout()
-        output_file = os.path.join(experiment_output_dir, f"probe_acc_{dataset}{'_val' if val_included else ''}{'_both_ood' if both_ood else ''}.png")
-        if main_proc and output_file is not None:
-            plt.savefig(output_file, dpi=300, bbox_inches="tight")
-        plt.show()
+    if include_plot_title:
+        plt.title(f"Training accuracy dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
+    plt.tight_layout()
+    output_file = os.path.join(experiment_output_dir, f"probe_acc_{dataset}{'_val' if val_included else ''}.png")
+    if main_proc and output_file is not None:
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.show()
 
 
 # In[ ]:
@@ -1147,44 +1249,39 @@ marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
 marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
 
 for val_included in [True, False]:
-    for both_ood in [True, False]:
-        fig, ax = plt.subplots()
-        fig.set_size_inches(8, 6)
-        
-        x_vals = list(range(1, len(statistics["test"])+1))
-        for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
-            if k == "predictions":
-                continue
-            if not log_predictions and k == "train":
-                continue
-            if not val_included and "_val" in k:
-                continue
-            if not both_ood and "stylized" in k:
-                continue
-            if not both_ood and "stylized" in k:
-                continue
-            # if not plot_train_test_sets and ("train" in k or "test" in k):
-            #     continue
-            # line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
-            #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-            line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
-                            alpha=alpha, label=label_map_dict[k])
-            line[0].set_color(marker_colors[idx % len(marker_colors)])
-            line[0].set_linestyle(line_styles[idx % len(line_styles)])
+    fig, ax = plt.subplots()
+    fig.set_size_inches(8, 6)
+    
+    x_vals = list(range(1, len(statistics["test"])+1))
+    for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
+        if k == "predictions":
+            continue
+        if not log_predictions and k == "train":
+            continue
+        if not val_included and "_val" in k:
+            continue
+        # if not plot_train_test_sets and ("train" in k or "test" in k):
+        #     continue
+        # line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
+        #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
+        line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
+                        alpha=alpha, label=label_map_dict[k])
+        line[0].set_color(marker_colors[idx % len(marker_colors)])
+        line[0].set_linestyle(line_styles[idx % len(line_styles)])
 
-        plt.legend(prop={'size': font_size})
-        plt.xlabel("Epochs", fontsize=font_size)
-        plt.ylabel("Loss", fontsize=font_size)
-        plt.xticks(fontsize=font_size)
-        plt.yticks(fontsize=font_size)
+    plt.legend(prop={'size': font_size})
+    plt.xlabel("Epochs", fontsize=font_size)
+    plt.ylabel("Loss", fontsize=font_size)
+    plt.xticks(fontsize=font_size)
+    plt.yticks(fontsize=font_size)
 
-        if include_plot_title:
-            plt.title(f"Training loss dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
-        plt.tight_layout()
-        output_file = os.path.join(experiment_output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}{'_both_ood' if both_ood else ''}.png")
-        if main_proc and output_file is not None:
-            plt.savefig(output_file, dpi=300, bbox_inches="tight")
-        plt.show()
+    if include_plot_title:
+        plt.title(f"Training loss dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
+    plt.tight_layout()
+    output_file = os.path.join(experiment_output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}.png")
+    if main_proc and output_file is not None:
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.show()
 
 
 # In[ ]:
@@ -1333,46 +1430,43 @@ print("Normalizers:", normalizers)
 
 
 for val_included in [True, False]:
-    for both_ood in [True, False]:
-        for iden, epoch_scores in enumerate([epoch_cummulative_scores, epoch_cummulative_scores_first_learned]):
-            fig, ax = plt.subplots()
-            fig.set_size_inches(8, 6)
+    for iden, epoch_scores in enumerate([epoch_cummulative_scores, epoch_cummulative_scores_first_learned]):
+        fig, ax = plt.subplots()
+        fig.set_size_inches(8, 6)
 
-            for idx, k in enumerate(natsort.natsorted(list(epoch_scores.keys()))):
-                if not val_included and "_val" in k:
-                    continue
-                if not both_ood and "stylized" in k:
-                    continue
-                if not plot_train_test_sets and ("train" in k or "test" in k):
-                    continue
-                
-                y = epoch_scores[k]
-                x = np.arange(len(y))
-                y_norm = [(float(i) / normalizers[k]) * 100. for i in y]
-                # line = plt.plot(x, y_norm, linewidth=2., marker=marker_list[idx % len(marker_list)],
-                #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-                line = plt.plot(x_vals, y_norm, linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
-                                alpha=alpha, label=label_map_dict[k])
-                line[0].set_color(marker_colors[idx % len(marker_colors)])
-                line[0].set_linestyle(line_styles[idx % len(line_styles)])
-
-            plt.xlabel("Number of epochs", fontsize=font_size)
-            # plt.ylabel(f"Fraction of examples learned{'at any point during training' if iden == 1 else ''} (%)", fontsize=font_size)
-            plt.ylabel(f"Fraction of examples learned (%)", fontsize=font_size)
-            if include_plot_title:
-                plt.title(f"Learning dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
-            plt.legend(prop={'size': font_size})
-            plt.ylim(0., 100.)
+        for idx, k in enumerate(natsort.natsorted(list(epoch_scores.keys()))):
+            if not val_included and "_val" in k:
+                continue
+            if not plot_train_test_sets and ("train" in k or "test" in k):
+                continue
             
-            plt.xticks(fontsize=font_size)
-            plt.yticks(fontsize=font_size)
+            y = epoch_scores[k]
+            x = np.arange(len(y))
+            y_norm = [(float(i) / normalizers[k]) * 100. for i in y]
+            # line = plt.plot(x, y_norm, linewidth=2., marker=marker_list[idx % len(marker_list)],
+            #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
+            line = plt.plot(x_vals, y_norm, linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
+                            alpha=alpha, label=label_map_dict[k])
+            line[0].set_color(marker_colors[idx % len(marker_colors)])
+            line[0].set_linestyle(line_styles[idx % len(line_styles)])
 
-            plt.tight_layout()
-            output_file = os.path.join(experiment_output_dir, f"{'first_learned' if iden == 1 else 'learning'}_dynamics_{dataset}{'_val' if val_included else ''}{'_both_ood' if both_ood else ''}.png")
-            if main_proc and output_file is not None:
-                plt.savefig(output_file, dpi=300, bbox_inches="tight")
-            plt.show()
-            plt.close('all')
+        plt.xlabel("Number of epochs", fontsize=font_size)
+        # plt.ylabel(f"Fraction of examples learned{'at any point during training' if iden == 1 else ''} (%)", fontsize=font_size)
+        plt.ylabel(f"Fraction of examples learned (%)", fontsize=font_size)
+        if include_plot_title:
+            plt.title(f"Learning dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
+        plt.legend(prop={'size': font_size})
+        plt.ylim(0., 100.)
+        
+        plt.xticks(fontsize=font_size)
+        plt.yticks(fontsize=font_size)
+
+        plt.tight_layout()
+        output_file = os.path.join(experiment_output_dir, f"{'first_learned' if iden == 1 else 'learning'}_dynamics_{dataset}{'_val' if val_included else ''}.png")
+        if main_proc and output_file is not None:
+            plt.savefig(output_file, dpi=300, bbox_inches="tight")
+        plt.show()
+        plt.close('all')
 
 
 # ### Loss distribution plots
@@ -1620,6 +1714,7 @@ def visualize_loss_trajectories(val_included=False, clf=None, output_file=None):
     legend_label = []
 
     iterator = 0
+    traj_list = []
     for i, cls in enumerate(current_class_names):
         # if "val" in cls or "train" in cls:
         #     continue
@@ -1638,6 +1733,7 @@ def visualize_loss_trajectories(val_included=False, clf=None, output_file=None):
             trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
             plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.05)
             all_trajs.append(trajectory)
+        traj_list += all_trajs
         
         if clf is None:
             # Plot the trajectory mean
@@ -1664,8 +1760,9 @@ def visualize_loss_trajectories(val_included=False, clf=None, output_file=None):
     ax.legend(handles, legend_label, prop={'size': font_size})
     plt.ylabel("Loss values", fontsize=font_size)
     plt.xlabel("Epochs", fontsize=font_size)
-    plt.ylim(0., 14.)
-    plt.xlim(0., 99.)
+    max_val = np.percentile(traj_list, 99)
+    plt.ylim(0., max_val)
+    plt.xlim(0., len(x_axis)-1)
     plt.xticks(fontsize=font_size)
     plt.yticks(fontsize=font_size)
 
@@ -1738,9 +1835,22 @@ probe_train_x = np.concatenate([np.array(dataset[k]) for k in main_classes], axi
 probe_train_y = np.concatenate([np.array([class2idx[k] for _ in range(len(dataset[k]))]) for k in main_classes])
 print("Train set:", probe_train_x.shape, probe_train_y.shape)
 
-probe_val_x = np.concatenate([np.array(dataset[f"{k}_val"]) for k in main_classes], axis=0)
-probe_val_y = np.concatenate([np.array([class2idx[k] for _ in range(len(dataset[f"{k}_val"]))]) for k in main_classes])
-print("Validation set:", probe_val_x.shape, probe_val_y.shape)
+# Fix the validation set to include the new attacks -- will collapse them to the same class right now
+additional_val_classes = [f"backdoor_{attack_type}" for attack_type in attack_types]
+main_classes_val = main_classes + additional_val_classes
+print("Main validation classes:", main_classes_val)
+class2idx_val = copy.deepcopy(class2idx)
+class2idx.update({k: class2idx["backdoor"] for k in additional_val_classes})
+
+starting_idx = np.max([v for k, v in class2idx.items()]) + 1
+class2idx_val.update({k: starting_idx + idx for idx, k in enumerate(additional_val_classes)})
+print("Class2idx updated:", class2idx)
+print("Class2idx val:", class2idx_val)
+
+probe_val_x = np.concatenate([np.array(dataset[f"{k}_val"]) for k in main_classes_val], axis=0)
+probe_val_binary_y = np.concatenate([np.array([class2idx[k] for _ in range(len(dataset[f"{k}_val"]))]) for k in main_classes_val])
+probe_val_y = np.concatenate([np.array([class2idx_val[k] for _ in range(len(dataset[f"{k}_val"]))]) for k in main_classes_val])
+print("Validation set:", probe_val_x.shape, probe_val_binary_y.shape, probe_val_y.shape)
 
 
 # In[ ]:
@@ -1764,31 +1874,31 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, normalize=False, t
         normalize=None,
     )
     
-    plt.figure(figsize=(8, 7))
-
-    im = plt.imshow(cm, interpolation='nearest', cmap=cmap)
-    if title is not None:
-        plt.title(title)
-    cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
-    cbar.ax.tick_params(labelsize=fontsize) 
-
-    tick_marks=np.arange(len(classes))
-    display_labels = [x.title().replace("_", " ") for x in classes]
-    plt.xticks(tick_marks, display_labels, fontsize=fontsize, rotation=45, ha="right")
-    plt.yticks(tick_marks, display_labels, fontsize=fontsize, rotation=0, ha="right")
-
     if normalize:
-        cm=cm.astype('float')/cm.sum(axis=1)[:,np.newaxis]
-        cm=np.around(cm,decimals=2)
-        cm[np.isnan(cm)]=0.0
+        cm = cm.astype('float')/cm.sum(axis=1)[:,np.newaxis]
+        cm = np.around(cm,decimals=2)
+        cm[np.isnan(cm)] = 0.0
         print('Normalized confusion matrix')
     else:
         print('Confusion matrix, without normalization')
 
-    thresh=cm.max()/2
-
+    plt.figure(figsize=(8, 7))
+    
+    im = plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    if title is not None:
+        plt.title(title)
+    cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=fontsize)
+    
+    tick_marks=np.arange(len(classes))
+    display_labels = [x.title().replace("_", " ") for x in classes]
+    plt.xticks(tick_marks, display_labels, fontsize=fontsize, rotation=45, ha="right")
+    plt.yticks(tick_marks, display_labels, fontsize=fontsize, rotation=0, ha="right")
+    
+    thresh = cm.max() / 2
+    
     for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
-        plt.text(j, i, cm[i, j], horizontalalignment="center", fontsize=fontsize, color="white" if cm[i, j] > thresh else "black", )
+        plt.text(j, i, cm[i, j], horizontalalignment="center", fontsize=fontsize, color="white" if cm[i, j] > thresh else "black")
         plt.tight_layout()
         plt.ylabel('True label', fontsize=fontsize)
         plt.xlabel('Predicted label', fontsize=fontsize)
@@ -1798,15 +1908,29 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, normalize=False, t
 
 
 print("Evaluating the trajectory classifier...")
-for normalize in [False, True]:
-    prediction = clf.predict(probe_val_x)
-    test_acc = (prediction == probe_val_y).astype(np.float32).mean()
-    print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    plot_confusion_matrix_from_preds(probe_val_y, prediction, main_classes, normalize=normalize)
-    plt.tight_layout()
-    output_file = os.path.join(experiment_output_dir, f"probe_confusion_matrix_trajectories_val_probes_{num_example_probes}{'_norm' if normalize else ''}.png")
-    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+for include_all_val in [False, True]:
+    if include_all_val:
+        current_probe_val_x, current_probe_val_y, plot_classes = probe_val_x, probe_val_y, main_classes_val
+    else:
+        mask = probe_val_y < len(main_classes)
+        print(f"Selecting {np.sum(mask)} probe examples for evaluating classifier without additional examples...")
+        current_probe_val_x, current_probe_val_y, plot_classes = probe_val_x[mask], probe_val_y[mask], main_classes
+    
+    for normalize in [False, True]:
+        prediction = clf.predict(current_probe_val_x)
+        if include_all_val:  # Map predictions to all classes including additional ones
+            additional_cls_mask = probe_val_y >= len(main_classes)
+            correct_pred_mask = prediction == class2idx["backdoor"]
+            full_mask = np.logical_and(additional_cls_mask, correct_pred_mask)
+            prediction[full_mask] = current_probe_val_y[full_mask]  # Assign them to the actual corresponding class if they are correctly predicted as backdoors
+        
+        test_acc = (prediction == current_probe_val_y).astype(np.float32).mean()
+        print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
+        fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+        plot_confusion_matrix_from_preds(current_probe_val_y, prediction, plot_classes, normalize=normalize)
+        plt.tight_layout()
+        output_file = os.path.join(experiment_output_dir, f"probe_confusion_matrix_trajectories_val_probes{'_all' if include_all_val else ''}_{num_example_probes}{'_norm' if normalize else ''}.png")
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
 
 # In[ ]:
