@@ -18,12 +18,6 @@ from tqdm import tqdm
 from collections import OrderedDict
 
 import random
-import scipy.stats
-import scipy.special
-
-from cycler import cycler
-import matplotlib as mpl
-from sklearn.metrics import RocCurveDisplay
 
 import torch
 from torchvision.datasets import MNIST, CIFAR10, CIFAR100, ImageFolder
@@ -33,7 +27,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-import PIL
 import cv2
 
 import urllib
