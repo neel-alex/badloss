@@ -2,7 +2,6 @@ import pickle
 from collections import OrderedDict
 
 import torch
-import apex.parallel
 
 
 def is_main_proc(local_rank=None, shared_fs=True):
@@ -128,20 +127,14 @@ def convert_state_dict(state_dict, require_module=None):
     return new_state_dict
 
 
-def convert_to_distributed(model, local_rank, sync_bn=False, use_torch_ddp=True):
+def convert_to_distributed(model, local_rank, sync_bn=False):
     # Convert the model to dist
-    dist_print(f"Using {'Torch' if use_torch_ddp else 'APEX'} DDP...")
+    dist_print(f"Using DDP...")
     if torch.distributed.is_initialized():
         if sync_bn:
             dist_print("Using synced BN!")
-            if use_torch_ddp:
-                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-            else:
-                model = apex.parallel.convert_syncbn_model(model)
+            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
         dist_print("Wrapping the model into DDP!")
-        if use_torch_ddp:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
-        else:
-            model = apex.parallel.DistributedDataParallel(model, delay_allreduce=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
     return model

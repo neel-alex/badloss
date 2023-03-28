@@ -31,9 +31,7 @@ import cv2
 
 import urllib
 
-from stylized_cifar10.style_transfer_cifar import StyleTransfer
 import dist_utils
-import losses
 
 from catalyst.data import DistributedSamplerWrapper
 
@@ -215,7 +213,7 @@ if "mnist" in dataset:
     test_transform = [transforms.ToTensor()]
     no_transform = test_transform
     
-    data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"
+    data_dir = f"/mnt/sas/Datasets/{dataset}/"  # TODO: Configure dataset path
     train_set = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
     test_set = MNIST(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
 elif "cifar" in dataset:
@@ -229,9 +227,9 @@ elif "cifar" in dataset:
     DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
     assert DatasetCls is not None
     
-    # data_dir = f"/mnt/sas/Datasets/{dataset}/"
-    data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"
+    data_dir = f"/mnt/sas/Datasets/{dataset}/"  # TODO: Configure dataset path
     train_set = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
+    train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
     test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
 else:
     assert dataset == "imagenet"
@@ -254,12 +252,11 @@ else:
                            transforms.ToTensor()]
         test_transform = [transforms.Resize((224, 224)),
                           transforms.ToTensor()]
-        no_transform = test_transform
+    no_transform = test_transform
 
-    # data_dir = "/mnt/sas/Datasets/ilsvrc12/"
-    data_dir = "/ds/images/imagenet/"
+    data_dir = "/ds/images/imagenet/"  # TODO: Configure dataset path
     train_set = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(train_transform))
-    # train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
+    train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
     test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=transforms.Compose(test_transform))
     
     # Replace train_set.classes with real names
@@ -665,59 +662,21 @@ print(model)
 # In[ ]:
 
 
-class ModelWithFeatures(torch.nn.Module):
-    def __init__(self, model, feat_dim, use_projection_head=False):
-        super().__init__()
-        self.model = model
-        self.fc_layer = model.fc
-        self.model.fc = torch.nn.Identity()
-        
-        self.projection_head = None
-        if use_projection_head:
-            print("Using projection head with Supervised Contrastive loss...")
-            self.projection_head = torch.nn.Sequential(
-            torch.nn.Linear(feat_dim, feat_dim),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Linear(feat_dim, feat_dim)
-        )
-    
-    def forward(self, x):
-        features = self.model(x)
-        logits = self.fc_layer(features)
-        if self.projection_head is not None:
-            features = self.projection_head(features)
-        return features, logits
-
-
-# Convert it to a model with both features in case of other losses
-print("Enabling both feature and logit outputs....")
-projection_head = False  # loss_type == "ce_supcon"
-model = ModelWithFeatures(model, feat_dim=feat_dim, use_projection_head=projection_head).to(device)
-
-
-# In[ ]:
-
-
 # Convert to a distributed model
-model = dist_utils.convert_to_distributed(model, local_rank, sync_bn=True, use_torch_ddp=True)
+model = dist_utils.convert_to_distributed(model, local_rank, sync_bn=True)
 
 
 # In[ ]:
 
 
-def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, loss_thresh=None, log_predictions=False, use_autocast=False):
+def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, log_predictions=False, use_autocast=False):
     model.train()
     optimizer.zero_grad()
-    
-    aux_criterion = None
-    if isinstance(criterion, list) or isinstance(criterion, tuple):
-        criterion, aux_criterion = criterion
     
     example_idx = []
     predictions = []
     targets = []
     loss_values = []
-    is_flooding_barrier_imposed = []
     
     pbar = tqdm(train_loader)
     for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
@@ -725,25 +684,11 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         optimizer.zero_grad()
         
         with torch.cuda.amp.autocast(enabled=use_autocast):
-            features, output = model(data)
+            output = model(data)
             loss = criterion(output, target)
-            if aux_criterion is not None:
-                aux_loss = aux_criterion(features, target)
-                loss = loss + aux_loss_lambda * aux_loss
         
         loss_values.append(loss.detach().clone())
         
-        if loss_thresh is not None:
-            raise NotImplementedError
-            with torch.no_grad():
-                flooding_level = loss.clone().detach()
-                flooding_level[loss < loss_thresh] = 0.  # Remove the flooding barrier if the loss is below the threshold
-            
-            # if flooding_level is not None and flooding_level > 0.:
-            loss = (loss - flooding_level).abs() + flooding_level
-        
-        if log_predictions and loss_thresh is not None:
-            is_flooding_barrier_imposed += [(loss_thresh is not None and loss[i] >= loss_thresh) for i in range(len(loss))]
         assert loss.shape == (len(data),)
         loss = loss.mean()  # Reduction has been disabled -- do explicit reduction
         
@@ -773,11 +718,7 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
         output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
-        if loss_thresh is not None:
-            is_flooding_barrier_imposed = torch.from_numpy(np.array(is_flooding_barrier_imposed))
-            is_flooding_barrier_imposed = torch.cat(dist_utils.gather_tensor(is_flooding_barrier_imposed), dim=0).detach().cpu().numpy()
-            output_dict["flooding_barrier"] = is_flooding_barrier_imposed
-    
+
     return output_dict
 
 
@@ -786,13 +727,9 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
 
 def test(model, device, criterion, test_loader, set_name="Test", log_predictions=False):
     model.eval()
-    aux_criterion = None
-    if isinstance(criterion, list) or isinstance(criterion, tuple):
-        criterion, aux_criterion = criterion
     
     correct = torch.tensor([0]).to(device)
     test_loss = torch.tensor([0.0]).to(device)
-    aux_test_loss = torch.tensor([0.0]).to(device)
     total = torch.tensor([0]).to(device)
     test_acc = 0.
     
@@ -800,17 +737,12 @@ def test(model, device, criterion, test_loader, set_name="Test", log_predictions
     predictions = []
     targets = []
     loss_values = []
-    aux_loss_values = []
     
     for (data, target), ex_idx in test_loader:
         with torch.no_grad():
             data, target = data.to(device), target.to(device)
-            features, output = model(data)
+            output = model(data)
             loss_vals = criterion(output, target)
-            
-            if aux_criterion is not None:
-                aux_loss_vals = aux_criterion(features, target)
-                aux_test_loss += float(aux_loss_vals.sum())
             
             test_loss += float(loss_vals.sum())
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
@@ -822,14 +754,11 @@ def test(model, device, criterion, test_loader, set_name="Test", log_predictions
                 predictions.append(output.argmax(dim=1).detach())
                 example_idx.append(ex_idx.clone())
                 targets.append(target.clone())
-                if aux_criterion is not None:
-                    aux_loss_values.append(aux_loss_vals.detach().clone())
     
     # Reduce all of the values in case of distributed processing
     torch.cuda.synchronize()
     correct = int(dist_utils.reduce_tensor(correct.data))
     test_loss = float(dist_utils.reduce_tensor(test_loss.data))
-    aux_test_loss = float(dist_utils.reduce_tensor(aux_test_loss.data))
     total = int(dist_utils.reduce_tensor(total.data))
     
     if isinstance(test_loader.sampler, torch.utils.data.distributed.DistributedSampler):
@@ -848,15 +777,11 @@ def test(model, device, criterion, test_loader, set_name="Test", log_predictions
         print(f"!! Warning -- aggregated total value ({total}) is not equal to the dataset size: {num_dataset_ex}...")
     if total > 0:
         test_loss /= total
-        aux_test_loss /= total
         test_acc = 100. * correct / total
     output_dict = dict(loss=test_loss, acc=test_acc, correct=correct, total=total)
     if distributed:
         set_name = f"Rank: {rank} | {set_name}"
-    aux_string = ""
-    if aux_criterion is not None:
-        aux_string = f" | Average aux loss: {aux_test_loss:.4f}"
-    print(f"{set_name} set | Average loss: {test_loss:.4f}{aux_string} | Accuracy: {correct}/{total} ({test_acc:.2f}%)")
+    print(f"{set_name} set | Average loss: {test_loss:.4f} | Accuracy: {correct}/{total} ({test_acc:.2f}%)")
     
     pred_output_dict = None
     if log_predictions:
@@ -866,9 +791,6 @@ def test(model, device, criterion, test_loader, set_name="Test", log_predictions
         targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
         pred_output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
-        if aux_criterion is not None:
-            aux_loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(aux_loss_values, dim=0)), dim=0).detach().cpu()
-            pred_output_dict["aux_loss"] = aux_loss_values
     return output_dict, pred_output_dict
 
 
@@ -877,37 +799,24 @@ def test(model, device, criterion, test_loader, set_name="Test", log_predictions
 
 def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False):
     assert torch.is_tensor(data) and torch.is_tensor(target)
-    aux_criterion = None
-    if isinstance(criterion, list) or isinstance(criterion, tuple):
-        criterion, aux_criterion = criterion
     
     model.eval()
-    aux_test_loss = -1
     with torch.no_grad():
-        features, output = model(data)
+        output = model(data)
         loss_vals = criterion(output, target)
         test_loss = float(loss_vals.mean())
-        if aux_criterion is not None:
-            aux_loss_vals = aux_criterion(features, target)
-            aux_test_loss = float(aux_loss_vals.mean())
         
         pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
         correct = pred.eq(target.view_as(pred)).sum().item()
         total = len(data)
     
     test_acc = 100. * correct / total
-    output_dict = dict(loss=test_loss, aux_loss=aux_test_loss, acc=test_acc, correct=correct, total=total)
+    output_dict = dict(loss=test_loss, acc=test_acc, correct=correct, total=total)
     
     loss_vals = loss_vals.detach().cpu().numpy()
     output_dict["loss_mean"] = np.mean(loss_vals)
     output_dict["loss_var"] = np.var(loss_vals)
     output_dict["loss_std"] = np.std(loss_vals)
-    
-    if aux_criterion is not None:
-        aux_loss_vals = aux_loss_vals.detach().cpu().numpy()
-        output_dict["aux_loss_mean"] = np.mean(aux_loss_vals)
-        output_dict["aux_loss_var"] = np.var(aux_loss_vals)
-        output_dict["aux_loss_std"] = np.std(aux_loss_vals)
     
     pred_dict = None
     if log_predictions:
@@ -916,13 +825,9 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
         pred_dict["loss_vals"] = loss_vals
         pred_dict["preds"] = pred.detach().cpu().numpy()
         pred_dict["targets"] = target.detach().cpu().numpy()
-        if aux_criterion is not None:
-            pred_dict["aux_loss_vals"] = aux_loss_vals
     
     header = "Test set" if msg is None else msg
     print(f"{header} | Loss mean: {output_dict['loss_mean']:.4f} | Loss std: {output_dict['loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
-    if aux_criterion is not None:
-        print(f"{header} / Aux stats | Loss mean: {output_dict['aux_loss_mean']:.4f} | Loss std: {output_dict['aux_loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
     
     return output_dict, pred_dict
 
@@ -931,24 +836,12 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
 
 
 criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
-aux_criterion = None
-if loss_type == "ce_center":
-    aux_criterion = losses.CenterLoss(num_classes, feat_dim, reduction='none', sum_across_classes=True).to(device)
-elif loss_type == "ce_supcon":
-    aux_criterion = losses.SupConLoss(temperature=0.07, base_temperature=0.07, reduction='none').to(device)
-print("Auxillary criterion:", aux_criterion)
-comb_criterion = (criterion, aux_criterion)
 
 
 # In[ ]:
 
 
-model_params = list(model.parameters())
-if loss_type == "ce_center":
-    aux_params = list(aux_criterion.parameters())
-    print(f"Model params size: {len(model_params)} | Auxillary params size: {len(aux_params)}")
-    model_params = model_params + aux_params
-optimizer = torch.optim.SGD(model_params, lr=lr, momentum=momentum, weight_decay=wd)
+optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 scaler = torch.cuda.amp.GradScaler()
 
@@ -1098,30 +991,30 @@ if not os.path.exists(model_file):
         os.mkdir(conf_mat_dir)
     
     for epoch in range(num_epochs):
-        output_dict = train(model, device, new_idx_loader, optimizer, comb_criterion, scaler)
+        output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
         
         # Collect test set statistics
         print("Stats for epoch #", epoch+1)
         if log_predictions:
             # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
-            train_stats, train_preds = test(model, device, comb_criterion, new_idx_loader, set_name="Train", log_predictions=log_predictions)
+            train_stats, train_preds = test(model, device, criterion, new_idx_loader, set_name="Train", log_predictions=log_predictions)
         
-        test_stats, test_preds = test(model, device, comb_criterion, test_idx_loader, log_predictions=log_predictions)
+        test_stats, test_preds = test(model, device, criterion, test_idx_loader, log_predictions=log_predictions)
         
         # Collect probe statistics
-        backdoor_stats, backdoor_preds = test_tensor(model, device, comb_criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
-        val_backdoor_stats, val_backdoor_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
-        clean_stats, clean_preds = test_tensor(model, device, comb_criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
-        val_clean_stats, val_clean_preds = test_tensor(model, device, comb_criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
+        backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
+        val_backdoor_stats, val_backdoor_preds = test_tensor(model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
+        clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
+        val_clean_stats, val_clean_preds = test_tensor(model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
         
-        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"],
+        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"],
                                                                                msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"],
+        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"],
                                                                                    msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
-        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_reversed_single_pix"],
+        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"],
                                                                                                      val_probes["backdoor_reversed_single_pix_labels"],
                                                                                                      msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, comb_criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"],
+        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"],
                                                                            msg="Backdoor random (val)", log_predictions=log_predictions)
         
         if log_predictions:
@@ -1253,10 +1146,6 @@ for val_included in [True, False]:
             continue
         if not val_included and "_val" in k:
             continue
-        # if not plot_train_test_sets and ("train" in k or "test" in k):
-        #     continue
-        # line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
-        #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
         line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
                         alpha=alpha, label=label_map_dict[k])
         line[0].set_color(marker_colors[idx % len(marker_colors)])
