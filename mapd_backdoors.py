@@ -20,7 +20,7 @@ from collections import OrderedDict
 import random
 
 import torch
-from torchvision.datasets import MNIST, CIFAR10, CIFAR100, ImageFolder
+from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder
 from torchvision import transforms, models
 
 import numpy as np
@@ -61,14 +61,14 @@ font_size = 16
 # In[ ]:
 
 
+dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
+
 if len(sys.argv) != 2:
-    print(f"Usage: {sys.argv[0]} <Dataset: mnist/cifar10/cifar100/imagenet>")
+    print(f"Usage: {sys.argv[0]} <Dataset: {'/'.join(dataset_choices)}>")
     exit()
 
 dataset = sys.argv[1]
-loss_type = "ce"
-assert dataset in ["mnist", "cifar10", "cifar100", "imagenet"]
-assert loss_type in ["ce", "ce_supcon", "ce_center"]
+assert dataset in dataset_choices
 
 
 # In[ ]:
@@ -81,7 +81,8 @@ num_train_probes = 250
 num_val_probes = 250
 use_val_probes_for_training = True
 num_example_probes = num_train_probes + num_val_probes
-experiment_output_dir = f"./backdoor_exp04_{dataset}_{loss_type}_alpha_0.1"
+random_backdoor_alpha = 0.1
+experiment_output_dir = f"./backdoor_exp05_{dataset}_alpha_{random_backdoor_alpha}"
 num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
@@ -89,7 +90,6 @@ feat_dim = 2048  # Feature dimensions for ResNet-50
 dataset_name = dataset
 
 print("Dataset:", dataset)
-print("Loss function:", loss_type)
 print("Distributed training:", distributed)
 
 
@@ -182,6 +182,15 @@ def load_class_mapping(dataset):
         classes = ["tench", "english springer", "cassette player", "chain saw", "church", "french horn", "garbage truck",
                    "gas pump", "golf ball", "parachute"]
         label2name = {k: v for k, v in enumerate(classes)}
+    elif dataset == "gtsrb":
+        classes = ["Speed limit (20km/h)", "Speed limit (30km/h)", "Speed limit (50km/h)", "Speed limit (60km/h)", "Speed limit (70km/h)", "Speed limit (80km/h)",
+                   "End of speed limit (80km/h)", "Speed limit (100km/h)", "Speed limit (120km/h)", "No passing", "No passing veh over 3.5 tons",
+                   "Right-of-way at intersection", "Priority road", "Yield", "Stop", "No vehicles", "Veh > 3.5 tons prohibited", "No entry", "General caution",
+                   "Dangerous curve left", "Dangerous curve right", "Double curve", "Bumpy road", "Slippery road", "Road narrows on the right", "Road work",
+                   "Traffic signals", "Pedestrians", "Children crossing", "Bicycles crossing", "Beware of ice/snow", "Wild animals crossing",
+                   "End speed + passing limits", "Turn right ahead", "Turn left ahead", "Ahead only", "Go straight or right", "Go straight or left",
+                   "Keep right", "Keep left", "Roundabout mandatory", "End of no passing", "End no passing veh > 3.5 tons"]
+        label2name = {k: v for k, v in enumerate(classes)}
     elif dataset == "cifar10":
         classes = ["airplane", "automobile", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck"]
         label2name = {k: v for k, v in enumerate(classes)}
@@ -215,6 +224,7 @@ if "mnist" in dataset:
     
     data_dir = f"/mnt/sas/Datasets/{dataset}/"  # TODO: Configure dataset path
     train_set = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
+    train_set_wo_aug = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
     test_set = MNIST(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
 elif "cifar" in dataset:
     img_size = (32, 32, 3)
@@ -227,12 +237,12 @@ elif "cifar" in dataset:
     DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
     assert DatasetCls is not None
     
-    data_dir = f"/mnt/sas/Datasets/{dataset}/"  # TODO: Configure dataset path
+    data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
     train_set = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
     train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
     test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
 else:
-    assert dataset == "imagenet"
+    assert dataset == "imagenet" or dataset == "gtsrb"
     img_size = (224, 224, 3)
     
     use_augmentations = True
@@ -244,8 +254,6 @@ else:
         test_transform = [transforms.Resize(256),
                           transforms.CenterCrop(224),
                           transforms.ToTensor()]
-        no_transform = [transforms.Resize((224, 224)),
-                        transforms.ToTensor()]
     else:
         print("Training w/o augmentations...")
         train_transform = [transforms.Resize((224, 224)),
@@ -254,13 +262,21 @@ else:
                           transforms.ToTensor()]
     no_transform = test_transform
 
-    data_dir = "/ds/images/imagenet/"  # TODO: Configure dataset path
-    train_set = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(train_transform))
-    train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
-    test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=transforms.Compose(test_transform))
+    if dataset == "gtsrb":
+        data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
+        train_set = GTSRB(data_dir, download=True, split="train", transform=transforms.Compose(train_transform))
+        train_set_wo_aug = GTSRB(data_dir, download=True, split="train", transform=transforms.Compose(no_transform))
+        test_set = GTSRB(data_dir, download=True, split="test", transform=transforms.Compose(test_transform))
+    else:
+        assert dataset == "imagenet"
+        
+        data_dir = "/ds/images/imagenet/"  # TODO: Configure dataset path
+        train_set = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(train_transform))
+        train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
+        test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=transforms.Compose(test_transform))
     
-    # Replace train_set.classes with real names
-    train_set.original_classes = train_set.classes
+        # Replace train_set.classes with real names
+        train_set.original_classes = train_set.classes
     
     label2name, _ = load_class_mapping(dataset)
     label2name = {k: v.split(',')[0][:20] for k, v in label2name.items()}
@@ -320,7 +336,6 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_file=None, a
     fig.tight_layout()
     if output_file is not None:
         plt.savefig(os.path.join(experiment_output_dir, output_file), dpi=300, bbox_inches="tight")
-    plt.show()
     plt.close('all')
 
 
@@ -330,7 +345,7 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_file=None, a
 
 
 num_classes = len(train_set.classes)
-assert num_classes == 10 if dataset in ["mnist", "cifar10"] else num_classes == 100 if dataset == "cifar100" else num_classes == 1000
+assert num_classes == 10 if dataset in ["mnist", "cifar10"] else num_classes == 100 if dataset == "cifar100" else 43 if dataset == "gtsrb" else num_classes == 1000
 print(dataset, num_classes)
 
 
@@ -398,7 +413,7 @@ backdoor_transform = transforms.Compose([BackdoorPatch(), ClampRangeTransform()]
 
 backdoor_idx = np.random.choice(np.arange(len(train_set)), size=num_example_probes, replace=False)
 probes.update({"backdoor_idx": backdoor_idx[:num_example_probes]})
-probes["backdoor"] = torch.stack([backdoor_transform(train_set[i][0]) for i in probes["backdoor_idx"]], dim=0).to(device)
+probes["backdoor"] = torch.stack([backdoor_transform(train_set_wo_aug[i][0]) for i in probes["backdoor_idx"]], dim=0).to(device)
 probes["backdoor_labels"] = torch.from_numpy(np.array([fake_backdoor_label for i in probes["backdoor_idx"]])).to(device)
 print("Backdoor probe shape:", probes["backdoor"].shape)
 
@@ -406,7 +421,45 @@ print("Backdoor probe shape:", probes["backdoor"].shape)
 # In[ ]:
 
 
-attack_types = ["reversed", "single_pix", "reversed_single_pix", "random"]
+class WarpingAttack(object):
+    def __init__(self, img_size, s=0.5, k=4, grid_rescale=1.0):
+        self.img_size = img_size
+        self.s = s
+        self.k = k
+        self.grid_rescale = grid_rescale
+        self.identity_grid = self.create_identity_grid(img_size)
+        self.noise_grid = self.generate_noise_grid(k, s, img_size, img_size)
+
+    def create_identity_grid(self, img_size):
+        x = np.linspace(-1, 1, img_size)
+        y = np.linspace(-1, 1, img_size)
+        x_t, y_t = np.meshgrid(x, y)
+        identity_grid = np.stack((x_t, y_t), axis=2)
+        return identity_grid.astype(np.float32)
+
+    def generate_noise_grid(self, k, s, h, w):
+        P = np.random.uniform(-1, 1, (k, k, 2))
+        P /= np.mean(np.abs(P))
+        P *= s
+        M0 = cv2.resize(P, (h, w), interpolation=cv2.INTER_CUBIC)
+        M = np.clip(M0, -1, 1)
+        return M.astype(np.float32)
+
+    def apply_warping(self, x, grid):
+        x = torch.nn.functional.grid_sample(x.unsqueeze(0), grid.unsqueeze(0), align_corners=True)
+        return x.squeeze(0)
+
+    def __call__(self, x):
+        grid_temps = (self.identity_grid + self.s * self.noise_grid / self.img_size) * self.grid_rescale
+        grid_temps = torch.clamp(torch.tensor(grid_temps), -1, 1)
+        warped_x = self.apply_warping(x, grid_temps)
+        return warped_x
+
+
+# In[ ]:
+
+
+attack_types = ["reversed", "single_pix", "reversed_single_pix", "random", "warped"]
 remaining_indices = [i for i in range(len(train_set)) if i not in probes["backdoor_idx"]]
 new_indices = np.random.choice(remaining_indices, size=num_example_probes*len(attack_types), replace=False)
 probes.update({"novel_backdoor_idx": new_indices})
@@ -426,21 +479,23 @@ print(f"Random Pattern / Loaded shape: {random_pattern_img.shape} / Tensor shape
 
 for i, attack_type in enumerate(attack_types):
     if attack_type == "random":
-        backdoor = BackdoorPatch(pattern=random_pattern, alpha=0.1)
+        backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
     elif attack_type == "reversed":
         backdoor = BackdoorPatch(reverse_backdoor=True)
     elif attack_type == "single_pix":
         backdoor = BackdoorPatch(single_pixel_backdoor=True)
-    else:
-        assert attack_type == "reversed_single_pix"
+    elif attack_type == "reversed_single_pix":
         backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
+    else:
+        assert attack_type == "warped"
+        backdoor = WarpingAttack(img_size[0])
     backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
     
     fake_backdoor_label = np.random.choice(np.arange(num_classes))
     print(f"!! Random class picked for {attack_type.replace('_', ' ')} backdoor: {fake_backdoor_label}")
     
     current_idx = probes["novel_backdoor_idx"][i*num_example_probes:(i+1)*num_example_probes]
-    probes[f"backdoor_{attack_type}"] = torch.stack([backdoor_transform(train_set[i][0]) for i in current_idx], dim=0).to(device)
+    probes[f"backdoor_{attack_type}"] = torch.stack([backdoor_transform(train_set_wo_aug[i][0]) for i in current_idx], dim=0).to(device)
     probes[f"backdoor_{attack_type}_labels"] = torch.from_numpy(np.array([fake_backdoor_label for i in current_idx])).to(device)
     print(f"Backdoor ({attack_type}) probe shape:", probes["backdoor"].shape)
 
@@ -453,7 +508,7 @@ new_indices = np.random.choice(remaining_indices, size=num_example_probes, repla
 probes.update({"clean_idx": new_indices})
 
 probes["clean"] = torch.stack([train_set[i][0] for i in probes["clean_idx"]], dim=0).to(device)
-probes["clean_labels"] = torch.from_numpy(np.array([train_set[i][1] for i in probes["clean_idx"]])).to(device)
+probes["clean_labels"] = torch.from_numpy(np.array([train_set_wo_aug[i][1] for i in probes["clean_idx"]])).to(device)
 print("Clean probe shape:", probes["clean"].shape)
 
 
@@ -491,7 +546,7 @@ elif "cifar" in dataset:
     num_epochs = 150
     batch_size = 128
 else:
-    assert dataset == "imagenet"
+    assert dataset == "imagenet" or dataset == "gtsrb"
     num_epochs = 100
     optimizer_batch_size = 256
     batch_size = 256
@@ -890,8 +945,13 @@ class IdxDataset(torch.utils.data.Dataset):
 
 # Convert into a dataset which returns indices
 idx_dataset = IdxDataset(comb_train_set)
+
+# Update dataset transform for evaluation | idx dataset -> concate dataset -> actual training dataset
+idx_dataset_wo_aug = copy.deepcopy(idx_dataset)
+idx_dataset_wo_aug.dataset.datasets[0].transform = transforms.Compose(no_transform)
+
 new_idx_loader = get_loader(idx_dataset, comb_train_indices, batch_size=batch_size)
-train_idx_loader = get_loader(IdxDataset(train_set), train_indices, batch_size=batch_size)
+new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, comb_train_indices, batch_size=batch_size)
 test_idx_loader = get_loader(IdxDataset(test_set), batch_size=batch_size)
 
 
@@ -940,9 +1000,6 @@ def plot_probe_ex(x, y, probs, output_file=None):
 model_file = os.path.join(experiment_output_dir, f"models_{dataset}", f"model_{dataset}_dynamics.pth")
 data_file = os.path.join(experiment_output_dir, f"stats_{dataset}_dynamics.pkl")
 data_statistics_file = os.path.join(experiment_output_dir, f"stats_{dataset}_data_statistics.pkl")
-surface_dir = os.path.join(experiment_output_dir, f"./surfaced_examples_{dataset}/")
-surface_clustering_dir = os.path.join(experiment_output_dir, f"./surfaced_clustering_examples_{dataset}/")
-conf_mat_dir = os.path.join(experiment_output_dir, f"./confusion_matrix_{dataset}/")
 
 
 # In[ ]:
@@ -962,6 +1019,7 @@ label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
                   "backdoor_reversed_val": "Backdoor (reversed) [Val]",
                   "backdoor_single_pix_val": "Backdoor (single pixel) [Val]",
                   "backdoor_reversed_single_pix_val": "Backdoor (reversed single pixel) [Val]",
+                  "backdoor_warped": "Backdoor (warped)", "backdoor_warped_val": "Backdoor (warped) [Val]",
                   "clean": "Clean", "clean_val": "Clean [Val]", "train": "Train", "test": "Test"}
 
 
@@ -979,17 +1037,6 @@ if not os.path.exists(model_file):
     
     predictions = {}
     
-    if main_proc:
-        if os.path.exists(surface_dir):
-            shutil.rmtree(surface_dir)
-            print("Removed previous surfaced example output directory...")
-        os.mkdir(surface_dir)
-        
-        if os.path.exists(conf_mat_dir):
-            shutil.rmtree(conf_mat_dir)
-            print("Removed previous confusion matrix directory...")
-        os.mkdir(conf_mat_dir)
-    
     for epoch in range(num_epochs):
         output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
         
@@ -997,7 +1044,7 @@ if not os.path.exists(model_file):
         print("Stats for epoch #", epoch+1)
         if log_predictions:
             # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
-            train_stats, train_preds = test(model, device, criterion, new_idx_loader, set_name="Train", log_predictions=log_predictions)
+            train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, set_name="Train", log_predictions=log_predictions)
         
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, log_predictions=log_predictions)
         
@@ -1016,6 +1063,8 @@ if not os.path.exists(model_file):
                                                                                                      msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
         val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"],
                                                                            msg="Backdoor random (val)", log_predictions=log_predictions)
+        val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"],
+                                                                           msg="Backdoor warped (val)", log_predictions=log_predictions)
         
         if log_predictions:
             statistics["train"].append(train_stats)
@@ -1024,14 +1073,15 @@ if not os.path.exists(model_file):
             predictions[epoch] = {}  # Dict of dict
             predictions[epoch]["train"] = train_preds
             predictions[epoch]["test"] = test_preds
+            predictions[epoch]["clean"] = backdoor_preds
+            predictions[epoch]["clean_val"] = val_clean_preds
             predictions[epoch]["backdoor"] = backdoor_preds
             predictions[epoch]["backdoor_val"] = val_backdoor_preds
             predictions[epoch]["backdoor_reversed_val"] = val_backdoor_reversed_preds
             predictions[epoch]["backdoor_single_pix_val"] = val_backdoor_single_pix_preds
             predictions[epoch]["backdoor_reversed_single_pix_val"] = val_backdoor_reversed_single_pix_preds
             predictions[epoch]["backdoor_random_val"] = val_backdoor_random_preds
-            predictions[epoch]["clean"] = backdoor_preds
-            predictions[epoch]["clean_val"] = val_clean_preds
+            predictions[epoch]["backdoor_warped_val"] = val_backdoor_warped_preds
         
         statistics["test"].append(test_stats)
         statistics["clean"].append(clean_stats)
@@ -1042,6 +1092,7 @@ if not os.path.exists(model_file):
         statistics["backdoor_single_pix_val"].append(val_backdoor_single_pix_stats)
         statistics["backdoor_reversed_single_pix_val"].append(val_backdoor_reversed_single_pix_stats)
         statistics["backdoor_random_val"].append(val_backdoor_random_stats)
+        statistics["backdoor_warped_val"].append(val_backdoor_warped_stats)
         
         if lr_scheduler is not None:
             lr_scheduler.step()
@@ -1124,7 +1175,6 @@ for val_included in [True, False]:
     output_file = os.path.join(experiment_output_dir, f"probe_acc_{dataset}{'_val' if val_included else ''}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
-    plt.show()
 
 
 # In[ ]:
@@ -1163,7 +1213,6 @@ for val_included in [True, False]:
     output_file = os.path.join(experiment_output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
-    plt.show()
 
 
 # In[ ]:
@@ -1347,7 +1396,6 @@ for val_included in [True, False]:
         output_file = os.path.join(experiment_output_dir, f"{'first_learned' if iden == 1 else 'learning'}_dynamics_{dataset}{'_val' if val_included else ''}.png")
         if main_proc and output_file is not None:
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
-        plt.show()
         plt.close('all')
 
 
@@ -1435,7 +1483,6 @@ plt.tight_layout()
 output_file = os.path.join(experiment_output_dir, f"loss_dist_{dataset}.png")
 if main_proc and output_file is not None:
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
-plt.show()
 
 
 # In[ ]:
@@ -1501,7 +1548,6 @@ for epoch in range(0, len(sorted_losses_all), 5):
     output_file = os.path.join(loss_dynamics_output_dir, f"loss_dist_ep_{epoch}_{dataset}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
-    plt.show()
     plt.close('all')
 
 
@@ -1565,7 +1611,6 @@ for epoch in range(0, len(sorted_losses_all), 5):
     output_file = os.path.join(violin_loss_dynamics_output_dir, f"loss_dist_violin_ep_{epoch}_{dataset}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
-    plt.show()
     plt.close('all')
 
 
@@ -1898,6 +1943,13 @@ def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class
 
 surface_examples = False
 if surface_examples:
+    surface_dir = os.path.join(experiment_output_dir, f"surfaced_examples_{dataset_name}")
+    if main_proc:
+        if os.path.exists(surface_dir):
+            shutil.rmtree(surface_dir)
+        os.makedirs(surface_dir)
+    dist_utils.wait_for_other_procs()
+    
     train_set.transform = transforms.Compose(no_transform)
     if "cifar" in dataset_name or dataset_name == "mnist":
         classes_to_surface = list(range(num_classes))
