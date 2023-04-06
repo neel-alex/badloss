@@ -31,7 +31,9 @@ from catalyst.data import DistributedSamplerWrapper
 
 import dist_utils
 from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, combine_dataset
-from plot_utils import plot_probe_examples
+from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, \
+    some_other_plot, make_normalizers, yet_another_plot, one_more_plot
+from plot_utils import num_queue_plots
 from backdoors import make_probes
 from torch_utils import make_model, train, test, test_tensor
 
@@ -212,38 +214,6 @@ new_idx_loader, new_idx_loader_wo_aug, test_idx_loader = \
     make_index_dataset(comb_train_set, comb_train_indices, test_set,
                        no_transform, batch_size, distributed, num_workers)
 
-num_plots_per_row = 3
-plot_rows = 3
-num_queue_plots = num_plots_per_row * plot_rows
-
-
-def plot_probe_ex(x, y, probs, output_file=None):
-    plot_size = 3
-    fig, ax = plt.subplots(plot_rows, num_plots_per_row, figsize=(plot_size * num_plots_per_row, plot_size * plot_rows), sharex=True, sharey=True)
-
-    for idx in range(len(x)):
-        ax[idx // num_plots_per_row, idx % num_plots_per_row].imshow(x[idx])
-        # ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(y[idx])
-        if probs is not None:
-            ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(f"{y[idx]} (PD: {probs[idx]:.3f})")
-        else:
-            ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(f"{y[idx]}")
-
-        if idx == plot_rows * num_plots_per_row - 1:
-            break
-
-    for a in ax.ravel():
-        a.set_axis_off()
-
-        # Turn off tick labels
-        a.set_yticklabels([])
-        a.set_xticklabels([])
-
-    fig.tight_layout()
-    if output_file is not None:
-        fig.savefig(output_file, bbox_inches=0.0, pad_inches=0)
-    plt.close()
-
 
 model_file = os.path.join(experiment_output_dir, f"models_{dataset}", f"model_{dataset}_dynamics.pth")
 data_file = os.path.join(experiment_output_dir, f"stats_{dataset}_dynamics.pkl")
@@ -373,97 +343,11 @@ else:
         statistics = pickle.load(f)
 
 
-# In[ ]:
-
-
 print("Final test accuracy:", statistics["test"][-1])
 
 
-# In[ ]:
-
-
-line_styles = ['solid', 'dashed', 'dashdot', 'dotted']
-marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
-marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
-
-plot_train_test_sets = False
-linewidth = 5.0
-alpha = 0.7
-
-for val_included in [True, False]:
-    fig, ax = plt.subplots()
-    fig.set_size_inches(8, 6)
-    
-    x_vals = list(range(1, len(statistics["test"])+1))
-    for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
-        if k == "predictions":
-            continue
-        if not log_predictions and k == "train":
-            continue
-        if not val_included and "_val" in k:
-            continue
-        if not plot_train_test_sets and ("train" in k or "test" in k):
-            continue
-        # line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
-        #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-        line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
-                        alpha=alpha, label=label_map_dict[k])
-        line[0].set_color(marker_colors[idx % len(marker_colors)])
-        line[0].set_linestyle(line_styles[idx % len(line_styles)])
-
-    plt.legend(prop={'size': font_size})
-    plt.xlabel("Epochs", fontsize=font_size)
-    plt.ylabel("Accuracy (%)", fontsize=font_size)
-    plt.xticks(fontsize=font_size)
-    plt.yticks(fontsize=font_size)
-
-    if include_plot_title:
-        plt.title(f"Training accuracy dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
-    plt.tight_layout()
-    output_file = os.path.join(experiment_output_dir, f"probe_acc_{dataset}{'_val' if val_included else ''}.png")
-    if main_proc and output_file is not None:
-        plt.savefig(output_file, dpi=300, bbox_inches="tight")
-
-
-# In[ ]:
-
-
-line_styles = ['solid', 'dashed', 'dashdot', 'dotted']
-marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
-marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
-
-for val_included in [True, False]:
-    fig, ax = plt.subplots()
-    fig.set_size_inches(8, 6)
-    
-    x_vals = list(range(1, len(statistics["test"])+1))
-    for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
-        if k == "predictions":
-            continue
-        if not log_predictions and k == "train":
-            continue
-        if not val_included and "_val" in k:
-            continue
-        line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
-                        alpha=alpha, label=label_map_dict[k])
-        line[0].set_color(marker_colors[idx % len(marker_colors)])
-        line[0].set_linestyle(line_styles[idx % len(line_styles)])
-
-    plt.legend(prop={'size': font_size})
-    plt.xlabel("Epochs", fontsize=font_size)
-    plt.ylabel("Loss", fontsize=font_size)
-    plt.xticks(fontsize=font_size)
-    plt.yticks(fontsize=font_size)
-
-    if include_plot_title:
-        plt.title(f"Training loss dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
-    plt.tight_layout()
-    output_file = os.path.join(experiment_output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}.png")
-    if main_proc and output_file is not None:
-        plt.savefig(output_file, dpi=300, bbox_inches="tight")
-
-
-# In[ ]:
+some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
+some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
 
 
 if not log_predictions:
@@ -472,9 +356,6 @@ if not log_predictions:
 
 
 # ### Learning dynamics per example
-
-
-# In[ ]:
 
 
 unique_probe_identity = np.unique(dataset_probe_identity)
@@ -537,9 +418,9 @@ if not os.path.exists(data_statistics_file):
 
 
     stats = {k: 0 for k in unique_probe_identity}
-    epoch_cummulative_scores = {k: [] for k in unique_probe_identity}
+    epoch_cumulative_scores = {k: [] for k in unique_probe_identity}
 
-    print("Computing cummulative statistics...")
+    print("Computing cumulative statistics...")
     for epoch in tqdm(range(num_epochs)):
         examples_learned_at_epoch = epoch_learned == epoch
         learned_ex_idx = np.nonzero(examples_learned_at_epoch)[0]
@@ -547,10 +428,10 @@ if not os.path.exists(data_statistics_file):
             k = dataset_probe_identity[i]
             stats[k] += 1
         for k in unique_probe_identity:
-            epoch_cummulative_scores[k].append(stats[k])
+            epoch_cumulative_scores[k].append(stats[k])
 
     print("Statistics:", stats)
-    print("Cummulative stats:", epoch_cummulative_scores)
+    print("Cumulative stats:", epoch_cumulative_scores)
     total_examples_learned = 0
     for k in stats:
         total_examples_learned += stats[k]
@@ -558,12 +439,9 @@ if not os.path.exists(data_statistics_file):
     assert total_examples_learned == (len(epoch_learned) - int(np.sum(epoch_learned == -1)))
 
 
-    # In[ ]:
-
-
     # First learned stats
     stats_first_learned = {k: 0 for k in unique_probe_identity}
-    epoch_cummulative_scores_first_learned = {k: [] for k in unique_probe_identity}
+    epoch_cumulative_scores_first_learned = {k: [] for k in unique_probe_identity}
 
     print("Computing first-learned statistics...")
     for epoch in range(num_epochs):
@@ -573,10 +451,10 @@ if not os.path.exists(data_statistics_file):
             k = dataset_probe_identity[i]
             stats_first_learned[k] += 1
         for k in unique_probe_identity:
-            epoch_cummulative_scores_first_learned[k].append(stats_first_learned[k])
+            epoch_cumulative_scores_first_learned[k].append(stats_first_learned[k])
 
     print("Statistics:", stats_first_learned)
-    print("Cummulative stats:", epoch_cummulative_scores_first_learned)
+    print("Cumulative stats:", epoch_cumulative_scores_first_learned)
     total_examples_learned = 0
     for k in stats:
         total_examples_learned += stats_first_learned[k]
@@ -586,7 +464,7 @@ if not os.path.exists(data_statistics_file):
     if main_proc:
         # Save the final statistics
         with open(data_statistics_file, "wb") as f:
-            final_statistics = [sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cummulative_scores, stats_first_learned, epoch_cummulative_scores_first_learned]
+            final_statistics = [sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cumulative_scores, stats_first_learned, epoch_cumulative_scores_first_learned]
             pickle.dump(final_statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
 else:
     assert os.path.exists(data_statistics_file)
@@ -594,58 +472,12 @@ else:
     
     with open(data_statistics_file, "rb") as f:
         final_statistics = pickle.load(f)
-        sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cummulative_scores, stats_first_learned, epoch_cummulative_scores_first_learned = final_statistics
+        sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cumulative_scores, stats_first_learned, epoch_cumulative_scores_first_learned = final_statistics
 
 
-# In[ ]:
-
-
-# Normalization should only happen for num_train_probes (val probes are separate)
-normalizers = {k: (num_train_probes if k != "train" else (len(train_set) - len(discarded_idx))) for k in unique_probe_identity}
-print("Normalizers:", normalizers)
-
-
-# In[ ]:
-
-
-for val_included in [True, False]:
-    for iden, epoch_scores in enumerate([epoch_cummulative_scores, epoch_cummulative_scores_first_learned]):
-        fig, ax = plt.subplots()
-        fig.set_size_inches(8, 6)
-
-        for idx, k in enumerate(natsort.natsorted(list(epoch_scores.keys()))):
-            if not val_included and "_val" in k:
-                continue
-            if not plot_train_test_sets and ("train" in k or "test" in k):
-                continue
-            
-            y = epoch_scores[k]
-            x = np.arange(len(y))
-            y_norm = [(float(i) / normalizers[k]) * 100. for i in y]
-            # line = plt.plot(x, y_norm, linewidth=2., marker=marker_list[idx % len(marker_list)],
-            #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-            line = plt.plot(x_vals, y_norm, linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
-                            alpha=alpha, label=label_map_dict[k])
-            line[0].set_color(marker_colors[idx % len(marker_colors)])
-            line[0].set_linestyle(line_styles[idx % len(line_styles)])
-
-        plt.xlabel("Number of epochs", fontsize=font_size)
-        # plt.ylabel(f"Fraction of examples learned{'at any point during training' if iden == 1 else ''} (%)", fontsize=font_size)
-        plt.ylabel(f"Fraction of examples learned (%)", fontsize=font_size)
-        if include_plot_title:
-            plt.title(f"Learning dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
-        plt.legend(prop={'size': font_size})
-        plt.ylim(0., 100.)
-        
-        plt.xticks(fontsize=font_size)
-        plt.yticks(fontsize=font_size)
-
-        plt.tight_layout()
-        output_file = os.path.join(experiment_output_dir, f"{'first_learned' if iden == 1 else 'learning'}_dynamics_{dataset}{'_val' if val_included else ''}.png")
-        if main_proc and output_file is not None:
-            plt.savefig(output_file, dpi=300, bbox_inches="tight")
-        plt.close('all')
-
+normalizers = make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_identity)
+yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
+                 label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
 
 # ### Loss distribution plots
 
@@ -675,66 +507,12 @@ for i in range(len(ex_idx)):  # Iterate over the epochs
     sorted_losses_all.append(current_sorted_loss_vals)
 
 
-# In[ ]:
-
-
 class_names = list(np.unique(dataset_probe_identity))
 print(class_names)
 
 
-# In[ ]:
-
-
-fig, ax = plt.subplots(1, 1, figsize=(50, 10))
-labels = list(range(1, len(sorted_losses_all)+1))
-color_list = ['tab:red', 'tab:blue', 'tab:green', 'tab:purple', 'tab:brown', 'tab:pink', 'tab:cyan', 'tab:olive', 'tab:gray']
-plot_points = False
-
-handles = []
-legend_label = []
-for i, cls in enumerate(class_names):
-    if cls in ["train", "train_noisy"]:
-        continue
-    print("Class:", cls)
-    color = color_list[i % len(color_list)]
-    patch = mpatches.Patch(color=color)
-    handles.append(patch)
-    # legend_label.append(cls.replace("_", " ").title())
-    legend_label.append(label_map_dict[cls])
-    
-    data = []
-    for epoch in range(len(sorted_losses_all)):
-        current_losses = [float(sorted_losses_all[epoch][i]) for i in range(len(sorted_losses_all[epoch])) if str(dataset_probe_identity[i]) == cls and sorted_losses_all[epoch][i] is not None]
-        data.append(current_losses)
-    
-    # parts = ax.boxplot(data, notch=True, patch_artist=True, showfliers=False)
-    parts = ax.boxplot(data, notch=True, patch_artist=True, showfliers=False,
-                       boxprops=dict(facecolor=color, color=color, alpha=0.3),
-                       capprops=dict(color=color),
-                       whiskerprops=dict(color=color),
-                       flierprops=dict(color=color, markeredgecolor=color),
-                       medianprops=dict(color=color))
-    
-    if plot_points:
-        raise NotImplementedError
-        # Plot the points
-        num_points = 50
-        for i in range(len(related_items)):
-            ax.scatter([i+1 for _ in range(num_points)], np.random.choice(data[(related_items[i]*2)+(0 if diagonal else 1)], num_points), alpha=0.1, color=color)
-
-ax.legend(handles, legend_label, prop={'size': font_size})
-plt.ylabel("Loss values", fontsize=font_size)
-plt.xlabel("Epochs", fontsize=font_size)
-# plt.ylim(0, 6)
-
-plt.tight_layout()
-output_file = os.path.join(experiment_output_dir, f"loss_dist_{dataset}.png")
-if main_proc and output_file is not None:
-    plt.savefig(output_file, dpi=300, bbox_inches="tight")
-
-
-# In[ ]:
-
+one_more_plot(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
+                  dataset, main_proc, experiment_output_dir)
 
 loss_dynamics_output_dir = os.path.join(experiment_output_dir, "loss_distribution")
 violin_loss_dynamics_output_dir = os.path.join(experiment_output_dir, "loss_distribution_violin")
@@ -743,8 +521,6 @@ if main_proc and not os.path.exists(loss_dynamics_output_dir):
 if main_proc and not os.path.exists(violin_loss_dynamics_output_dir):
     os.mkdir(violin_loss_dynamics_output_dir)
 
-
-# In[ ]:
 
 
 for epoch in range(0, len(sorted_losses_all), 5):
