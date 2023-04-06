@@ -1,6 +1,8 @@
 import os
 import urllib
 
+import numpy as np
+import torch
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder
 
@@ -115,3 +117,4 @@ def get_settings_for_dataset(dataset):
         label2name = {k: v.split(',')[0][:20] for k, v in label2name.items()}
         train_set.classes = label2name  # Dict mapping from label to class name
     return img_size, train_transform, test_transform, no_transform, data_dir, train_set, train_set_wo_aug, test_set
+

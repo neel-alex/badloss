@@ -43,3 +43,24 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, ou
     if output_file is not None:
         plt.savefig(os.path.join(output_dir, output_file), dpi=300, bbox_inches="tight")
     plt.close('all')
+
+
+def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_dir):
+    print("Backdoor examples")
+    plot(probes["backdoor"], probes["backdoor_labels"], None, class_names=train_set.classes,
+         output_file=f"backdoor_{dataset}_{rank}.png", output_dir=output_dir)
+
+    # In[ ]:
+
+    # Plot updated backdoors
+    print("Updated backdoor examples")
+    for attack_type in attack_types:
+        plot(probes[f"backdoor_{attack_type}"], probes[f"backdoor_{attack_type}_labels"], None,
+             class_names=train_set.classes, output_file=f"backdoor_{dataset}_{attack_type}_{rank}.png",
+             output_dir=output_dir)
+
+    # In[ ]:
+
+    print("Clean examples")
+    plot(probes["clean"], probes["clean_labels"], None, class_names=train_set.classes,
+         output_file=f"clean_{dataset}_{rank}.png", output_dir=output_dir)
