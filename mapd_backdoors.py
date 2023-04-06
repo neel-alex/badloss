@@ -17,12 +17,11 @@ import sys
 import warnings
 import random
 from tqdm import tqdm
-from collections import OrderedDict
 
 import numpy as np
 import cv2
 import torch
-from torchvision import transforms, models
+from torchvision import transforms
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import sklearn.neighbors
@@ -31,12 +30,11 @@ from catalyst.data import DistributedSamplerWrapper
 
 
 import dist_utils
-from dataset_utils import get_settings_for_dataset
-from plot_utils import plot, plot_probe_examples
-from backdoors import BackdoorPatch, ClampRangeTransform, WarpingAttack, make_probes
+from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, combine_dataset
+from plot_utils import plot_probe_examples
+from backdoors import make_probes
+from torch_utils import make_model, train, test, test_tensor
 
-
-# In[ ]:
 
 # Set random seed
 seed = 3
@@ -45,16 +43,9 @@ torch.cuda.manual_seed(seed)
 np.random.seed(seed=seed)
 random.seed(seed)
 
-
-# In[ ]:
-
-
 # Plotting config
 include_plot_title = False
 font_size = 16
-
-
-# In[ ]:
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
@@ -65,9 +56,6 @@ if len(sys.argv) != 2:
 
 dataset = sys.argv[1]
 assert dataset in dataset_choices
-
-
-# In[ ]:
 
 
 # Essential config
@@ -83,13 +71,9 @@ num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
 feat_dim = 2048  # Feature dimensions for ResNet-50
-dataset_name = dataset
 
 print("Dataset:", dataset)
 print("Distributed training:", distributed)
-
-
-# In[ ]:
 
 
 # Initialize the distributed environment
@@ -117,9 +101,6 @@ main_proc = dist_utils.is_main_proc(local_rank, shared_fs=True)
 print("Is main proc?", main_proc)
 
 
-# In[ ]:
-
-
 def setup_for_distributed(is_master):
     """
     This function disables printing when not in master process
@@ -135,14 +116,8 @@ def setup_for_distributed(is_master):
     __builtin__.print = print
 
 
-# In[ ]:
-
-
 setup_for_distributed(main_proc)
 warnings.filterwarnings("ignore", "Warning: Leaking Caffe2 thread-pool after fork. (function pthreadpool)", UserWarning)
-
-
-# In[ ]:
 
 
 recompute_results = False
@@ -156,14 +131,10 @@ if main_proc:
             os.makedirs(experiment_output_dir)
 
 
-# In[ ]:
-
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Current device:", device)
 
-
-# In[ ]:
 
 # Shunting off this logic to another file -- TODO select file location arg?
 (img_size, train_transform, test_transform, no_transform,
@@ -172,27 +143,7 @@ print("Current device:", device)
 
 print(dataset, len(train_set), len(test_set))
 
-
-# In[ ]:
-
-
-def get_loader(dataset, indices=None, batch_size=16, shuffle=False):
-    sampler = None
-    if indices is not None:
-        sampler = torch.utils.data.SubsetRandomSampler(indices)
-    if distributed:
-        if sampler is not None:
-            print("Using distributed sampler on top of previous sampler...")
-            sampler = DistributedSamplerWrapper(sampler)
-        else:
-            sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, pin_memory=True)
-    return loader
-
-
 # ## Setup probes
-
-# In[ ]:
 
 num_classes = len(train_set.classes)
 if dataset in ["mnist", "cifar10"]:
@@ -206,14 +157,12 @@ else:
 print(dataset, num_classes)
 
 
-# In[ ]:
 attack_types = ["reversed", "single_pix", "reversed_single_pix", "random", "warped"]
 probes = make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
                      random_backdoor_alpha, experiment_output_dir, main_proc, img_size, device)
 
 
 plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
-# In[ ]:
 
 
 # Hyperparameters
@@ -237,412 +186,35 @@ momentum = 0.9
 wd = 0.0001
 
 
-# In[ ]:
+(probe_dataset_standard, val_probe_dataset_standard, val_probes,
+ train_indices, probe_identity, val_probe_identity, discarded_idx) = \
+    make_probe_dataset(probes, train_set, test_set, dataset, batch_size, num_example_probes, num_train_probes,
+                       num_val_probes, attack_types, distributed, num_workers, experiment_output_dir, device)
 
 
-discarded_idx = list(probes["backdoor_idx"]) + list(probes["novel_backdoor_idx"]) + list(probes["clean_idx"])
-train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
-print("Discarded examples:", len(train_set) - len(train_indices))
-assert len(train_set) - len(train_indices) == len(discarded_idx)
-train_loader = get_loader(train_set, train_indices, batch_size=batch_size)
-test_loader = get_loader(test_set, batch_size=batch_size)
-
-
-# In[ ]:
-
-
-class CustomTensorDataset(torch.utils.data.Dataset):
-    def __init__(self, x: torch.Tensor, y: list) -> None:
-        self.x = x
-        self.y = y
-
-    def __getitem__(self, index):
-        return self.x[index], self.y[index]
-
-    def __len__(self):
-        return self.x.size(0)
-
-
-# In[ ]:
-
-
-probes_to_be_used = ["backdoor", "clean"]
-print("Selected probes to be used:", probes_to_be_used)
-val_idx = np.random.choice(range(num_example_probes), size=num_val_probes, replace=False)
-
-# Filter the train indexes
-val_probes = {}
-probe_identity = []
-val_probe_identity = []
-for primary_k in probes_to_be_used:
-    for suffix in ["", "_labels"]:
-        k = f"{primary_k}{suffix}"
-        print("Current key:", k)
-        assert len(probes[k]) == num_example_probes
-        shape_len = len(probes[k].shape)
-        
-        val_probes[k] = torch.cat([probes[k][i:i+1] for i in range(len(probes[k])) if i in val_idx], dim=0)  # Transfer val indices from train
-        probes[k] = torch.cat([probes[k][i:i+1] for i in range(len(probes[k])) if i not in val_idx], dim=0)  # Discard val index from train
-        
-        assert len(val_probes[k].shape) == shape_len
-        assert len(probes[k].shape) == shape_len
-
-        assert len(val_probes[k]) == num_val_probes
-        assert len(probes[k]) == num_train_probes
-    
-    probe_identity += [primary_k for _ in range(len(probes[primary_k]))]
-    val_probe_identity += [f"{primary_k}_val" for _ in range(len(val_probes[primary_k]))]
-
-# Add additional probes here
-probes_to_be_used_val = [x for x in probes_to_be_used]  # Deep copy
-for attack_type in attack_types:
-    key = f"backdoor_{attack_type}"
-    val_probes[key] = probes[key]
-    val_probes[f"{key}_labels"] = probes[f"{key}_labels"]
-    val_probe_identity += [f"{key}_val" for _ in range(len(val_probes[key]))]
-    probes_to_be_used_val += [key]
-
-probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
-probe_labels = torch.cat([probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
-assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
-
-# Shuffle
-perm = np.random.choice(range(len(probe_images)), size=len(probe_images), replace=False)
-probe_images = torch.stack([probe_images[i] for i in perm], dim=0).to(device)
-probe_labels = torch.stack([probe_labels[i] for i in perm], dim=0).to(device)
-probe_identity = [probe_identity[i] for i in perm]
-print(f"Probe | Images: {probe_images.shape} | Labels: {probe_labels.shape}")
-
-probe_dataset = torch.utils.data.TensorDataset(probe_images, probe_labels)
-probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"), [int(x) for x in probe_labels.to("cpu").numpy().tolist()])
-print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape, probe_dataset_standard[0][1])
-
-# Create the validation set for probes
-val_probe_images = torch.cat([val_probes[k] for k in probes_to_be_used_val], dim=0)
-val_probe_labels = torch.cat([val_probes[f"{k}_labels"] for k in probes_to_be_used_val], dim=0)
-val_probe_dataset_standard = CustomTensorDataset(val_probe_images.to("cpu"), [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()])
-print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape, val_probe_dataset_standard[0][1])
-
-
-# In[ ]:
-
-
-class ProbeDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, probe_identity, remove_val_in_name=True):
-        self.dataset = dataset
-        if remove_val_in_name:
-            probe_identity = [x.replace("_val", "") for x in probe_identity]
-            print("Validation tag in probe identity removed for probe dataset...")
-        self.probe_identity = probe_identity
-        self.class_names = natsort.natsorted(np.unique(probe_identity))
-        self.iden2label = {iden: i for i, iden in enumerate(self.class_names)}
-        print("Probe to idx map:", self.iden2label)
-    
-    def get_probe_map(self):
-        return self.iden2label
-    
-    def get_class_names(self):
-        return self.class_names
-    
-    def __getitem__(self, idx):
-        return self.dataset[idx], self.iden2label[self.probe_identity[idx]]
-
-
-# In[ ]:
-
-
-# Setup the probe validation set
-val_probe_dataset = ProbeDataset(val_probe_dataset_standard, val_probe_identity)
-val_probe_indices = [i for i in range(len(val_probe_dataset_standard))]
-val_probe_loader = get_loader(val_probe_dataset, val_probe_indices, batch_size=batch_size)
-
-
-# In[ ]:
-
-
-print("Curated probe dataset")
-plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0),
-     class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png", output_dir=experiment_output_dir)
-
-
-# In[ ]:
-
-
-if dataset_name == "mnist":
-    # Create BadNet architecture (https://arxiv.org/abs/1708.06733)
-    model = torch.nn.Sequential(OrderedDict([
-        ('conv1', torch.nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5, stride=1, padding=0)),
-        ('act1', torch.nn.ReLU(inplace=True)),
-        ('pool1', torch.nn.AvgPool2d(kernel_size=2, stride=2, padding=0)),
-        ('conv2', torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5, stride=1, padding=0)),
-        ('act2', torch.nn.ReLU(inplace=True)),
-        ('pool2', torch.nn.AvgPool2d(kernel_size=2, stride=2, padding=0)),
-        ('flatten', torch.nn.Flatten()),
-        ('fc1', torch.nn.Linear(in_features=32*4*4, out_features=512)),
-        ('fc1_act', torch.nn.ReLU(inplace=True)),
-        ('fc', torch.nn.Linear(in_features=512, out_features=10)),
-    ]))
-    model = model.to(device)
-else:
-    # Create ResNet-50
-    model = models.resnet50(pretrained=False)
-    if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
-        model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
-    model = model.to(device)
+model = make_model(dataset, num_classes, device)
 print(model)
-
-
-# In[ ]:
-
 
 # Convert to a distributed model
 model = dist_utils.convert_to_distributed(model, local_rank, sync_bn=True)
 
-
-# In[ ]:
-
-
-def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, log_predictions=False, use_autocast=False):
-    model.train()
-    optimizer.zero_grad()
-    
-    example_idx = []
-    predictions = []
-    targets = []
-    loss_values = []
-    
-    pbar = tqdm(train_loader)
-    for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-        
-        with torch.cuda.amp.autocast(enabled=use_autocast):
-            output = model(data)
-            loss = criterion(output, target)
-        
-        loss_values.append(loss.detach().clone())
-        
-        assert loss.shape == (len(data),)
-        loss = loss.mean()  # Reduction has been disabled -- do explicit reduction
-        
-        if use_autocast:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
-        
-        if log_predictions:
-            predictions.append(output.argmax(dim=1).detach())
-            example_idx.append(ex_idx.clone())
-            targets.append(target.clone())
-        
-        if batch_idx % log_interval == 0:
-            pbar.set_description(f"Loss: {float(loss):.4f}")
-        torch.cuda.synchronize()
-    pbar.close()
-    
-    output_dict = None
-    if log_predictions:
-        # Collect the statistics from all the GPUs
-        example_idx = torch.cat(dist_utils.gather_tensor(torch.cat(example_idx, dim=0)), dim=0).detach().cpu().numpy()
-        predictions = torch.cat(dist_utils.gather_tensor(torch.cat(predictions, dim=0)), dim=0).detach().cpu().numpy()
-        targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
-        loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
-        output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
-
-    return output_dict
-
-
-# In[ ]:
-
-
-def test(model, device, criterion, test_loader, set_name="Test", log_predictions=False):
-    model.eval()
-    
-    correct = torch.tensor([0]).to(device)
-    test_loss = torch.tensor([0.0]).to(device)
-    total = torch.tensor([0]).to(device)
-    test_acc = 0.
-    
-    example_idx = []
-    predictions = []
-    targets = []
-    loss_values = []
-    
-    for (data, target), ex_idx in test_loader:
-        with torch.no_grad():
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            loss_vals = criterion(output, target)
-            
-            test_loss += float(loss_vals.sum())
-            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-            correct += pred.eq(target.view_as(pred)).sum().item()
-            total += len(data)
-            
-            if log_predictions:
-                loss_values.append(loss_vals.detach().clone())
-                predictions.append(output.argmax(dim=1).detach())
-                example_idx.append(ex_idx.clone())
-                targets.append(target.clone())
-    
-    # Reduce all of the values in case of distributed processing
-    torch.cuda.synchronize()
-    correct = int(dist_utils.reduce_tensor(correct.data))
-    test_loss = float(dist_utils.reduce_tensor(test_loss.data))
-    total = int(dist_utils.reduce_tensor(total.data))
-    
-    if isinstance(test_loader.sampler, torch.utils.data.distributed.DistributedSampler):
-        num_dataset_ex = len(test_loader.sampler.dataset)
-    elif isinstance(test_loader.sampler, DistributedSamplerWrapper):
-        num_dataset_ex = len(test_loader.sampler.sampler.dataset)
-    elif isinstance(test_loader.sampler, torch.utils.data.SubsetRandomSampler):
-        num_dataset_ex = len(test_loader.sampler)
-    else:
-        # assert test_loader.sampler is None, test_loader.sampler
-        num_dataset_ex = len(test_loader.dataset)
-    
-    if not distributed:
-        assert total == num_dataset_ex, f"{total} != {num_dataset_ex}"
-    if total != num_dataset_ex:
-        print(f"!! Warning -- aggregated total value ({total}) is not equal to the dataset size: {num_dataset_ex}...")
-    if total > 0:
-        test_loss /= total
-        test_acc = 100. * correct / total
-    output_dict = dict(loss=test_loss, acc=test_acc, correct=correct, total=total)
-    if distributed:
-        set_name = f"Rank: {rank} | {set_name}"
-    print(f"{set_name} set | Average loss: {test_loss:.4f} | Accuracy: {correct}/{total} ({test_acc:.2f}%)")
-    
-    pred_output_dict = None
-    if log_predictions:
-        # Collect the statistics from all the GPUs
-        example_idx = torch.cat(dist_utils.gather_tensor(torch.cat(example_idx, dim=0)), dim=0).detach().cpu().numpy()
-        predictions = torch.cat(dist_utils.gather_tensor(torch.cat(predictions, dim=0)), dim=0).detach().cpu().numpy()
-        targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
-        loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
-        pred_output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
-    return output_dict, pred_output_dict
-
-
-# In[ ]:
-
-
-def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False):
-    assert torch.is_tensor(data) and torch.is_tensor(target)
-    
-    model.eval()
-    with torch.no_grad():
-        output = model(data)
-        loss_vals = criterion(output, target)
-        test_loss = float(loss_vals.mean())
-        
-        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-        correct = pred.eq(target.view_as(pred)).sum().item()
-        total = len(data)
-    
-    test_acc = 100. * correct / total
-    output_dict = dict(loss=test_loss, acc=test_acc, correct=correct, total=total)
-    
-    loss_vals = loss_vals.detach().cpu().numpy()
-    output_dict["loss_mean"] = np.mean(loss_vals)
-    output_dict["loss_var"] = np.var(loss_vals)
-    output_dict["loss_std"] = np.std(loss_vals)
-    
-    pred_dict = None
-    if log_predictions:
-        pred_dict = {}
-        pred_dict["ex_idx"] = np.arange(len(loss_vals))
-        pred_dict["loss_vals"] = loss_vals
-        pred_dict["preds"] = pred.detach().cpu().numpy()
-        pred_dict["targets"] = target.detach().cpu().numpy()
-    
-    header = "Test set" if msg is None else msg
-    print(f"{header} | Loss mean: {output_dict['loss_mean']:.4f} | Loss std: {output_dict['loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
-    
-    return output_dict, pred_dict
-
-
-# In[ ]:
-
-
 criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
-
-
-# In[ ]:
-
-
 optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 scaler = torch.cuda.amp.GradScaler()
 
 
-# In[ ]:
+comb_train_set, comb_train_indices, dataset_probe_identity = \
+    combine_dataset(train_set, train_indices, probe_dataset_standard, val_probe_dataset_standard,
+                    probe_identity, val_probe_identity, use_val_probes_for_training)
 
-
-# Combine the two datasets (probe dataset and normal dataset)
-if use_val_probes_for_training:
-    print("!! Including validation probes in the training process...")
-    comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard, val_probe_dataset_standard])
-    comb_train_indices = train_indices + [(len(train_set) + x) for x in range(len(probe_dataset_standard)+len(val_probe_dataset_standard))]
-else:
-    comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard])
-    comb_train_indices = train_indices + [(len(train_set) + x) for x in range(len(probe_dataset_standard))]
-print("Indices in combined dataset:", len(comb_train_indices))
-assert len(np.unique(comb_train_indices)) == len(comb_train_indices)
-print("Size of combined dataset:", len(comb_train_set))
-
-
-# In[ ]:
-
-
-dataset_probe_identity = ["train" for i in range(len(train_set))] + probe_identity
-if use_val_probes_for_training:
-    dataset_probe_identity += val_probe_identity
-assert len(dataset_probe_identity) == len(comb_train_set), f"{len(dataset_probe_identity)} != {len(comb_train_set)}"
-
-
-# In[ ]:
-
-
-class IdxDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset):
-        self.dataset = dataset
-    
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        return self.dataset[idx], idx
-
-
-# In[ ]:
-
-
-# Convert into a dataset which returns indices
-idx_dataset = IdxDataset(comb_train_set)
-
-# Update dataset transform for evaluation | idx dataset -> concate dataset -> actual training dataset
-idx_dataset_wo_aug = copy.deepcopy(idx_dataset)
-idx_dataset_wo_aug.dataset.datasets[0].transform = transforms.Compose(no_transform)
-
-new_idx_loader = get_loader(idx_dataset, comb_train_indices, batch_size=batch_size)
-new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, comb_train_indices, batch_size=batch_size)
-test_idx_loader = get_loader(IdxDataset(test_set), batch_size=batch_size)
-
-
-# In[ ]:
-
+new_idx_loader, new_idx_loader_wo_aug, test_idx_loader = \
+    make_index_dataset(comb_train_set, comb_train_indices, test_set,
+                       no_transform, batch_size, distributed, num_workers)
 
 num_plots_per_row = 3
 plot_rows = 3
 num_queue_plots = num_plots_per_row * plot_rows
-
-
-# In[ ]:
 
 
 def plot_probe_ex(x, y, probs, output_file=None):
@@ -671,9 +243,6 @@ def plot_probe_ex(x, y, probs, output_file=None):
     if output_file is not None:
         fig.savefig(output_file, bbox_inches=0.0, pad_inches=0)
     plt.close()
-
-
-# In[ ]:
 
 
 model_file = os.path.join(experiment_output_dir, f"models_{dataset}", f"model_{dataset}_dynamics.pth")
@@ -723,9 +292,9 @@ if not os.path.exists(model_file):
         print("Stats for epoch #", epoch+1)
         if log_predictions:
             # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
-            train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, set_name="Train", log_predictions=log_predictions)
+            train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank, set_name="Train", log_predictions=log_predictions)
         
-        test_stats, test_preds = test(model, device, criterion, test_idx_loader, log_predictions=log_predictions)
+        test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
         
         # Collect probe statistics
         backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
@@ -1622,7 +1191,7 @@ def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class
 
 surface_examples = False
 if surface_examples:
-    surface_dir = os.path.join(experiment_output_dir, f"surfaced_examples_{dataset_name}")
+    surface_dir = os.path.join(experiment_output_dir, f"surfaced_examples_{dataset}")
     if main_proc:
         if os.path.exists(surface_dir):
             shutil.rmtree(surface_dir)
@@ -1630,7 +1199,7 @@ if surface_examples:
     dist_utils.wait_for_other_procs()
     
     train_set.transform = transforms.Compose(no_transform)
-    if "cifar" in dataset_name or dataset_name == "mnist":
+    if "cifar" in dataset or dataset == "mnist":
         classes_to_surface = list(range(num_classes))
     else:
         classes_to_surface = [531, 671, 728, 901, 999]  # Digital watch, mountain bike, plastic bag, Whiskey jug, Tiolet tissue,
