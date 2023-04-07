@@ -77,7 +77,7 @@ def get_settings_for_dataset(dataset):
         DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
         assert DatasetCls is not None
 
-        data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
+        data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
         train_set = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
         train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
         test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
