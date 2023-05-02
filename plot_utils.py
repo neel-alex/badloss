@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, RocCurveDisplay, roc_curve, auc
 
 
 font_size = 16
@@ -25,7 +25,8 @@ linewidth = 5.0
 alpha = 0.7
 
 
-def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, output_file=None, add_mem_scores=False):
+def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, output_file=None, add_mem_scores=False,
+         diff_image=False, use_abs_val=True):
     num_plots_per_row = 3
     plot_rows = 3
     plot_size = 3
@@ -37,6 +38,19 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, ou
     input = input[:, 0, :, :] if is_grayscale else np.transpose(input, (0, 2, 3, 1))
     if class_names is not None:
         y = [class_names[int(i)] for i in y]
+
+    if diff_image:
+        if use_abs_val:
+            input = np.abs(input)
+
+            # Scale the maximum value to 1 for better visibility
+            max_vals = input.reshape(len(input), -1).max(axis=1)
+            if is_grayscale:
+                input = input / max_vals[:, None, None]
+            else:
+                input = input / max_vals[:, None, None, None]
+        else:
+            input = (2 * input - 0.5).clip(0.0, 1.0)  # Rescale input range -- 0.5 means no change
 
     for idx in range(len(input)):
         ax[idx // num_plots_per_row, idx % num_plots_per_row].imshow(input[idx], cmap='gray' if is_grayscale else None)
@@ -66,18 +80,15 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, ou
 
 def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_dir):
     print("Backdoor examples")
-    plot(probes["backdoor"], probes["backdoor_labels"], None, class_names=train_set.classes,
-         output_file=f"backdoor_{dataset}_{rank}.png", output_dir=output_dir)
-
-    # In[ ]:
-
-    # Plot updated backdoors
-    print("Updated backdoor examples")
     for attack_type in attack_types:
-        plot(probes[f"backdoor_{attack_type}"], probes[f"backdoor_{attack_type}_labels"], None,
-             class_names=train_set.classes, output_file=f"backdoor_{dataset}_{attack_type}_{rank}.png",
-             output_dir=output_dir)
-
+        if attack_type == "":
+            prefix = f"backdoor"
+        else:
+            prefix = f"backdoor_{attack_type}"
+        plot(probes[f"{prefix}"], probes[f"{prefix}_labels"], None, class_names=train_set.classes,
+             output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_{rank}.png")
+        plot(probes[f"{prefix}_diff"], probes[f"{prefix}_labels"], None, class_names=train_set.classes,
+             output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_diff_{rank}.png", diff_image=True)
     # In[ ]:
 
     print("Clean examples")
@@ -549,4 +560,107 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, n
     plt.tight_layout()
     output_file = os.path.join(output_dir,
                                f"probe_confusion_matrix_trajectories_val_probes{'_all' if include_all_val else ''}_{num_example_probes}{'_norm' if normalize else ''}.png")
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+
+
+def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_auc=False, title=None):
+    assert isinstance(labels, dict), labels
+    assert isinstance(predictions, dict), predictions
+    assert isinstance(key_list, list), key_list
+
+    num_colors = len(key_list)
+    if num_colors > 9:
+        cm = plt.get_cmap('hsv')
+        color_list = [cm(1. * i / len(key_list)) for i in range(len(key_list))]
+    elif num_colors > 4:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive",
+                      "tab:brown", "tab:cyan"]
+    else:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange"]
+    assert num_colors <= len(color_list), f"{num_colors} <= {len(color_list)}"
+
+    fontsize = 15
+    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+    import matplotlib
+    from cycler import cycler
+    matplotlib.rcParams['lines.linewidth'] = 3
+    plt.rcParams['axes.prop_cycle'] = cycler(alpha=[0.5])
+
+    if log_plot and adapt_auc:
+        # Compute fpr and tpr values for the linear scale
+        fpr_dict = {}
+        tpr_dict = {}
+        for k in key_list:
+            fpr_dict[k], tpr_dict[k], _ = roc_curve(labels[k], predictions[k])
+
+        # If log_plot is True, transform fpr and tpr values to the log scale
+        eps = 1e-10
+        if log_plot:
+            for k in key_list:
+                fpr_dict[k] = np.log10(fpr_dict[k] + eps)
+                tpr_dict[k] = np.log10(tpr_dict[k] + eps)
+
+        # Plot the ROC curve
+        for i, k in enumerate(key_list):
+            # If log_plot is True, set the label to include the log scale
+            if log_plot:
+                label = f"{k} (log scale)"
+            else:
+                label = k
+            out = RocCurveDisplay(fpr=fpr_dict[k], tpr=tpr_dict[k], roc_auc=auc(fpr_dict[k], tpr_dict[k]),
+                                  estimator_name=label).plot(ax=ax, color=color_list[i])
+
+    else:
+        # Plot the ROC curve
+        for i, k in enumerate(key_list):
+            out = RocCurveDisplay.from_predictions(labels[k], predictions[k], ax=ax, name=k)
+            out.line_.set_color(color_list[i])
+
+    alpha = 0.8
+    for l in plt.gca().lines:
+        l.set_alpha(alpha)
+
+    plt.xlabel("False Positive Rate", fontsize=fontsize)
+    plt.ylabel("True Positive Rate", fontsize=fontsize)
+    if log_plot:
+        plt.xscale('log')
+        plt.yscale('log')
+        plt.xlim(1e-5, 1e0)
+        plt.ylim(1e-5, 1e0)
+
+    plt.xticks(fontsize=fontsize)
+    plt.yticks(fontsize=fontsize)
+    plt.plot([0, 1], [0, 1], color="gray", lw=2, linestyle="--", alpha=0.5)
+
+    # Sort legend labels
+    handles, labels = ax.get_legend_handles_labels()
+    labels, handles = zip(*sorted(zip(labels, handles), key=lambda t: t[0]))
+    ax.legend(handles, labels, prop={'size': fontsize})
+
+    if title is not None:
+        plt.title(title, fontsize=fontsize)
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+
+
+def plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=None):
+    fontsize = 15
+    fig, ax = plt.subplots(1, 1, figsize=(6, 7 + (1 if title is not None else 0)))
+
+    keys = natsort.natsorted(list(output_dict.keys()))
+    accuracies = [output_dict[k]['accuracy'] for k in keys]
+    keys = [label_map_dict[f"backdoor_{k}_val" if k not in ref_probe_classes else k].replace(" [Val]", "") for k in
+            keys]
+    plt.bar(keys, accuracies)
+
+    plt.xlabel("Attack type", fontsize=fontsize)
+    plt.ylabel("Accuracy (%)", fontsize=fontsize)
+    plt.xticks(fontsize=fontsize, rotation=45, ha="right")
+    plt.yticks(fontsize=fontsize)
+
+    if title is not None:
+        plt.title(title, fontsize=fontsize - 4)
+
+    plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches="tight")

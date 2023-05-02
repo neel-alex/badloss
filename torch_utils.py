@@ -9,7 +9,7 @@ from catalyst.data import DistributedSamplerWrapper
 import dist_utils
 
 
-def make_model(dataset, num_classes, device):
+def get_model(dataset, num_classes, device, local_rank, verbose=False):
     if dataset == "mnist":
         # Create BadNet architecture (https://arxiv.org/abs/1708.06733)
         model = torch.nn.Sequential(OrderedDict([
@@ -27,16 +27,19 @@ def make_model(dataset, num_classes, device):
         model = model.to(device)
     else:
         # Create ResNet-50
-        model = models.resnet50(pretrained=False)
+        model = models.resnet50(pretrained=False, num_classes=num_classes)
         if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
             model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
         model = model.to(device)
+    if verbose:
+        print(model)
+    model = dist_utils.convert_to_distributed(model, local_rank=local_rank, sync_bn=True)
     return model
 
 
 def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, log_predictions=False,
-          use_autocast=False):
+          use_autocast=False, flooding_threshold=None, loss_max_indices=None):
     model.train()
     optimizer.zero_grad()
 
@@ -46,6 +49,19 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
     loss_values = []
 
     pbar = tqdm(train_loader)
+    losses = torch.zeros(len(train_loader.dataset), device=next(model.parameters()).device)
+    if loss_max_indices is not None:
+        max_losses = torch.zeros(loss_max_indices.shape)
+        max_data = []
+        max_targets = []
+        for idx in loss_max_indices:
+            max_data.append(train_loader.dataset[idx][0][0])
+            max_targets.append(train_loader.dataset[idx][0][1])
+
+        max_data = torch.stack(max_data).to(next(model.parameters()).device)
+        max_targets = torch.tensor(max_targets).to(next(model.parameters()).device)
+        max_grad_losses = [criterion(model(max_data), max_targets).detach().cpu()]
+
     for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
@@ -53,6 +69,17 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         with torch.cuda.amp.autocast(enabled=use_autocast):
             output = model(data)
             loss = criterion(output, target)
+            loss = torch.clamp(loss, max=100)
+            losses[ex_idx] = loss
+            if flooding_threshold is not None:
+                loss = (loss - flooding_threshold).abs() + flooding_threshold
+            multipliers = torch.ones_like(loss)
+            if loss_max_indices is not None:
+                for i, idx in enumerate(ex_idx):
+                    if idx in loss_max_indices:
+                        multipliers[i] *= -1
+                        max_losses[(loss_max_indices == idx).nonzero().item()] = loss[i]
+            loss = loss * multipliers
 
         loss_values.append(loss.detach().clone())
 
@@ -67,6 +94,9 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
             loss.backward()
             optimizer.step()
 
+        if loss_max_indices is not None:
+            max_grad_losses.append(criterion(model(max_data), max_targets).detach().cpu())
+
         if log_predictions:
             predictions.append(output.argmax(dim=1).detach())
             example_idx.append(ex_idx.clone())
@@ -77,7 +107,18 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         torch.cuda.synchronize()
     pbar.close()
 
-    output_dict = None
+    """
+    if loss_max_indices is not None:
+        n_examples = len(max_grad_losses)
+        max_grad_losses = torch.stack(max_grad_losses)
+        import matplotlib.pyplot as plt
+        for i in range(500):
+            plt.plot(range(n_examples), max_grad_losses[:, i].numpy())
+        plt.yscale('log')
+        plt.show()
+    """
+
+    output_dict = {}
     if log_predictions:
         # Collect the statistics from all the GPUs
         example_idx = torch.cat(dist_utils.gather_tensor(torch.cat(example_idx, dim=0)), dim=0).detach().cpu().numpy()
@@ -86,6 +127,10 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
         output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
 
+    output_dict["all_losses"] = losses
+
+    if loss_max_indices is not None:
+        output_dict["maxes"] = max_losses
     return output_dict
 
 

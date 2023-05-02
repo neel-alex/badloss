@@ -10,6 +10,7 @@ from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder
 from catalyst.data import DistributedSamplerWrapper
 
 from plot_utils import plot
+from backdoors import BackdoorPatch, WarpingAttack, ClampRangeTransform
 
 
 def load_class_mapping(dataset):
@@ -174,7 +175,7 @@ def get_loader(dataset, distributed, num_workers, indices=None, batch_size=16, s
 
 def make_probe_dataset(probes, train_set, test_set, dataset, batch_size, num_example_probes, num_train_probes,
                        num_val_probes, attack_types, distributed, num_workers, output_dir, device):
-    discarded_idx = list(probes["backdoor_idx"]) + list(probes["novel_backdoor_idx"]) + list(probes["clean_idx"])
+    discarded_idx = list(probes["all_backdoor_idx"]) + list(probes["clean_idx"])
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
@@ -215,6 +216,8 @@ def make_probe_dataset(probes, train_set, test_set, dataset, batch_size, num_exa
     # Add additional probes here
     probes_to_be_used_val = [x for x in probes_to_be_used]  # Deep copy
     for attack_type in attack_types:
+        if attack_type == "":  # Already included in the main probes
+            continue
         key = f"backdoor_{attack_type}"
         val_probes[key] = probes[key]
         val_probes[f"{key}_labels"] = probes[f"{key}_labels"]
@@ -311,3 +314,58 @@ def combine_dataset(train_set, train_indices, probe_dataset_standard, val_probe_
     assert len(dataset_probe_identity) == len(comb_train_set), f"{len(dataset_probe_identity)} != {len(comb_train_set)}"
 
     return comb_train_set, comb_train_indices, dataset_probe_identity
+
+
+class AttackDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, attack_type, chosen_attack_targets,
+                 no_transform, random_pattern, random_backdoor_alpha, img_size):
+        super().__init__()
+
+        if attack_type == "clean":
+            backdoor_transform = no_transform
+            self.attack_target = -1
+        else:
+            if attack_type == "":
+                backdoor = BackdoorPatch()
+            elif attack_type == "random":
+                backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
+            elif attack_type == "reversed":
+                backdoor = BackdoorPatch(reverse_backdoor=True)
+            elif attack_type == "single_pix":
+                backdoor = BackdoorPatch(single_pixel_backdoor=True)
+            elif attack_type == "reversed_single_pix":
+                backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
+            else:
+                assert attack_type == "warped"
+                backdoor = WarpingAttack(img_size[0])
+
+            backdoor_transform = no_transform + [backdoor, ClampRangeTransform()]
+            self.attack_target = chosen_attack_targets[attack_type]
+
+        assert dataset.dataset.transform is not None, dataset.dataset
+        dataset.dataset.transform = transforms.Compose(backdoor_transform)  # Idx dataset
+
+        self.dataset = dataset
+        self.attack_type = attack_type
+
+        print(
+            f"!! Attacked test set / # examples: {len(self)} / Attack type: {self.attack_type} / Attack target: {self.attack_target}")
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        (x, y), idx_ds = self.dataset[idx]
+        assert idx == idx_ds, f"{idx} != {idx_ds}"
+        if self.attack_target < 0:  # normal example
+            return (x, y), idx
+        else:
+            return (x, self.attack_target), idx
+
+
+def make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform, random_pattern, random_backdoor_alpha,
+                        img_size, distributed, num_workers, batch_size):
+    attacked_test_set = AttackDataset(IdxDataset(test_set), attack_type, chosen_attack_targets,
+                                      no_transform, random_pattern, random_backdoor_alpha, img_size)
+    attacked_test_dl = get_loader(attacked_test_set, distributed, num_workers, batch_size=batch_size)
+    return attacked_test_dl

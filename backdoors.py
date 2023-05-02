@@ -90,25 +90,11 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
                 random_backdoor_alpha, output_dir, main_proc, img_size, device):
     probes = {"backdoor": [], "clean": []}
 
-    # In[ ]:
-
-    fake_backdoor_label = np.random.choice(np.arange(num_classes))
-    print(f"!! Random class picked for original backdoor: {fake_backdoor_label}")
-    backdoor_transform = transforms.Compose([BackdoorPatch(), ClampRangeTransform()])
-
-    backdoor_idx = np.random.choice(np.arange(len(train_set)), size=num_example_probes, replace=False)
-    probes.update({"backdoor_idx": backdoor_idx[:num_example_probes]})
-    probes["backdoor"] = torch.stack([backdoor_transform(train_set_wo_aug[i][0]) for i in probes["backdoor_idx"]],
-                                     dim=0).to(device)
-    probes["backdoor_labels"] = torch.from_numpy(np.array([fake_backdoor_label for i in probes["backdoor_idx"]])).to(
-        device)
-    print("Backdoor probe shape:", probes["backdoor"].shape)
-
-    # In[ ]:
-
-    remaining_indices = [i for i in range(len(train_set)) if i not in probes["backdoor_idx"]]
+    chosen_attack_targets = {k: np.random.choice(np.arange(num_classes)) for k in attack_types}
+    print("Chosen attack targets:", chosen_attack_targets)
+    remaining_indices = list(range(len(train_set)))  # [i for i in range(len(train_set)) if i not in probes["backdoor_idx"]]
     new_indices = np.random.choice(remaining_indices, size=num_example_probes * len(attack_types), replace=False)
-    probes.update({"novel_backdoor_idx": new_indices})
+    probes.update({"all_backdoor_idx": new_indices})
 
     # Create a main random pattern
     pattern_file = os.path.join(output_dir, "random_pattern.png")
@@ -121,11 +107,12 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
     # Load the pattern to ensure the same pattern is loaded by all processes
     random_pattern_img = cv2.imread(pattern_file, cv2.IMREAD_UNCHANGED)
     random_pattern = transforms.ToTensor()(random_pattern_img)
-    print(
-        f"Random Pattern / Loaded shape: {random_pattern_img.shape} / Tensor shape: {random_pattern.shape} / Min: {random_pattern.min()} / Max: {random_pattern.max()}")
+    print(f"Random Pattern / Loaded shape: {random_pattern_img.shape} / Tensor shape: {random_pattern.shape} / Min: {random_pattern.min()} / Max: {random_pattern.max()}")
 
     for i, attack_type in enumerate(attack_types):
-        if attack_type == "random":
+        if attack_type == "":
+            backdoor = BackdoorPatch()
+        elif attack_type == "random":
             backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
         elif attack_type == "reversed":
             backdoor = BackdoorPatch(reverse_backdoor=True)
@@ -138,28 +125,30 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
             backdoor = WarpingAttack(img_size[0])
         backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
 
-        fake_backdoor_label = np.random.choice(np.arange(num_classes))
+        fake_backdoor_label = chosen_attack_targets[attack_type]
         print(f"!! Random class picked for {attack_type.replace('_', ' ')} backdoor: {fake_backdoor_label}")
 
-        current_idx = probes["novel_backdoor_idx"][i * num_example_probes:(i + 1) * num_example_probes]
-        probes[f"backdoor_{attack_type}"] = torch.stack(
-            [backdoor_transform(train_set_wo_aug[i][0]) for i in current_idx],
-            dim=0).to(device)
-        probes[f"backdoor_{attack_type}_labels"] = torch.from_numpy(
-            np.array([fake_backdoor_label for i in current_idx])).to(device)
+        current_idx = probes["all_backdoor_idx"][i * num_example_probes:(i + 1) * num_example_probes]
+        if attack_type == "":
+            prefix = f"backdoor"
+        else:
+            prefix = f"backdoor_{attack_type}"
+
+        probes[f"{prefix}_idx"] = current_idx
+        probes[f"{prefix}_original"] = torch.stack([train_set_wo_aug[i][0] for i in current_idx], dim=0).to(device)
+        probes[f"{prefix}"] = torch.stack([backdoor_transform(train_set_wo_aug[i][0]) for i in current_idx], dim=0).to(
+            device)
+        probes[f"{prefix}_diff"] = probes[f"{prefix}_original"] - probes[f"{prefix}"]
+        probes[f"{prefix}_labels"] = torch.from_numpy(np.array([fake_backdoor_label for i in current_idx])).to(device)
         print(f"Backdoor ({attack_type}) probe shape:", probes["backdoor"].shape)
 
-    # In[ ]:
-
-    remaining_indices = [i for i in range(len(train_set)) if
-                         i not in probes["backdoor_idx"] and i not in probes["novel_backdoor_idx"]]
+    remaining_indices = [i for i in range(len(train_set)) if i not in probes["all_backdoor_idx"]]
     new_indices = np.random.choice(remaining_indices, size=num_example_probes, replace=False)
     probes.update({"clean_idx": new_indices})
-
     probes["clean"] = torch.stack([train_set[i][0] for i in probes["clean_idx"]], dim=0).to(device)
     probes["clean_labels"] = torch.from_numpy(np.array([train_set_wo_aug[i][1] for i in probes["clean_idx"]])).to(
         device)
     print("Clean probe shape:", probes["clean"].shape)
-
     # In[ ]:
-    return probes
+    return probes, chosen_attack_targets, random_pattern
+

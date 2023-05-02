@@ -23,17 +23,24 @@ import torch
 from torchvision import transforms
 import matplotlib.pyplot as plt
 import sklearn.neighbors
+import sklearn.cluster
+import sklearn.metrics
 
 
 import dist_utils
-from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, combine_dataset
-from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, \
-    some_other_plot, make_normalizers, yet_another_plot, one_more_plot, \
-    plot_loss_dynamics_and_violin, visualize_loss_trajectories, plot_confusion_matrix_from_preds
+from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, combine_dataset, \
+    make_attack_dataset
+from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other_plot, make_normalizers, \
+    yet_another_plot, one_more_plot, plot_loss_dynamics_and_violin, visualize_loss_trajectories, \
+    plot_confusion_matrix_from_preds, plot_attack_success_stats
 from plot_utils import num_queue_plots
 from backdoors import make_probes
-from torch_utils import make_model, train, test, test_tensor
+from torch_utils import get_model, train, test, test_tensor
 
+
+# Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning)
+#   TODO: ss (spectral signatures), fr (frequency analysis)
+defense = "ac"
 
 # Set random seed
 seed = 3
@@ -65,7 +72,7 @@ num_val_probes = 250
 use_val_probes_for_training = True
 num_example_probes = num_train_probes + num_val_probes
 random_backdoor_alpha = 0.1
-experiment_output_dir = f"./backdoor_exp05_{dataset}_alpha_{random_backdoor_alpha}"
+experiment_output_dir = f"./backdoor_exp06_{dataset}_alpha_{random_backdoor_alpha}_{defense}"
 num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
@@ -155,10 +162,9 @@ else:
     assert num_classes == 1000
 print(dataset, num_classes)
 
-
-attack_types = ["reversed", "single_pix", "reversed_single_pix", "random", "warped"]
-probes = make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
-                     random_backdoor_alpha, experiment_output_dir, main_proc, img_size, device)
+attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "warped"]
+probes, chosen_attack_targets, random_pattern = make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
+                                                            random_backdoor_alpha, experiment_output_dir, main_proc, img_size, device)
 
 
 plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
@@ -191,11 +197,7 @@ wd = 0.0001
                        num_val_probes, attack_types, distributed, num_workers, experiment_output_dir, device)
 
 
-model = make_model(dataset, num_classes, device)
-print(model)
-
-# Convert to a distributed model
-model = dist_utils.convert_to_distributed(model, local_rank, sync_bn=True)
+model = get_model(dataset, num_classes, device, local_rank, verbose=True)
 
 criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
 optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
@@ -242,95 +244,170 @@ label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
 
 
 if not os.path.exists(model_file):
-    statistics = {"train": [], "test": []}
-    statistics.update({k: [] for k in ref_probe_classes})
-    statistics.update({f"{k}_val": [] for k in ref_probe_classes})  # Add keys for validation probes
-    statistics.update({f"backdoor_{k}_val": [] for k in attack_types})  # Adding additional validation keys
-    inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
-    
-    surface_epoch = 5
-    
-    predictions = {}
-    
-    for epoch in range(num_epochs):
-        output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
-        
-        # Collect test set statistics
-        print("Stats for epoch #", epoch+1)
+    if defense in {"mapd", "nc", "ac"}:
+        statistics = {"train": [], "test": []}
+        statistics.update({k: [] for k in ref_probe_classes})
+        statistics.update({f"{k}_val": [] for k in ref_probe_classes})  # Add keys for validation probes
+        statistics.update({f"backdoor_{k}_val": [] for k in attack_types if k != ""})  # Adding additional validation keys
+        inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
+
+        surface_epoch = 5
+
+        predictions = {}
+
+        for epoch in range(num_epochs):
+            output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
+
+            # Collect test set statistics
+            print("Stats for epoch #", epoch+1)
+            if log_predictions:
+                # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
+                train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank, set_name="Train", log_predictions=log_predictions)
+
+            test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
+
+            # Collect probe statistics
+            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
+            val_backdoor_stats, val_backdoor_preds = test_tensor(model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
+            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
+            val_clean_stats, val_clean_preds = test_tensor(model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
+
+            val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"],
+                                                                                   msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
+            val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"],
+                                                                                       msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
+            val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"],
+                                                                                                         val_probes["backdoor_reversed_single_pix_labels"],
+                                                                                                         msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
+            val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"],
+                                                                               msg="Backdoor random (val)", log_predictions=log_predictions)
+            val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"],
+                                                                               msg="Backdoor warped (val)", log_predictions=log_predictions)
+
+            if log_predictions:
+                statistics["train"].append(train_stats)
+
+                # Add predictions from all the different sets / probes
+                predictions[epoch] = {}  # Dict of dict
+                predictions[epoch]["train"] = train_preds
+                predictions[epoch]["test"] = test_preds
+                predictions[epoch]["clean"] = backdoor_preds
+                predictions[epoch]["clean_val"] = val_clean_preds
+                predictions[epoch]["backdoor"] = backdoor_preds
+                predictions[epoch]["backdoor_val"] = val_backdoor_preds
+                predictions[epoch]["backdoor_reversed_val"] = val_backdoor_reversed_preds
+                predictions[epoch]["backdoor_single_pix_val"] = val_backdoor_single_pix_preds
+                predictions[epoch]["backdoor_reversed_single_pix_val"] = val_backdoor_reversed_single_pix_preds
+                predictions[epoch]["backdoor_random_val"] = val_backdoor_random_preds
+                predictions[epoch]["backdoor_warped_val"] = val_backdoor_warped_preds
+
+            statistics["test"].append(test_stats)
+            statistics["clean"].append(clean_stats)
+            statistics["clean_val"].append(val_clean_stats)
+            statistics["backdoor"].append(backdoor_stats)
+            statistics["backdoor_val"].append(val_backdoor_stats)
+            statistics["backdoor_reversed_val"].append(val_backdoor_reversed_stats)
+            statistics["backdoor_single_pix_val"].append(val_backdoor_single_pix_stats)
+            statistics["backdoor_reversed_single_pix_val"].append(val_backdoor_reversed_single_pix_stats)
+            statistics["backdoor_random_val"].append(val_backdoor_random_stats)
+            statistics["backdoor_warped_val"].append(val_backdoor_warped_stats)
+
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+
+            if main_proc:
+                # Save the model
+                model_file_base, model_file_ext = os.path.splitext(model_file)
+                current_model_file = f"{model_file_base}_ep_{epoch}{model_file_ext}"
+                torch.save(model.state_dict(), current_model_file)
+
+            # Close all figures
+            plt.close('all')
+
         if log_predictions:
-            # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
-            train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank, set_name="Train", log_predictions=log_predictions)
-        
-        test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-        
-        # Collect probe statistics
+            statistics["predictions"] = predictions
+
+        if main_proc:
+            # Save the model
+            torch.save(model.state_dict(), model_file)
+
+            # Save the final data
+            with open(data_file, "wb") as f:
+                pickle.dump(statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    elif defense == "abl":
+        # sshhh it's just copying them
+        if "cifar" in dataset:
+            num_epochs = 100
+        # TODO: Fix this
+        initial_split = 0.2
+        initial_epochs = int(num_epochs * initial_split)
+        later_epochs = num_epochs - initial_epochs
+        flooding_threshold = 0.5
+        selection_threshold = 0.5
+        for epoch in range(initial_epochs):
+            output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler,
+                                flooding_threshold=flooding_threshold)
+
+        # Why num example probes * 2? I don't really know... Maybe need to use len(attack_types)
+        # But I think it's because the train iterator doesn't iterate over indices that are covered by the probes
+        #   (see IdxDataset in dataset_utils for reference)
+        # So if train_set is 50000 examples, new_idx_loader.dataset could be 60000 examples, but when iterated over,
+        #   it would only show 50000 examples.
+
+        losses = output_dict["all_losses"]
+        sorted_losses, loss_idx = losses.sort()
+        loss_idx = loss_idx[num_example_probes*2:]
+        indices_to_maximize = loss_idx[:int(len(train_set) * selection_threshold)]
+        # +num_example_probes*2 would be maximizing on all the backdoor probes
+        indices_to_maximize = torch.tensor(range(len(train_set) - 27500, len(train_set) + int(num_example_probes)))
+        print((indices_to_maximize > 60000).sum())
+        print(indices_to_maximize.shape)
+        print(indices_to_maximize)
+        max_losses = []
+
+        for epoch in range(later_epochs):
+            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
+                                                         probes["backdoor_labels"], msg="Backdoor probe",
+                                                         log_predictions=log_predictions)
+            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
+                                                   msg="Clean probe", log_predictions=log_predictions)
+            output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler,
+                                loss_max_indices=indices_to_maximize)
+            max_losses.append(output_dict['maxes'])
+
+        max_losses = torch.stack(max_losses)
+        for i in range(10):
+            plt.plot(range(later_epochs), max_losses[:, i].detach().cpu().numpy())
+        plt.show()
+
+        # TODO
+        test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
+                                      log_predictions=log_predictions)
+        print(f"ABL: Clean acc: {test_stats['acc']}")
+
         backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
         val_backdoor_stats, val_backdoor_preds = test_tensor(model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
         clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
         val_clean_stats, val_clean_preds = test_tensor(model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
-        
-        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"],
-                                                                               msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"],
-                                                                                   msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
-        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"],
-                                                                                                     val_probes["backdoor_reversed_single_pix_labels"],
-                                                                                                     msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"],
-                                                                           msg="Backdoor random (val)", log_predictions=log_predictions)
-        val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"],
-                                                                           msg="Backdoor warped (val)", log_predictions=log_predictions)
-        
-        if log_predictions:
-            statistics["train"].append(train_stats)
-            
-            # Add predictions from all the different sets / probes
-            predictions[epoch] = {}  # Dict of dict
-            predictions[epoch]["train"] = train_preds
-            predictions[epoch]["test"] = test_preds
-            predictions[epoch]["clean"] = backdoor_preds
-            predictions[epoch]["clean_val"] = val_clean_preds
-            predictions[epoch]["backdoor"] = backdoor_preds
-            predictions[epoch]["backdoor_val"] = val_backdoor_preds
-            predictions[epoch]["backdoor_reversed_val"] = val_backdoor_reversed_preds
-            predictions[epoch]["backdoor_single_pix_val"] = val_backdoor_single_pix_preds
-            predictions[epoch]["backdoor_reversed_single_pix_val"] = val_backdoor_reversed_single_pix_preds
-            predictions[epoch]["backdoor_random_val"] = val_backdoor_random_preds
-            predictions[epoch]["backdoor_warped_val"] = val_backdoor_warped_preds
-        
-        statistics["test"].append(test_stats)
-        statistics["clean"].append(clean_stats)
-        statistics["clean_val"].append(val_clean_stats)
-        statistics["backdoor"].append(backdoor_stats)
-        statistics["backdoor_val"].append(val_backdoor_stats)
-        statistics["backdoor_reversed_val"].append(val_backdoor_reversed_stats)
-        statistics["backdoor_single_pix_val"].append(val_backdoor_single_pix_stats)
-        statistics["backdoor_reversed_single_pix_val"].append(val_backdoor_reversed_single_pix_stats)
-        statistics["backdoor_random_val"].append(val_backdoor_random_stats)
-        statistics["backdoor_warped_val"].append(val_backdoor_warped_stats)
-        
-        if lr_scheduler is not None:
-            lr_scheduler.step()
-        
-        if main_proc:
-            # Save the model
-            model_file_base, model_file_ext = os.path.splitext(model_file)
-            current_model_file = f"{model_file_base}_ep_{epoch}{model_file_ext}"
-            torch.save(model.state_dict(), current_model_file)
-        
-        # Close all figures
-        plt.close('all')
-    
-    if log_predictions:
-        statistics["predictions"] = predictions
 
-    if main_proc:
-        # Save the model
-        torch.save(model.state_dict(), model_file)
+        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
+        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
+        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
+        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
+        val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
 
-        # Save the final data
-        with open(data_file, "wb") as f:
-            pickle.dump(statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"ABL: ASR (normal): {backdoor_stats['acc']}")
+        print(f"ABL: ASR (val): {val_backdoor_stats['acc']}")
+        print(f"ABL: ASR (reversed): {val_backdoor_reversed_stats['acc']}")
+        print(f"ABL: ASR (single_pix): {val_backdoor_single_pix_stats['acc']}")
+        print(f"ABL: ASR (single_pix_reversed): {val_backdoor_reversed_single_pix_stats['acc']}")
+        print(f"ABL: ASR (blended): {val_backdoor_random_stats['acc']}")
+        print(f"ABL: ASR (warped): {val_backdoor_warped_stats['acc']}")
+
+        # Cause an error because there's no statistics dictionary
+    else:
+        raise NotImplementedError
 else:
     assert os.path.exists(data_file)
     print("Data files already found. Loading data from saved checkpoints...")
@@ -339,382 +416,585 @@ else:
     with open(data_file, "rb") as f:
         statistics = pickle.load(f)
 
+if defense == "mapd":
+    print("Final train accuracy:", statistics["train"][-1])
+    print("Final test accuracy:", statistics["test"][-1])
+    print("Keys in statistics file:", natsort.natsorted(list(statistics.keys())))
 
-print("Final test accuracy:", statistics["test"][-1])
-
-
-some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
-some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
-
-
-if not log_predictions:
-    print("Can't compute other statistics without the model predictions...")
-    exit()
+    some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
+    some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
 
 
-# ### Learning dynamics per example
+    if not log_predictions:
+        print("Can't compute other statistics without the model predictions...")
+        exit()
 
 
-unique_probe_identity = np.unique(dataset_probe_identity)
-print("Unique dataset probe identity:", unique_probe_identity)
+    # ### Learning dynamics per example
 
 
-if not os.path.exists(data_statistics_file):
-    sorted_ex_list = []
-    num_total_vals = len(comb_train_set)  # 50000 + 600
+    unique_probe_identity = np.unique(dataset_probe_identity)
+    print("Unique dataset probe identity:", unique_probe_identity)
 
-    print("Computing sorted prediction and target list...")
-    for k in tqdm(statistics["predictions"].keys()):  # Iterate over epochs
-        assert "train" in statistics["predictions"][k], statistics["predictions"][k].keys()
-        out_dict = statistics["predictions"][k]["train"]
-        ex_idx = out_dict["ex_idx"]
-        preds = out_dict["preds"]
-        targets = out_dict["targets"]
-        num_extra_indices = len(ex_idx[np.nonzero(ex_idx >= len(train_set))])
-        sorted_preds = np.ones_like(preds, shape=(num_total_vals,)) * -1
-        sorted_targets = np.ones_like(targets, shape=(num_total_vals,)) * -1
-        unused_idx = list(range(num_total_vals))
-        unused_idx = [x for x in unused_idx if x not in ex_idx]
-        for i in range(len(preds)):
-            current_ex_idx = ex_idx[i]
-            sorted_preds[current_ex_idx] = preds[i]
-            sorted_targets[current_ex_idx] = targets[i]
-        assert np.sum(sorted_preds == -1) == len(unused_idx)
-        sorted_ex_list.append((sorted_preds, sorted_targets, unused_idx))
+
+    if not os.path.exists(data_statistics_file):
+        sorted_ex_list = []
+        num_total_vals = len(comb_train_set)  # 50000 + 600
+
+        print("Computing sorted prediction and target list...")
+        for k in tqdm(statistics["predictions"].keys()):  # Iterate over epochs
+            assert "train" in statistics["predictions"][k], statistics["predictions"][k].keys()
+            out_dict = statistics["predictions"][k]["train"]
+            ex_idx = out_dict["ex_idx"]
+            preds = out_dict["preds"]
+            targets = out_dict["targets"]
+            num_extra_indices = len(ex_idx[np.nonzero(ex_idx >= len(train_set))])
+            sorted_preds = np.ones_like(preds, shape=(num_total_vals,)) * -1
+            sorted_targets = np.ones_like(targets, shape=(num_total_vals,)) * -1
+            unused_idx = list(range(num_total_vals))
+            unused_idx = [x for x in unused_idx if x not in ex_idx]
+            for i in range(len(preds)):
+                current_ex_idx = ex_idx[i]
+                sorted_preds[current_ex_idx] = preds[i]
+                sorted_targets[current_ex_idx] = targets[i]
+            assert np.sum(sorted_preds == -1) == len(unused_idx)
+            sorted_ex_list.append((sorted_preds, sorted_targets, unused_idx))
+
+
+        # In[ ]:
+
+
+        epoch_learned = np.ones((num_total_vals,), dtype=np.int64) * -1
+        epoch_first_learned = np.ones((num_total_vals,), dtype=np.int64) * -1
+
+        print("Computing first-learned statistics...")
+        for epoch in tqdm(range(len(sorted_ex_list))):  # Iterate over the epochs
+            preds, targets, _ = sorted_ex_list[epoch]
+
+            # Update current epoch learned
+            preds[preds == -1] = -2  # Set the preds to be -2 just to make sure the targets and predictions don't match
+            correct_examples_current = preds == targets
+            previously_correct_ex = epoch_learned != -1
+
+            mark_unlearned = np.logical_and(previously_correct_ex, np.logical_not(correct_examples_current))
+            mark_learned = np.logical_and(np.logical_not(previously_correct_ex), correct_examples_current)
+            epoch_learned[mark_unlearned] = -1
+            epoch_learned[mark_learned] = epoch
+
+            # Update example learned for the first time
+            previously_correct_ex = epoch_first_learned != -1
+            mark_learned = np.logical_and(np.logical_not(previously_correct_ex), correct_examples_current)
+            epoch_first_learned[mark_learned] = epoch
+
+            print(f"Epoch: {epoch} \t Previously learned examples: {np.sum(previously_correct_ex)} \t Newly learned examples: {np.sum(mark_learned)} \t Examples marked as unlearned: {np.sum(mark_unlearned)} \t Total new learned examples: {np.sum(epoch_learned != -1)} \t Total learned examples at any time: {np.sum(epoch_first_learned != -1)}")
+
+
+        # In[ ]:
+
+
+        stats = {k: 0 for k in unique_probe_identity}
+        epoch_cumulative_scores = {k: [] for k in unique_probe_identity}
+
+        print("Computing cumulative statistics...")
+        for epoch in tqdm(range(num_epochs)):
+            examples_learned_at_epoch = epoch_learned == epoch
+            learned_ex_idx = np.nonzero(examples_learned_at_epoch)[0]
+            for i in learned_ex_idx:
+                k = dataset_probe_identity[i]
+                stats[k] += 1
+            for k in unique_probe_identity:
+                epoch_cumulative_scores[k].append(stats[k])
+
+        print("Statistics:", stats)
+        print("Cumulative stats:", epoch_cumulative_scores)
+        total_examples_learned = 0
+        for k in stats:
+            total_examples_learned += stats[k]
+        print("Total examples learned in the end:", total_examples_learned)
+        assert total_examples_learned == (len(epoch_learned) - int(np.sum(epoch_learned == -1)))
+
+
+        # First learned stats
+        stats_first_learned = {k: 0 for k in unique_probe_identity}
+        epoch_cumulative_scores_first_learned = {k: [] for k in unique_probe_identity}
+
+        print("Computing first-learned statistics...")
+        for epoch in range(num_epochs):
+            examples_learned_at_epoch = epoch_first_learned == epoch
+            learned_ex_idx = np.nonzero(examples_learned_at_epoch)[0]
+            for i in learned_ex_idx:
+                k = dataset_probe_identity[i]
+                stats_first_learned[k] += 1
+            for k in unique_probe_identity:
+                epoch_cumulative_scores_first_learned[k].append(stats_first_learned[k])
+
+        print("Statistics:", stats_first_learned)
+        print("Cumulative stats:", epoch_cumulative_scores_first_learned)
+        total_examples_learned = 0
+        for k in stats:
+            total_examples_learned += stats_first_learned[k]
+        print("Total examples learned at any point during training:", total_examples_learned)
+        assert total_examples_learned == (len(epoch_first_learned) - int(np.sum(epoch_first_learned == -1)))
+
+        if main_proc:
+            # Save the final statistics
+            with open(data_statistics_file, "wb") as f:
+                final_statistics = [sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cumulative_scores, stats_first_learned, epoch_cumulative_scores_first_learned]
+                pickle.dump(final_statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
+    else:
+        assert os.path.exists(data_statistics_file)
+        print("Data files already found. Loading data statistics from file:", data_statistics_file)
+
+        with open(data_statistics_file, "rb") as f:
+            final_statistics = pickle.load(f)
+            sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cumulative_scores, stats_first_learned, epoch_cumulative_scores_first_learned = final_statistics
+
+
+    normalizers = make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_identity)
+    yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
+                     label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
+
+    # ### Loss distribution plots
+
+    # List of example_idx at different epochs i.e. [epoch_1_loss_vals, ...., epoch_n_loss_vals]
+    ex_idx = [statistics["predictions"][i]["train"]["ex_idx"] for i in range(len(statistics["predictions"]))]
+    loss_values = [statistics["predictions"][i]["train"]["loss"] for i in range(len(statistics["predictions"]))]
+    print(len(ex_idx), len(loss_values))
+
+
+    sorted_losses_all = []
+    assert len(dataset_probe_identity) == len(comb_train_set)
+
+    print("Computing the sorted loss list...")
+    for i in range(len(ex_idx)):  # Iterate over the epochs
+        current_ex_idx = ex_idx[i]
+        current_loss_vals = loss_values[i]
+        assert len(current_ex_idx) == len(current_loss_vals), f"{len(current_ex_idx)} != {len(current_loss_vals)}"
+        current_sorted_loss_vals = [None for _ in range(len(dataset_probe_identity))]  # Includes both the training set as well as the probes i.e. len(comb_train_set)
+        for j, k in enumerate(current_ex_idx):
+            current_sorted_loss_vals[k] = current_loss_vals[j]
+        sorted_losses_all.append(current_sorted_loss_vals)
+
+
+    class_names = list(np.unique(dataset_probe_identity))
+    print(class_names)
+
+
+    one_more_plot(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
+                      dataset, main_proc, experiment_output_dir)
+
+
+    plot_loss_dynamics_and_violin(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
+                                      dataset, experiment_output_dir, main_proc)
+
+
+    for val_included in [True, False]:
+        visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_identity,
+                                    sorted_losses_all, experiment_output_dir, main_proc, dataset,
+                                    val_included=val_included, clf=None, output_file=None)
+
+
+    # Convert the data into a complete trajectory dataset
+    print("Converting trajectories to dataset...")
+    # Note, this was initially named 'dataset', which had some name conflicts...
+    traj_dataset = {}
+    for i, cls in enumerate(class_names):
+        relevant_idx = [i for i in range(len(dataset_probe_identity)) if dataset_probe_identity[i] == cls]
+        print(f"Class: {cls} / # relevant idx: {len(relevant_idx)}")
+
+        traj_dataset[cls] = []
+        empty_idx = []
+        for j in range(len(relevant_idx)):
+            if sorted_losses_all[0][relevant_idx[j]] is None:  # The whole trajectory should be none since these examples are used in probes
+                assert all([sorted_losses_all[epoch][relevant_idx[j]] is None for epoch in range(len(sorted_losses_all))])
+                empty_idx.append(relevant_idx[j])
+                continue
+            trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
+            traj_dataset[cls].append(trajectory)
+        assert len(traj_dataset[cls]) == len(relevant_idx) - len(empty_idx)
+        if len(empty_idx) > 0:
+            print("Number of empty trajectories:", len(empty_idx))
+
+    print("Total number of keys found:", traj_dataset.keys(), {k: len(traj_dataset[k]) for k in traj_dataset.keys()})
+    trajectory_dataset_file = os.path.join(experiment_output_dir, f"loss_trajectories.pkl")
+    with open(trajectory_dataset_file, "wb") as f:
+        pickle.dump(traj_dataset, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print("Trajectory dataset written to file:", trajectory_dataset_file)
 
 
     # In[ ]:
 
 
-    epoch_learned = np.ones((num_total_vals,), dtype=np.int64) * -1
-    epoch_first_learned = np.ones((num_total_vals,), dtype=np.int64) * -1
+    print("Converting trajectories to numpy dataset...")
+    class_names = natsort.natsorted(list(traj_dataset.keys()))
+    print("Class names:", class_names)
 
-    print("Computing first-learned statistics...")
-    for epoch in tqdm(range(len(sorted_ex_list))):  # Iterate over the epochs
-        preds, targets, _ = sorted_ex_list[epoch]
-        
-        # Update current epoch learned
-        preds[preds == -1] = -2  # Set the preds to be -2 just to make sure the targets and predictions don't match
-        correct_examples_current = preds == targets
-        previously_correct_ex = epoch_learned != -1
-        
-        mark_unlearned = np.logical_and(previously_correct_ex, np.logical_not(correct_examples_current))
-        mark_learned = np.logical_and(np.logical_not(previously_correct_ex), correct_examples_current)
-        epoch_learned[mark_unlearned] = -1
-        epoch_learned[mark_learned] = epoch
-        
-        # Update example learned for the first time
-        previously_correct_ex = epoch_first_learned != -1
-        mark_learned = np.logical_and(np.logical_not(previously_correct_ex), correct_examples_current)
-        epoch_first_learned[mark_learned] = epoch
-        
-        print(f"Epoch: {epoch} \t Previously learned examples: {np.sum(previously_correct_ex)} \t Newly learned examples: {np.sum(mark_learned)} \t Examples marked as unlearned: {np.sum(mark_unlearned)} \t Total new learned examples: {np.sum(epoch_learned != -1)} \t Total learned examples at any time: {np.sum(epoch_first_learned != -1)}")
+    main_classes = [x for x in class_names if not x.endswith("_val") and x != "train"]
+    print(main_classes)
+
+    class2idx = {k: i for i, k in enumerate(main_classes)}
+    idx2class = {i: k for i, k in enumerate(main_classes)}
+    print(class2idx)
+    print(idx2class)
 
 
     # In[ ]:
 
 
-    stats = {k: 0 for k in unique_probe_identity}
-    epoch_cumulative_scores = {k: [] for k in unique_probe_identity}
+    # Define a consolidated dataset
+    probe_train_x = np.concatenate([np.array(traj_dataset[k]) for k in main_classes], axis=0)
+    probe_train_y = np.concatenate([np.array([class2idx[k] for _ in range(len(traj_dataset[k]))]) for k in main_classes])
+    print("Train set:", probe_train_x.shape, probe_train_y.shape)
 
-    print("Computing cumulative statistics...")
-    for epoch in tqdm(range(num_epochs)):
-        examples_learned_at_epoch = epoch_learned == epoch
-        learned_ex_idx = np.nonzero(examples_learned_at_epoch)[0]
-        for i in learned_ex_idx:
-            k = dataset_probe_identity[i]
-            stats[k] += 1
-        for k in unique_probe_identity:
-            epoch_cumulative_scores[k].append(stats[k])
+    # Fix the validation set to include the new attacks -- will collapse them to the same class right now
+    additional_val_classes = [f"backdoor_{attack_type}" for attack_type in attack_types if attack_type != ""]
+    main_classes_val = main_classes + additional_val_classes
+    print("Main validation classes:", main_classes_val)
+    class2idx_val = copy.deepcopy(class2idx)
+    class2idx.update({k: class2idx["backdoor"] for k in additional_val_classes})
 
-    print("Statistics:", stats)
-    print("Cumulative stats:", epoch_cumulative_scores)
-    total_examples_learned = 0
-    for k in stats:
-        total_examples_learned += stats[k]
-    print("Total examples learned in the end:", total_examples_learned)
-    assert total_examples_learned == (len(epoch_learned) - int(np.sum(epoch_learned == -1)))
+    starting_idx = np.max([v for k, v in class2idx.items()]) + 1
+    class2idx_val.update({k: starting_idx + idx for idx, k in enumerate(additional_val_classes)})
+    print("Class2idx updated:", class2idx)
+    print("Class2idx val:", class2idx_val)
 
-
-    # First learned stats
-    stats_first_learned = {k: 0 for k in unique_probe_identity}
-    epoch_cumulative_scores_first_learned = {k: [] for k in unique_probe_identity}
-
-    print("Computing first-learned statistics...")
-    for epoch in range(num_epochs):
-        examples_learned_at_epoch = epoch_first_learned == epoch
-        learned_ex_idx = np.nonzero(examples_learned_at_epoch)[0]
-        for i in learned_ex_idx:
-            k = dataset_probe_identity[i]
-            stats_first_learned[k] += 1
-        for k in unique_probe_identity:
-            epoch_cumulative_scores_first_learned[k].append(stats_first_learned[k])
-
-    print("Statistics:", stats_first_learned)
-    print("Cumulative stats:", epoch_cumulative_scores_first_learned)
-    total_examples_learned = 0
-    for k in stats:
-        total_examples_learned += stats_first_learned[k]
-    print("Total examples learned at any point during training:", total_examples_learned)
-    assert total_examples_learned == (len(epoch_first_learned) - int(np.sum(epoch_first_learned == -1)))
-
-    if main_proc:
-        # Save the final statistics
-        with open(data_statistics_file, "wb") as f:
-            final_statistics = [sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cumulative_scores, stats_first_learned, epoch_cumulative_scores_first_learned]
-            pickle.dump(final_statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
-else:
-    assert os.path.exists(data_statistics_file)
-    print("Data files already found. Loading data statistics from file:", data_statistics_file)
-    
-    with open(data_statistics_file, "rb") as f:
-        final_statistics = pickle.load(f)
-        sorted_ex_list, epoch_learned, epoch_first_learned, stats, epoch_cumulative_scores, stats_first_learned, epoch_cumulative_scores_first_learned = final_statistics
+    probe_val_x = np.concatenate([np.array(traj_dataset[f"{k}_val"]) for k in main_classes_val], axis=0)
+    probe_val_binary_y = np.concatenate([np.array([class2idx[k] for _ in range(len(traj_dataset[f"{k}_val"]))]) for k in main_classes_val])
+    probe_val_y = np.concatenate([np.array([class2idx_val[k] for _ in range(len(traj_dataset[f"{k}_val"]))]) for k in main_classes_val])
+    print("Validation set:", probe_val_x.shape, probe_val_binary_y.shape, probe_val_y.shape)
 
 
-normalizers = make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_identity)
-yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
-                 label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
+    print("Training the trajectory classifier...")
+    n_neighbors = 20
+    clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
+    clf.fit(probe_train_x, probe_train_y)
 
-# ### Loss distribution plots
-
-# List of example_idx at different epochs i.e. [epoch_1_loss_vals, ...., epoch_n_loss_vals]
-ex_idx = [statistics["predictions"][i]["train"]["ex_idx"] for i in range(len(statistics["predictions"]))]
-loss_values = [statistics["predictions"][i]["train"]["loss"] for i in range(len(statistics["predictions"]))]
-print(len(ex_idx), len(loss_values))
-
-
-sorted_losses_all = []
-assert len(dataset_probe_identity) == len(comb_train_set)
-
-print("Computing the sorted loss list...")
-for i in range(len(ex_idx)):  # Iterate over the epochs
-    current_ex_idx = ex_idx[i]
-    current_loss_vals = loss_values[i]
-    assert len(current_ex_idx) == len(current_loss_vals), f"{len(current_ex_idx)} != {len(current_loss_vals)}"
-    current_sorted_loss_vals = [None for _ in range(len(dataset_probe_identity))]  # Includes both the training set as well as the probes i.e. len(comb_train_set)
-    for j, k in enumerate(current_ex_idx):
-        current_sorted_loss_vals[k] = current_loss_vals[j]
-    sorted_losses_all.append(current_sorted_loss_vals)
+    # Create the one-class classifier
+    clean_trajectories = traj_dataset["clean"]
+    clean_labels = np.array([0 for _ in range(len(clean_trajectories))])
+    oc_clf_neighbors = len(clean_trajectories)
+    oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
+    oc_clf.fit(clean_trajectories, clean_labels)
 
 
-class_names = list(np.unique(dataset_probe_identity))
-print(class_names)
+    print("Evaluating the trajectory classifier...")
+    for include_all_val in [False, True]:
+        if include_all_val:
+            current_probe_val_x, current_probe_val_y, plot_classes = probe_val_x, probe_val_y, main_classes_val
+        else:
+            mask = probe_val_y < len(main_classes)
+            print(f"Selecting {np.sum(mask)} probe examples for evaluating classifier without additional examples...")
+            current_probe_val_x, current_probe_val_y, plot_classes = probe_val_x[mask], probe_val_y[mask], main_classes
+
+        for normalize in [False, True]:
+            prediction = clf.predict(current_probe_val_x)
+            if include_all_val:  # Map predictions to all classes including additional ones
+                additional_cls_mask = probe_val_y >= len(main_classes)
+                correct_pred_mask = prediction == class2idx["backdoor"]
+                full_mask = np.logical_and(additional_cls_mask, correct_pred_mask)
+                prediction[full_mask] = current_probe_val_y[full_mask]  # Assign them to the actual corresponding class if they are correctly predicted as backdoors
+
+            test_acc = (prediction == current_probe_val_y).astype(np.float32).mean()
+            print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
+            plot_confusion_matrix_from_preds(current_probe_val_y, prediction, plot_classes, include_all_val,
+                                             num_example_probes, experiment_output_dir, normalize=normalize)
 
 
-one_more_plot(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                  dataset, main_proc, experiment_output_dir)
+    # In[ ]:
 
+    from plot_utils import plot_auc
 
-plot_loss_dynamics_and_violin(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                                  dataset, experiment_output_dir, main_proc)
+    # Plot detection TPR vs. FPR
+    print("Generating AUC plot...")
+    traj_preds = clf.predict_proba(probe_val_x)
+    assert len(traj_preds.shape) == 2, traj_preds.shape
 
+    neighbors_dist, _ = oc_clf.kneighbors(probe_val_x)
+    assert neighbors_dist.shape == (len(probe_val_x), oc_clf_neighbors), neighbors_dist.shape
+    avg_dist = neighbors_dist.mean(axis=1)
+    avg_dist = -avg_dist  # Transform the distance as clean is class 1 and pred should represent the score for class 1
 
-for val_included in [True, False]:
-    visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_identity,
-                                sorted_losses_all, experiment_output_dir, main_proc, dataset,
-                                val_included=val_included, clf=None, output_file=None)
+    # Plot the RoC curve
+    key_list = ["MAP-D", "MAP-D (only clean)"]
+    probe_val_y_mapped = probe_val_y.copy()
+    clean_idx = class2idx["clean"]
+    backdoor_idx = class2idx["backdoor"]
+    print(f"!! Clean idx: {clean_idx} / Backdoor idx: {backdoor_idx}")
 
+    probe_val_y_mapped[probe_val_y_mapped != clean_idx] = backdoor_idx
+    print("Difference between probe val y and mapped probe val y", np.sum(probe_val_y != probe_val_y_mapped))
 
-# Convert the data into a complete trajectory dataset
-print("Converting trajectories to dataset...")
-dataset = {}
-for i, cls in enumerate(class_names):
-    relevant_idx = [i for i in range(len(dataset_probe_identity)) if dataset_probe_identity[i] == cls]
-    print(f"Class: {cls} / # relevant idx: {len(relevant_idx)}")
-    
-    dataset[cls] = []
-    empty_idx = []
-    for j in range(len(relevant_idx)):
-        if sorted_losses_all[0][relevant_idx[j]] is None:  # The whole trajectory should be none since these examples are used in probes
-            assert all([sorted_losses_all[epoch][relevant_idx[j]] is None for epoch in range(len(sorted_losses_all))])
-            empty_idx.append(relevant_idx[j])
+    label_dict = {"MAP-D": probe_val_y_mapped}  # Already contains both 0s and 1s appropriate for this task
+    pred_dict = {"MAP-D": traj_preds[:, 1]}  # Probability of the label being 1 -- targets are also 1
+
+    label_dict["MAP-D (only clean)"] = label_dict["MAP-D"].copy()
+    pred_dict["MAP-D (only clean)"] = avg_dist
+
+    output_file = os.path.join(experiment_output_dir, f"auc_{dataset}_clean_vs_backdoor.png")
+    plot_auc(label_dict, pred_dict, key_list, output_file)
+
+    for current_cls in main_classes_val:
+        if current_cls == "clean":
             continue
-        trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
-        dataset[cls].append(trajectory)
-    assert len(dataset[cls]) == len(relevant_idx) - len(empty_idx)
-    if len(empty_idx) > 0:
-        print("Number of empty trajectories:", len(empty_idx))
 
-print("Total number of keys found:", dataset.keys(), {k: len(dataset[k]) for k in dataset.keys()})
-trajectory_dataset_file = os.path.join(experiment_output_dir, f"loss_trajectories.pkl")
-with open(trajectory_dataset_file, "wb") as f:
-    pickle.dump(dataset, f, protocol=pickle.HIGHEST_PROTOCOL)
-print("Trajectory dataset written to file:", trajectory_dataset_file)
+        cls_idx = class2idx_val[current_cls]
+        mask = np.logical_or(probe_val_y == cls_idx, probe_val_y == clean_idx)
 
+        selected_probe_val_y = probe_val_y[mask]
+        selected_probe_val_y[selected_probe_val_y == cls_idx] = backdoor_idx
+        selected_traj_preds = traj_preds[mask]
+        selected_oc_dist = avg_dist[mask]
 
-# In[ ]:
+        label_dict = {"MAP-D": selected_probe_val_y}  # Already contains both 0s and 1s appropriate for this task
+        pred_dict = {"MAP-D": selected_traj_preds[:, 1]}  # Probability of the label being 1 -- targets are also 1
 
+        label_dict["MAP-D (only clean)"] = label_dict["MAP-D"].copy()
+        pred_dict["MAP-D (only clean)"] = selected_oc_dist
 
-print("Converting trajectories to numpy dataset...")
-class_names = natsort.natsorted(list(dataset.keys()))
-print("Class names:", class_names)
-
-main_classes = [x for x in class_names if not x.endswith("_val") and x != "train"]
-print(main_classes)
-
-class2idx = {k: i for i, k in enumerate(main_classes)}
-idx2class = {i: k for i, k in enumerate(main_classes)}
-print(class2idx)
-print(idx2class)
+        output_file = os.path.join(experiment_output_dir, f"auc_{dataset}_clean_vs_backdoor_{current_cls}.png")
+        plot_auc(label_dict, pred_dict, key_list, output_file)
 
 
-# In[ ]:
+    def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class, output_dir, class_to_surface, probe_class_to_surface):
+        print("Computing probabilities for probe classes using kNN...")
 
+        iterator = 0
+        write_individual_img = True
 
-# Define a consolidated dataset
-probe_train_x = np.concatenate([np.array(dataset[k]) for k in main_classes], axis=0)
-probe_train_y = np.concatenate([np.array([class2idx[k] for _ in range(len(dataset[k]))]) for k in main_classes])
-print("Train set:", probe_train_x.shape, probe_train_y.shape)
+        folder_counter = {}
+        folder_queue = {}
 
-# Fix the validation set to include the new attacks -- will collapse them to the same class right now
-additional_val_classes = [f"backdoor_{attack_type}" for attack_type in attack_types]
-main_classes_val = main_classes + additional_val_classes
-print("Main validation classes:", main_classes_val)
-class2idx_val = copy.deepcopy(class2idx)
-class2idx.update({k: class2idx["backdoor"] for k in additional_val_classes})
+        if output_dir is not None:
+            for k in ref_probe_classes:
+                output_loc = os.path.join(output_dir, k)
+                if main_proc:
+                    print("Creating output location:", output_loc)
+                    if not os.path.exists(output_loc):
+                        os.makedirs(output_loc)
+                folder_counter[k] = 0
+                folder_queue[k] = []
 
-starting_idx = np.max([v for k, v in class2idx.items()]) + 1
-class2idx_val.update({k: starting_idx + idx for idx, k in enumerate(additional_val_classes)})
-print("Class2idx updated:", class2idx)
-print("Class2idx val:", class2idx_val)
+        for ((data, target), ex_idx) in idx_train_loader:
+            for i in range(len(target)):
+                if int(target[i]) != class_to_surface:
+                    continue
+                print("Found instance of class:", class_to_surface)
 
-probe_val_x = np.concatenate([np.array(dataset[f"{k}_val"]) for k in main_classes_val], axis=0)
-probe_val_binary_y = np.concatenate([np.array([class2idx[k] for _ in range(len(dataset[f"{k}_val"]))]) for k in main_classes_val])
-probe_val_y = np.concatenate([np.array([class2idx_val[k] for _ in range(len(dataset[f"{k}_val"]))]) for k in main_classes_val])
-print("Validation set:", probe_val_x.shape, probe_val_binary_y.shape, probe_val_y.shape)
+                # Get example loss trajectory
+                global_idx = int(ex_idx[i])
+                print("Selected global idx:", global_idx)
+                loss_traj = [sorted_losses_all[j][global_idx] for j in range(len(sorted_losses_all))]
+                if loss_traj[0] is None or global_idx >= len(train_set):  # Probe example
+                    continue
 
+                # Compute the probabilities of an example belonging to these different groups
+                probs = clf.predict_proba(np.array([loss_traj]))  # Cast it into a batch
+                pred = np.argmax(probs, axis=1)
+                assert len(pred) == 1
+                pred = pred[0]
+                pred_prob = float(probs[0, pred])
 
-print("Training the trajectory classifier...")
-n_neighbors = 20
-clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
-clf.fit(probe_train_x, probe_train_y)
+                # Save the images to folder
+                imgs = torch.nn.functional.interpolate(data.cpu(), size=(224, 224))
+                imgs = np.transpose(imgs.numpy(), (0, 2, 3, 1))  # BCHW -> BHWC
+                imgs = np.clip(imgs * 255, 0, 255).astype(np.uint8)
 
+                cls_name = train_set.classes[int(target[i])]
+                pred_folder = idx2class[pred]
 
+                if pred_folder not in probe_class_to_surface:
+                    continue
 
-print("Evaluating the trajectory classifier...")
-for include_all_val in [False, True]:
-    if include_all_val:
-        current_probe_val_x, current_probe_val_y, plot_classes = probe_val_x, probe_val_y, main_classes_val
-    else:
-        mask = probe_val_y < len(main_classes)
-        print(f"Selecting {np.sum(mask)} probe examples for evaluating classifier without additional examples...")
-        current_probe_val_x, current_probe_val_y, plot_classes = probe_val_x[mask], probe_val_y[mask], main_classes
-    
-    for normalize in [False, True]:
-        prediction = clf.predict(current_probe_val_x)
-        if include_all_val:  # Map predictions to all classes including additional ones
-            additional_cls_mask = probe_val_y >= len(main_classes)
-            correct_pred_mask = prediction == class2idx["backdoor"]
-            full_mask = np.logical_and(additional_cls_mask, correct_pred_mask)
-            prediction[full_mask] = current_probe_val_y[full_mask]  # Assign them to the actual corresponding class if they are correctly predicted as backdoors
-        
-        test_acc = (prediction == current_probe_val_y).astype(np.float32).mean()
-        print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
-        plot_confusion_matrix_from_preds(current_probe_val_y, prediction, plot_classes, include_all_val,
-                                         num_example_probes, experiment_output_dir, normalize=normalize)
+                if output_dir is not None:
+                    if write_individual_img:
+                        file_name = f"rank_{rank}_idx_{global_idx}_count_{folder_counter[pred_folder]}_conf_{pred_prob:.2f}_{cls_name}.png"
+                        output_loc = os.path.join(output_dir, pred_folder, file_name)
+                        img = imgs[i]
+                        cv2.imwrite(output_loc, img[:, :, ::-1])  # RGB -> BGR
 
+                        if iterator % 100 == 0:
+                            print("Writing image to fle:", output_loc)
 
-# In[ ]:
-
-
-def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class, output_dir, class_to_surface, probe_class_to_surface):
-    print("Computing probabilities for probe classes using kNN...")
-    
-    iterator = 0
-    write_individual_img = True
-    
-    folder_counter = {}
-    folder_queue = {}
-    
-    if output_dir is not None:
-        for k in ref_probe_classes:
-            output_loc = os.path.join(output_dir, k)
-            if main_proc:
-                print("Creating output location:", output_loc)
-                if not os.path.exists(output_loc):
-                    os.makedirs(output_loc)
-            folder_counter[k] = 0
-            folder_queue[k] = []
-    
-    for ((data, target), ex_idx) in idx_train_loader:
-        for i in range(len(target)):
-            if int(target[i]) != class_to_surface:
-                continue
-            print("Found instance of class:", class_to_surface)
-            
-            # Get example loss trajectory
-            global_idx = int(ex_idx[i])
-            print("Selected global idx:", global_idx)
-            loss_traj = [sorted_losses_all[j][global_idx] for j in range(len(sorted_losses_all))]
-            if loss_traj[0] is None or global_idx >= len(train_set):  # Probe example
-                continue
-            
-            # Compute the probabilities of an example belonging to these different groups
-            probs = clf.predict_proba(np.array([loss_traj]))  # Cast it into a batch
-            pred = np.argmax(probs, axis=1)
-            assert len(pred) == 1
-            pred = pred[0]
-            pred_prob = float(probs[0, pred])
-            
-            # Save the images to folder
-            imgs = torch.nn.functional.interpolate(data.cpu(), size=(224, 224))
-            imgs = np.transpose(imgs.numpy(), (0, 2, 3, 1))  # BCHW -> BHWC
-            imgs = np.clip(imgs * 255, 0, 255).astype(np.uint8)
-
-            cls_name = train_set.classes[int(target[i])]
-            pred_folder = idx2class[pred]
-            
-            if pred_folder not in probe_class_to_surface:
-                continue
-            
-            if output_dir is not None:
-                if write_individual_img:
-                    file_name = f"rank_{rank}_idx_{global_idx}_count_{folder_counter[pred_folder]}_conf_{pred_prob:.2f}_{cls_name}.png"
-                    output_loc = os.path.join(output_dir, pred_folder, file_name)
-                    img = imgs[i]
-                    cv2.imwrite(output_loc, img[:, :, ::-1])  # RGB -> BGR
-
-                    if iterator % 100 == 0:
-                        print("Writing image to fle:", output_loc)
-
-                    folder_counter[pred_folder] += 1
-                else:
-                    folder_queue[pred_folder].append((imgs[i], cls_name, probs[pred]))
-                    if len(folder_queue[pred_folder]) == num_queue_plots:
-                        file_name = f"rank_{rank}_idx_{global_idx}_count_{folder_counter[pred_folder]}_conf_{pred_prob:.2f}_{pred_folder}.png"
-                        output_file = os.path.join(output_dir, pred_folder, file_name)
-                        plot_probe_ex([x[0] for x in folder_queue[pred_folder]], [x[1] for x in folder_queue[pred_folder]],
-                                    [x[2] for x in folder_queue[pred_folder]], output_file)
                         folder_counter[pred_folder] += 1
-                        if iterator % 4 == 0:
-                            print("Writing image to fle:", output_file)
-                        iterator += 1
-                        folder_queue[pred_folder] = []  # Empty the queue
+                    else:
+                        folder_queue[pred_folder].append((imgs[i], cls_name, probs[pred]))
+                        if len(folder_queue[pred_folder]) == num_queue_plots:
+                            file_name = f"rank_{rank}_idx_{global_idx}_count_{folder_counter[pred_folder]}_conf_{pred_prob:.2f}_{pred_folder}.png"
+                            output_file = os.path.join(output_dir, pred_folder, file_name)
+                            plot_probe_ex([x[0] for x in folder_queue[pred_folder]], [x[1] for x in folder_queue[pred_folder]],
+                                        [x[2] for x in folder_queue[pred_folder]], output_file)
+                            folder_counter[pred_folder] += 1
+                            if iterator % 4 == 0:
+                                print("Writing image to fle:", output_file)
+                            iterator += 1
+                            folder_queue[pred_folder] = []  # Empty the queue
 
 
-surface_examples = False
-if surface_examples:
-    surface_dir = os.path.join(experiment_output_dir, f"surfaced_examples_{dataset}")
-    if main_proc:
-        if os.path.exists(surface_dir):
-            shutil.rmtree(surface_dir)
-        os.makedirs(surface_dir)
-    dist_utils.wait_for_other_procs()
+    surface_examples = False
+    if surface_examples:
+        surface_dir = os.path.join(experiment_output_dir, f"surfaced_examples_{dataset}")
+        if main_proc:
+            if os.path.exists(surface_dir):
+                shutil.rmtree(surface_dir)
+            os.makedirs(surface_dir)
+        dist_utils.wait_for_other_procs()
 
-    train_set.transform = transforms.Compose(no_transform)
-    if "cifar" in dataset or dataset == "mnist":
-        classes_to_surface = list(range(num_classes))
-    else:
-        classes_to_surface = [531, 671, 728, 901, 999]  # Digital watch, mountain bike, plastic bag, Whiskey jug, Tiolet tissue,
-        classes_to_surface += [407, 413, 417, 435, 465, 508, 510, 527]  # Ambulance, Assault gun, Baloon, Bath tub, Bulletproof vest, computer keyboard, container ship, desktop computer
-        classes_to_surface += [982, 471, 651, 653, 771, 810, 859]  # Groom, canon, microwave, milk can, safe, space bar, toaster
-        classes_to_surface += [954, 953, 919, 847, 657, 605, 569]  # Banana, pineapple, street sign, tank, missile, iPod, gas mask
-    print("Chosen class:", classes_to_surface)
+        train_set.transform = transforms.Compose(no_transform)
+        if "cifar" in dataset or dataset == "mnist":
+            classes_to_surface = list(range(num_classes))
+        else:
+            classes_to_surface = [531, 671, 728, 901, 999]  # Digital watch, mountain bike, plastic bag, Whiskey jug, Tiolet tissue,
+            classes_to_surface += [407, 413, 417, 435, 465, 508, 510, 527]  # Ambulance, Assault gun, Baloon, Bath tub, Bulletproof vest, computer keyboard, container ship, desktop computer
+            classes_to_surface += [982, 471, 651, 653, 771, 810, 859]  # Groom, canon, microwave, milk can, safe, space bar, toaster
+            classes_to_surface += [954, 953, 919, 847, 657, 605, 569]  # Banana, pineapple, street sign, tank, missile, iPod, gas mask
+        print("Chosen class:", classes_to_surface)
 
-    for class_to_surface in classes_to_surface:
-        print("Surfacing examples from class:", class_to_surface)
-        output_path = os.path.join(surface_dir, f"complete_traj_train_cls_{class_to_surface}_{train_set.classes[class_to_surface]}")
-        assign_probe_classes_knn(clf, new_idx_loader, sorted_losses_all, idx2class, output_path, class_to_surface, probe_class_to_surface=["backdoor"])
-    print("All files saved. Execution completed!")
+        for class_to_surface in classes_to_surface:
+            print("Surfacing examples from class:", class_to_surface)
+            output_path = os.path.join(surface_dir, f"complete_traj_train_cls_{class_to_surface}_{train_set.classes[class_to_surface]}")
+            assign_probe_classes_knn(clf, new_idx_loader, sorted_losses_all, idx2class, output_path, class_to_surface, probe_class_to_surface=["backdoor"])
+        print("All files saved. Execution completed!")
 
+    # TODO
+
+    def evaluate_attack_success(model, device):
+        # Iterate over all possible attack types
+        output_dict = {}
+        for i, attack_type in enumerate(["clean"] + attack_types):
+            attacked_test_dl = make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform,
+                                                   random_pattern, random_backdoor_alpha, img_size, distributed,
+                                                   num_workers,batch_size)
+            correct, total = 0, 0
+            model.eval()
+            for (data, target), ex_idx in tqdm(attacked_test_dl):
+                data, target = data.to(device), target.to(device)
+                with torch.no_grad():
+                    pred = model(data).argmax(dim=1)
+                    correct_preds = (pred == target).sum()
+                    correct += int(correct_preds)
+                    total += len(data)
+            acc = 100. * float(correct) / total
+            if attack_type == "":
+                attack_type = "backdoor"
+            print(f"[!! STATS] Attack type: {attack_type} / Correct: {correct} / Total: {total} / Acc: {acc:.2f}%")
+            output_dict[attack_type] = {"correct": correct, "total": total, "accuracy": acc}
+        return output_dict
+
+
+    def train_model(clean_model, loader, optimizer, criterion, scaler, lr_scheduler, output_checkpoint):
+        for _ in range(num_epochs):
+            train(clean_model, device, loader, optimizer, criterion, scaler)
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+        torch.save(clean_model.state_dict(), output_checkpoint)
+        print("!! Final checkpoint written to file:", output_checkpoint)
+    
+    
+    # In[ ]:
+    # Evaluate the attack success rate
+    output_dict = evaluate_attack_success(model, device)
+    output_file = os.path.join(experiment_output_dir, f"attack_success_initial.png")
+    print(output_dict)
+    plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model")
+    # In[ ]:
+    print("!! Collecting clean training indices...")
+    losses_np = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
+    missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
+    available_ex = np.logical_not(missing_vals)
+    num_missing_vals = np.sum(missing_vals)
+    print(f"!! Total loss traj len: {len(losses_np)} / Missing vals in loss trajs: {num_missing_vals}")
+    avail_ex_probs = clf.predict_proba(losses_np[available_ex])
+    all_ex_probs = np.zeros((len(losses_np), 2), dtype=avail_ex_probs.dtype)
+    all_ex_probs[available_ex] = avail_ex_probs
+    all_ex_probs[missing_vals] = 1.1  # Always marked as probes and removed
+    assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
+    print("Output probs shape:", all_ex_probs.shape)
+    # In[ ]:
+    thresh_list = [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    print("Threshold list:", thresh_list)
+
+if defense == "nc":
+    print("Final train accuracy:", statistics["train"][-1])
+    print("Final test accuracy:", statistics["test"][-1])
+
+
+    def apply_mask_and_trigger(batch, mask, trigger):
+        return batch * (1 - mask) + mask * trigger
+
+
+    def train_cleanse(model, mask, trigger, optimizer, target_class, use_autocast=False, log_interval=5):
+        optimizer.zero_grad()
+        pbar = tqdm(new_idx_loader)
+        for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
+            data = data.to(device)
+            data = apply_mask_and_trigger(data, mask, trigger)
+            cleanse_target = torch.full(target.shape, target_class, device='cuda')
+            optimizer.zero_grad()
+
+            with torch.cuda.amp.autocast(enabled=use_autocast):
+                output = model(data)
+                trigger_loss = criterion(output, cleanse_target).mean()
+                l1_loss = torch.norm(mask, p=1)
+                loss = trigger_loss + l1_loss
+
+            loss.backward()
+            optimizer.step()
+
+            if batch_idx % log_interval == 0:
+                pbar.set_description(f"Loss: {float(loss):.4f}")
+            torch.cuda.synchronize()
+
+
+    l1_penalty_ratio = 1.0
+    cleanse_epochs = 20
+
+    for cls in range(num_classes):
+        # for every possible label
+        mask = torch.nn.Parameter(torch.rand(size=img_size, device='cuda'))
+        mask_original = mask.clone()
+        trigger = torch.nn.Parameter(torch.rand(size=img_size, device='cuda'))
+        cleanse_opt = torch.optim.Adam((mask, trigger))
+        for _ in range(cleanse_epochs):
+            train_cleanse(model, mask, trigger, cleanse_opt, cls)
+            # print(mask - mask_original)
+
+        print(cls, float(torch.norm(mask, p=1)))
+
+if defense == "ac":
+    activations = {}
+
+    def get_activation(name):
+        def hook(model, input, output):
+            activations[name] = output.detach()
+
+        return hook
+
+    model.fc1_act.register_forward_hook(get_activation('fc1_act'))
+    activations_by_class = {i: [] for i in range(10)}
+
+    pbar = tqdm(new_idx_loader)
+    for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
+        data = data.to(device)
+        with torch.cuda.amp.autocast(enabled=False):
+            output = model(data)
+            predictions = torch.argmax(output, 1)
+
+        for predicted_class, activation in zip(predictions, activations['fc1_act']):
+            activations_by_class[predicted_class.item()].append(activation)
+
+    dim_reducer = sklearn.decomposition.FastICA(n_components=10)  # Magic number from paper
+    clusterer = sklearn.cluster.KMeans(n_clusters=2)  # Unclear if this can be reasonably extended -- are there clustering algos that learn the number of clusters?
+
+    for cls in range(num_classes):
+        data = torch.vstack(activations_by_class[cls]).to('cpu')
+        data = data[:, data.sum(dim=0).bool()]  # remove zero columns
+
+        fit = dim_reducer.fit_transform(data)
+        clustering = clusterer.fit_predict(fit)
+        # Relative size comparison
+        rsc_score = sum(clustering) / len(data)
+        if rsc_score > 0.5:
+            rsc_score = 1 - rsc_score
+        print(cls, f"{rsc_score:.3f}")
+        sil_score = sklearn.metrics.silhouette_score(fit, clustering)
+        print(cls, f"{sil_score:.3f}")
