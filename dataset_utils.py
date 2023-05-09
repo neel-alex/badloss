@@ -179,7 +179,7 @@ def make_probe_dataset(probes, train_set, test_set, dataset, batch_size, num_exa
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
-    train_loader = get_loader(train_set, distributed, num_workers, train_indices, batch_size=batch_size)
+    train_loader = get_loader(train_set, distributed, num_workers, indices=train_indices, batch_size=batch_size)
     test_loader = get_loader(test_set, distributed, num_workers, batch_size=batch_size)
 
     # In[ ]:
@@ -254,7 +254,8 @@ def make_probe_dataset(probes, train_set, test_set, dataset, batch_size, num_exa
     # Setup the probe validation set
     val_probe_dataset = ProbeDataset(val_probe_dataset_standard, val_probe_identity)
     val_probe_indices = [i for i in range(len(val_probe_dataset_standard))]
-    val_probe_loader = get_loader(val_probe_dataset, distributed, num_workers, val_probe_indices, batch_size=batch_size)
+    val_probe_loader = get_loader(val_probe_dataset, distributed, num_workers,
+                                  indices=val_probe_indices, batch_size=batch_size)
 
     # In[ ]:
 
@@ -286,11 +287,13 @@ def make_index_dataset(comb_train_set, comb_train_indices, test_set,
     idx_dataset_wo_aug = copy.deepcopy(idx_dataset)
     idx_dataset_wo_aug.dataset.datasets[0].transform = transforms.Compose(no_transform)
 
-    new_idx_loader = get_loader(idx_dataset, distributed, num_workers, comb_train_indices, batch_size=batch_size)
-    new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers, comb_train_indices, batch_size=batch_size)
+    new_idx_loader = get_loader(idx_dataset, distributed, num_workers,
+                                indices=comb_train_indices, batch_size=batch_size)
+    new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers,
+                                       indices=comb_train_indices, batch_size=batch_size)
     test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, batch_size=batch_size)
 
-    return new_idx_loader, new_idx_loader_wo_aug, test_idx_loader
+    return new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
 
 
 def combine_dataset(train_set, train_indices, probe_dataset_standard, val_probe_dataset_standard,

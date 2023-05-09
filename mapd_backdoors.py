@@ -40,7 +40,7 @@ from torch_utils import get_model, train, test, test_tensor
 
 # Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning)
 #   TODO: ss (spectral signatures), freq (frequency analysis)
-defense = "freq"
+defense = "mapd"
 
 # Set random seed
 seed = 3
@@ -214,7 +214,7 @@ comb_train_set, comb_train_indices, dataset_probe_identity = \
     combine_dataset(train_set, train_indices, probe_dataset_standard, val_probe_dataset_standard,
                     probe_identity, val_probe_identity, use_val_probes_for_training)
 
-new_idx_loader, new_idx_loader_wo_aug, test_idx_loader = \
+new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
     make_index_dataset(comb_train_set, comb_train_indices, test_set,
                        no_transform, batch_size, distributed, num_workers)
 
@@ -918,6 +918,76 @@ if defense == "mapd":
     thresh_list = [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
 
+    from dataset_utils import get_loader, IdxDataset
+
+    output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
+    if not os.path.exists(output_checkpoint_dir):
+        os.makedirs(output_checkpoint_dir)
+        print("!! Checkpoint output directory created:", output_checkpoint_dir)
+
+    for train_type in ["original", "cleaned", "random"]:
+        print("=" * 100)
+        print(f"!! Using {train_type} training set....")
+
+        current_thresh_list = [None] if train_type == "original" else thresh_list
+        for threshold in current_thresh_list:
+            if train_type == "original":
+                # Use the training set w/o attacks
+                assert threshold is None, threshold
+                new_train_set_dl = get_loader(IdxDataset(train_set_wo_aug), distributed=distributed,
+                                              num_workers=num_workers, batch_size=batch_size)
+                title = "Retraining on the original train set (w/o backdoors)"
+            else:
+                assert threshold is not None, threshold
+                is_clean = all_ex_probs[:,
+                           backdoor_idx] <= threshold  # probability of an example being the backdoor is less than thresh
+                clean_indices = np.where(is_clean)[0]
+
+                if train_type == "cleaned":  # Remove examples marked as backdoors
+                    print(
+                        f"!! [Dataset cleansing] Total examples: {len(is_clean)} / # clean indices: {len(clean_indices)}")
+                    new_train_set_dl = get_loader(idx_dataset, indices=clean_indices, distributed=distributed,
+                                                  num_workers=num_workers, batch_size=batch_size)
+                    selected_indices = clean_indices
+                else:
+                    assert train_type == "random", train_type
+                    selected_indices = np.random.choice(np.arange(len(idx_dataset)), size=(len(clean_indices),),
+                                                        replace=False)
+
+                num_avail_ex = len(is_clean) - num_missing_vals
+                title = f"{'Random' if train_type == 'random' else 'Clean'} idx retraining (thresh={threshold:.1f}) [Total={len(is_clean)} / Selected: {len(selected_indices)}]"
+                print(
+                    f"!! Train type: {train_type} / Threshold: {threshold} / Total examples: {num_avail_ex} / # selected indices: {len(selected_indices)}")
+                new_train_set_dl = get_loader(idx_dataset, indices=selected_indices, distributed=distributed,
+                                              num_workers=num_workers, batch_size=batch_size)
+
+            clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+            optimizer = torch.optim.SGD(clean_model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+            lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+            scaler = torch.cuda.amp.GradScaler()
+
+            postfix = ""
+            if threshold is not None:
+                postfix = f"_thresh_{threshold:.1f}"
+            output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_{train_type}{postfix}.pth")
+            print("Selected output checkpoint:", output_checkpoint)
+            if not os.path.exists(output_checkpoint):  # Train the model
+                print("!! Output checkpoint not found. Training model from scratch...")
+                train_model(clean_model, new_train_set_dl, optimizer, criterion, scaler, lr_scheduler,
+                            output_checkpoint)
+            else:  # Load the model
+                print("!! Loading model from pretrained checkpoint:", output_checkpoint)
+                clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
+
+            # Evaluate the attack success rate for the model trained on clean data
+            output_dict = evaluate_attack_success(clean_model, device)
+
+            output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
+            plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title)
+            print("~" * 100)
+        print("=" * 100)
+
+
 if defense == "nc":
     print("Final train accuracy:", statistics["train"][-1])
     print("Final test accuracy:", statistics["test"][-1])
@@ -1138,6 +1208,50 @@ if defense == "freq":
         print(f"Accuracy ({k}): {per_class[k]}")
 
     # Remove and retrain...
+    retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
+    from dataset_utils import get_loader
+
+    retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
+                                  indices=retrain_indices, batch_size=batch_size)
+
+    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+    clean_optimizer = torch.optim.SGD(clean_model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    clean_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    clean_scaler = torch.cuda.amp.GradScaler()
+
+    output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
+    if main_proc and not os.path.exists(output_checkpoint_dir):
+        os.mkdir(output_checkpoint_dir)
+    output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_{detection_thresh:.1f}.pth")
+
+    print("Selected output checkpoint:", output_checkpoint)
+    if not os.path.exists(output_checkpoint):  # Train the model
+        print("!! Output checkpoint not found. Training model from scratch...")
+        for _ in range(num_epochs):
+            train(clean_model, device, retrain_set_dl, clean_optimizer, criterion, clean_scaler)
+            if clean_lr_scheduler is not None:
+                clean_lr_scheduler.step()
+        torch.save(clean_model.state_dict(), output_checkpoint)
+    else:  # Load the model
+        print("!! Loading model from pretrained checkpoint:", output_checkpoint)
+        clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
+
+    # Evaluate accuracy
+    backdoor_stats, backdoor_preds = test_tensor(clean_model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
+    val_backdoor_stats, val_backdoor_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
+    clean_stats, clean_preds = test_tensor(clean_model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
+    val_clean_stats, val_clean_preds = test_tensor(clean_model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
+
+    val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
+    val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
+    val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
+    val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
+    val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
+
+    # Get overall clean accuracy
+    test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
+    print(f"Freq: Clean acc: {test_stats['acc']}")
+    print(test_stats, test_preds)
 
 
 
