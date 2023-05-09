@@ -243,3 +243,88 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
         f"{header} | Loss mean: {output_dict['loss_mean']:.4f} | Loss std: {output_dict['loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
 
     return output_dict, pred_dict
+
+
+class FreqCNN(torch.nn.Module):
+    def __init__(self, image_shape):
+        """
+            image_shape: [c, h, w]
+        """
+        super(FreqCNN, self).__init__()
+
+        self.conv1 = torch.nn.Conv2d(image_shape[0], 32, kernel_size=3, padding=1)
+        self.bn1 = torch.nn.BatchNorm2d(32)
+        self.elu1 = torch.nn.ELU()
+
+        self.conv2 = torch.nn.Conv2d(32, 32, kernel_size=3, padding=1)
+        self.bn2 = torch.nn.BatchNorm2d(32)
+        self.elu2 = torch.nn.ELU()
+
+        self.maxpool1 = torch.nn.MaxPool2d(kernel_size=2)
+        self.dropout1 = torch.nn.Dropout2d(p=0.2)
+
+        self.conv3 = torch.nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn3 = torch.nn.BatchNorm2d(64)
+        self.elu3 = torch.nn.ELU()
+
+        self.conv4 = torch.nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.bn4 = torch.nn.BatchNorm2d(64)
+        self.elu4 = torch.nn.ELU()
+
+        self.maxpool2 = torch.nn.MaxPool2d(kernel_size=2)
+        self.dropout2 = torch.nn.Dropout2d(p=0.3)
+
+        self.conv5 = torch.nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn5 = torch.nn.BatchNorm2d(128)
+        self.elu5 = torch.nn.ELU()
+
+        self.conv6 = torch.nn.Conv2d(128, 128, kernel_size=3, padding=1)
+        self.bn6 = torch.nn.BatchNorm2d(128)
+        self.elu6 = torch.nn.ELU()
+
+        self.maxpool3 = torch.nn.MaxPool2d(kernel_size=2)
+        self.dropout3 = torch.nn.Dropout2d(p=0.4)
+
+        self.flatten = torch.nn.Flatten()
+
+        # TODO: Make this adjust to image size...
+        self.fc1 = torch.nn.Linear((image_shape[1] // 2 // 2 // 2) * (image_shape[2] // 2 // 2 // 2) * 128, 2)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.elu1(x)
+
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.elu2(x)
+
+        x = self.maxpool1(x)
+        x = self.dropout1(x)
+
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = self.elu3(x)
+
+        x = self.conv4(x)
+        x = self.bn4(x)
+        x = self.elu4(x)
+
+        x = self.maxpool2(x)
+        x = self.dropout2(x)
+
+        x = self.conv5(x)
+        x = self.bn5(x)
+        x = self.elu5(x)
+
+        x = self.conv6(x)
+        x = self.bn6(x)
+        x = self.elu6(x)
+
+        x = self.maxpool3(x)
+        x = self.dropout3(x)
+
+        x = self.flatten(x)
+        x = self.fc1(x)
+
+        return x

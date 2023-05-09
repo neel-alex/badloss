@@ -39,8 +39,8 @@ from torch_utils import get_model, train, test, test_tensor
 
 
 # Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning)
-#   TODO: ss (spectral signatures), fr (frequency analysis)
-defense = "ac"
+#   TODO: ss (spectral signatures), freq (frequency analysis)
+defense = "freq"
 
 # Set random seed
 seed = 3
@@ -69,6 +69,9 @@ log_predictions = True
 distributed = True if dataset == "imagenet" else False
 num_train_probes = 250
 num_val_probes = 250
+if defense == 'abl':
+    num_train_probes = 2500
+    num_val_probes = 2500
 use_val_probes_for_training = True
 num_example_probes = num_train_probes + num_val_probes
 random_backdoor_alpha = 0.1
@@ -163,6 +166,8 @@ else:
 print(dataset, num_classes)
 
 attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "warped"]
+if defense == 'abl':
+    attack_types = [""]
 probes, chosen_attack_targets, random_pattern = make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
                                                             random_backdoor_alpha, experiment_output_dir, main_proc, img_size, device)
 
@@ -244,7 +249,7 @@ label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
 
 
 if not os.path.exists(model_file):
-    if defense in {"mapd", "nc", "ac"}:
+    if defense in {"mapd", "nc", "ac", "freq"}:
         statistics = {"train": [], "test": []}
         statistics.update({k: [] for k in ref_probe_classes})
         statistics.update({f"{k}_val": [] for k in ref_probe_classes})  # Add keys for validation probes
@@ -411,7 +416,7 @@ if not os.path.exists(model_file):
 else:
     assert os.path.exists(data_file)
     print("Data files already found. Loading data from saved checkpoints...")
-    
+
     model.load_state_dict(torch.load(model_file, map_location=device))
     with open(data_file, "rb") as f:
         statistics = pickle.load(f)
@@ -888,8 +893,8 @@ if defense == "mapd":
                 lr_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint)
         print("!! Final checkpoint written to file:", output_checkpoint)
-    
-    
+
+
     # In[ ]:
     # Evaluate the attack success rate
     output_dict = evaluate_attack_success(model, device)
@@ -987,7 +992,7 @@ if defense == "ac":
 
     for cls in range(num_classes):
         data = torch.vstack(activations_by_class[cls]).to('cpu')
-        data = data[:, data.sum(dim=0).bool()]  # remove zero columns
+        data = data[:, data.sum(dim=0).bool()]  # remove zero columns, otherwise dim reduction outputs all 0s
 
         fit = dim_reducer.fit_transform(data)
         clustering = clusterer.fit_predict(fit)
@@ -998,3 +1003,142 @@ if defense == "ac":
         print(cls, f"{rsc_score:.3f}")
         sil_score = sklearn.metrics.silhouette_score(fit, clustering)
         print(cls, f"{sil_score:.3f}")
+
+if defense == "freq":
+    # They use a series of transformations similar to backdoor images to train their detector.
+    # We could do that to reproduce their results exactly:
+    #   * White square
+    #   * Colored noise square
+    #   * Gaussian noise
+    #   * Random shadow
+    #   * Random blend
+    # However, I think it's probably more fair to mapd to do an identical comparison -- train their detector on
+    #   bona fide clean and inserted backdoor probe examples, the same way mapd is trained on bona fide clean and
+    #   backdoor probes examples.
+    freq_probes = {
+        'clean': probes['clean'].cpu().numpy(),
+        'backdoor': probes['backdoor'].cpu().numpy(),
+    }
+    from scipy.fftpack import dct
+
+    def dct2(block):
+        # Copied from:
+        #   https://github.com/YiZeng623/frequency-backdoor/blob/main/Sec4_Frequency_Detection/Train_Detection.ipynb
+        return dct(dct(block.T, norm='ortho').T, norm='ortho')
+
+    for key in freq_probes:
+        num_images = freq_probes[key].shape[0]
+        channels = freq_probes[key].shape[1]  # NCHW required
+        for n in range(num_images):
+            for c in range(channels):
+                freq_probes[key][n, c, :, :] = dct2(freq_probes[key][n, c, :, :])
+
+    freq_train_set = torch.vstack((torch.tensor(freq_probes['clean']),
+                                   torch.tensor(freq_probes['backdoor'])))
+    freq_labels = torch.hstack((torch.zeros(freq_probes['clean'].shape[0], dtype=torch.long),
+                                torch.ones(freq_probes['backdoor'].shape[0], dtype=torch.long)))
+
+    from torch.utils.data import TensorDataset, DataLoader
+
+    freq_dataset = TensorDataset(freq_train_set, freq_labels)
+    freq_dataloader = DataLoader(freq_dataset, batch_size=32, shuffle=True)
+
+    from torch_utils import FreqCNN
+    freq_model = FreqCNN(freq_train_set[0].shape).to(device)
+
+    freq_criterion = torch.nn.CrossEntropyLoss()
+    freq_optimizer = torch.optim.Adadelta(freq_model.parameters(), lr=0.05, weight_decay=1e-4)
+
+    model.train()
+    for epoch in range(10):
+        epoch_loss = 0.
+        epoch_correct = 0
+        for batch, labels in freq_dataloader:
+            batch, labels = batch.to(device), labels.to(device)
+
+            freq_optimizer.zero_grad()
+
+            outputs = freq_model(batch)
+
+            correct = (outputs.argmax(axis=1) == labels).sum()
+            loss = freq_criterion(outputs, labels)
+            loss = loss.sum()
+            loss.backward()
+            freq_optimizer.step()
+
+            epoch_loss += loss.item()
+            epoch_correct += correct.item()
+        print(f"Epoch {epoch+1} loss: {epoch_loss/len(freq_dataset):.6f}, acc: {epoch_correct/len(freq_dataset):.6f}")
+
+    # Filter the dataset:
+    model.eval()
+    detection_thresh = 0.5
+    identified_indices = []
+    for (image, label), indices in new_idx_loader_wo_aug:
+        image = image.cpu().numpy()
+        num_images = image.shape[0]
+        channels = image.shape[1]  # NCHW required
+        for n in range(num_images):
+            for c in range(channels):
+                image[n, c, :, :] = dct2(image[n, c, :, :])
+
+        image = torch.tensor(image, device=device)
+        outputs = freq_model(image)
+        outputs = torch.nn.functional.softmax(outputs, dim=1)
+
+        probs = outputs[:, 1]
+
+        identified_indices.append(indices[(probs.cpu() >= detection_thresh).nonzero()[:, 0]])
+
+    identified_indices = torch.hstack(identified_indices)
+    false_pos = np.intersect1d(identified_indices, torch.tensor(range(len(train_set))))
+    true_pos = np.array([])
+    import itertools
+    results = {k: 0 for k in itertools.chain(set(probe_identity), set(val_probe_identity))}
+    for i, id in enumerate(probe_identity):
+        if len(train_set) + i in identified_indices:
+            if id == 'clean':
+                false_pos = np.append(false_pos, i)
+            else:
+                results[id] += 1
+                true_pos = np.append(true_pos, i)
+
+    for i, id in enumerate(val_probe_identity):
+        if len(train_set) + len(probe_identity) + i in identified_indices:
+            if id == 'clean_val':
+                false_pos = np.append(false_pos, i)
+            else:
+                results[id] += 1
+                true_pos = np.append(true_pos, i)
+
+    num_attacks = len(attack_types * 2 * num_train_probes)
+    clean_train = len(train_set) - num_attacks
+
+    false_positive = len(false_pos)
+    true_positive = len(true_pos)
+    true_negative = clean_train - false_positive
+    false_negative = num_attacks - true_positive
+
+    per_class = {
+        'clean': (num_train_probes - results['clean']) / num_train_probes,
+        'backdoor': results['backdoor'] / num_train_probes,
+        'clean_val': (num_train_probes - results['clean']) / num_train_probes,
+        'backdoor_val': results['backdoor_val'] / num_train_probes,
+    }
+
+    for attack in attack_types:
+        if not attack:
+            continue
+        per_class[attack] = results['backdoor_' + attack + '_val'] / (num_train_probes * 2)
+
+    print(f"FPR: {false_positive / (false_positive + true_negative)}")
+    print(f"FNR: {false_negative / (false_negative + true_positive)}")
+    print("Per class accuracies of frequency detector...")
+    for k in per_class:
+        print(f"Accuracy ({k}): {per_class[k]}")
+
+    # Remove and retrain...
+
+
+
+
