@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 import sklearn.neighbors
+import sklearn.ensemble
 from sklearn.metrics import confusion_matrix, RocCurveDisplay, roc_curve, auc
 
 import torch
@@ -1797,6 +1798,13 @@ oc_clf_neighbors = len(clean_trajectories)
 oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
 oc_clf.fit(clean_trajectories, clean_labels)
 
+lof_clf_neighbors = oc_clf_neighbors
+lof_clf = sklearn.neighbors.LocalOutlierFactor(lof_clf_neighbors, novelty=True)
+lof_clf.fit(clean_trajectories)
+
+iso_for_clf = sklearn.ensemble.IsolationForest(n_estimators=20, warm_start=True)
+iso_for_clf.fit(clean_trajectories)
+
 
 # In[ ]:
 
@@ -1962,8 +1970,29 @@ assert neighbors_dist.shape == (len(probe_val_x), oc_clf_neighbors), neighbors_d
 avg_dist = neighbors_dist.mean(axis=1)
 avg_dist = -avg_dist  # Transform the distance as clean is class 1 and pred should represent the score for class 1
 
+# Add a average trajectory classifier which just computes the distance to the average trajectory of the entire training set
+all_trajs = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
+avail_vals = np.logical_not(np.isnan(all_trajs).any(axis=1))  # Identify probe examples
+all_trajs = all_trajs[avail_vals]
+avg_traj = np.mean(all_trajs, axis=0)
+print("Average trajectory size:", avg_traj.shape)
+
+traj_diff = probe_val_x - avg_traj[None, :]
+dist_avg_traj = np.linalg.norm(traj_diff, axis=1)
+print("Distance avg trajectory shape:", dist_avg_traj.shape)
+dist_avg_traj = -dist_avg_traj  # Transform the distance as clean is class 1 and pred should represent the score for class 1
+
+percentile = 100
+max_abs_traj_grad = np.percentile(np.abs(probe_val_x[:, 1:] - probe_val_x[:, :-1]), percentile, axis=1)  # First order gradient
+max_abs_avg_traj_grad = np.percentile(np.abs(avg_traj[1:] - avg_traj[:-1]), percentile, axis=0)  # First order gradient
+max_grad_diff = max_abs_traj_grad - max_abs_avg_traj_grad
+max_grad_diff = -max_grad_diff  # Transform the distance as clean is class 1 and pred should represent the score for class 1
+
+inlier_score_lof = lof_clf.score_samples(probe_val_x)  # computes inlier score -- higher = inlier (already the score of class 1)
+inlier_score_iso_for = iso_for_clf.score_samples(probe_val_x)  # computes inlier score -- higher = inlier (already the score of class 1)
+
 # Plot the RoC curve
-key_list = ["MAP-D", "MAP-D (only clean)"]
+key_list = ["MAP-D", "MAP-D (only clean)", "Avg traj dist", "Local Outlier Factor", "Isolation Forest"]
 probe_val_y_mapped = probe_val_y.copy()
 clean_idx = class2idx["clean"]
 backdoor_idx = class2idx["backdoor"]
@@ -1977,6 +2006,18 @@ pred_dict = {"MAP-D": traj_preds[:, 1]}  # Probability of the label being 1 -- t
 
 label_dict["MAP-D (only clean)"] = label_dict["MAP-D"].copy()
 pred_dict["MAP-D (only clean)"] = avg_dist
+
+label_dict["Avg traj dist"] = label_dict["MAP-D"].copy()
+pred_dict["Avg traj dist"] = dist_avg_traj
+
+label_dict["Avg traj max grad dist"] = label_dict["MAP-D"].copy()
+pred_dict["Avg traj max grad dist"] = max_grad_diff
+
+label_dict["Local Outlier Factor"] = label_dict["MAP-D"].copy()
+pred_dict["Local Outlier Factor"] = inlier_score_lof
+
+label_dict["Isolation Forest"] = label_dict["MAP-D"].copy()
+pred_dict["Isolation Forest"] = inlier_score_iso_for
 
 output_file = os.path.join(experiment_output_dir, f"auc_{dataset_name}_clean_vs_backdoor.png")
 plot_auc(label_dict, pred_dict, key_list, output_file)
@@ -1992,12 +2033,28 @@ for current_cls in main_classes_val:
     selected_probe_val_y[selected_probe_val_y == cls_idx] = backdoor_idx
     selected_traj_preds = traj_preds[mask]
     selected_oc_dist = avg_dist[mask]
+    selected_dist_avg_traj = dist_avg_traj[mask]
+    selected_max_grad_diff = max_grad_diff[mask]
+    selected_inlier_score_lof = inlier_score_lof[mask]
+    selected_inlier_score_iso_for = inlier_score_iso_for[mask]
     
     label_dict = {"MAP-D": selected_probe_val_y}  # Already contains both 0s and 1s appropriate for this task
     pred_dict = {"MAP-D": selected_traj_preds[:, 1]}  # Probability of the label being 1 -- targets are also 1
     
     label_dict["MAP-D (only clean)"] = label_dict["MAP-D"].copy()
     pred_dict["MAP-D (only clean)"] = selected_oc_dist
+    
+    label_dict["Avg traj dist"] = label_dict["MAP-D"].copy()
+    pred_dict["Avg traj dist"] = selected_dist_avg_traj
+    
+    label_dict["Avg traj max grad dist"] = label_dict["MAP-D"].copy()
+    pred_dict["Avg traj max grad dist"] = selected_max_grad_diff
+    
+    label_dict["Local Outlier Factor"] = label_dict["MAP-D"].copy()
+    pred_dict["Local Outlier Factor"] = selected_inlier_score_lof
+    
+    label_dict["Isolation Forest"] = label_dict["MAP-D"].copy()
+    pred_dict["Isolation Forest"] = selected_inlier_score_iso_for
 
     output_file = os.path.join(experiment_output_dir, f"auc_{dataset_name}_clean_vs_backdoor_{current_cls}.png")
     plot_auc(label_dict, pred_dict, key_list, output_file)
@@ -2201,6 +2258,7 @@ def plot_attack_success_stats(output_dict, output_file, title=None):
     plt.ylabel("Accuracy (%)", fontsize=fontsize)
     plt.xticks(fontsize=fontsize, rotation=45, ha="right")
     plt.yticks(fontsize=fontsize)
+    plt.ylim(0, 100)
     
     if title is not None:
         plt.title(title, fontsize=fontsize-4)
