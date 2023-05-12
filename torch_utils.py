@@ -70,16 +70,17 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
             output = model(data)
             loss = criterion(output, target)
             loss = torch.clamp(loss, max=100)
-            losses[ex_idx] = loss
+            losses[ex_idx] = loss.detach()
             if flooding_threshold is not None:
-                loss = (loss - flooding_threshold).abs() + flooding_threshold
-            multipliers = torch.ones_like(loss)
+                loss = torch.sign(loss - flooding_threshold) * loss
+            
             if loss_max_indices is not None:
+                multipliers = torch.ones(loss.shape, dtype=torch.float32, device=loss.device)
                 for i, idx in enumerate(ex_idx):
                     if idx in loss_max_indices:
-                        multipliers[i] *= -1
+                        multipliers[i] = -1
                         max_losses[(loss_max_indices == idx).nonzero().item()] = loss[i]
-            loss = loss * multipliers
+                loss = loss * multipliers
 
         loss_values.append(loss.detach().clone())
 

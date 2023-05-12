@@ -40,7 +40,7 @@ from torch_utils import get_model, train, test, test_tensor
 
 # Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning)
 #   TODO: ss (spectral signatures), freq (frequency analysis)
-defense = "mapd"
+defense = "abl"
 
 # Set random seed
 seed = 3
@@ -69,7 +69,7 @@ log_predictions = True
 distributed = True if dataset == "imagenet" else False
 num_train_probes = 250
 num_val_probes = 250
-if defense == 'abl':
+if defense == 'abl':  # 10% backdoored examples
     num_train_probes = 2500
     num_val_probes = 2500
 use_val_probes_for_training = True
@@ -341,34 +341,28 @@ if not os.path.exists(model_file):
                 pickle.dump(statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     elif defense == "abl":
-        # sshhh it's just copying them
         if "cifar" in dataset:
             num_epochs = 100
-        # TODO: Fix this
+        
         initial_split = 0.2
         initial_epochs = int(num_epochs * initial_split)
         later_epochs = num_epochs - initial_epochs
         flooding_threshold = 0.5
-        selection_threshold = 0.5
+        selection_threshold = 0.01  # 1% of the total examples, even though the poisoning ratio is 10%
         for epoch in range(initial_epochs):
-            output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler,
-                                flooding_threshold=flooding_threshold)
+            train(model, device, new_idx_loader, optimizer, criterion, scaler, flooding_threshold=flooding_threshold)
+        
+        # Get the loss values for all examples in the dataset
+        _, pred_output_dict = test(model, device, criterion, new_idx_loader, distributed, rank, log_predictions=True)
+        losses = pred_output_dict["loss"]
+        ex_idx = pred_output_dict["ex_idx"]
 
-        # Why num example probes * 2? I don't really know... Maybe need to use len(attack_types)
-        # But I think it's because the train iterator doesn't iterate over indices that are covered by the probes
-        #   (see IdxDataset in dataset_utils for reference)
-        # So if train_set is 50000 examples, new_idx_loader.dataset could be 60000 examples, but when iterated over,
-        #   it would only show 50000 examples.
-
-        losses = output_dict["all_losses"]
-        sorted_losses, loss_idx = losses.sort()
-        loss_idx = loss_idx[num_example_probes*2:]
+        loss_idx = np.argsort(losses)  # Ascending sort
         indices_to_maximize = loss_idx[:int(len(train_set) * selection_threshold)]
-        # +num_example_probes*2 would be maximizing on all the backdoor probes
-        indices_to_maximize = torch.tensor(range(len(train_set) - 27500, len(train_set) + int(num_example_probes)))
-        print((indices_to_maximize > 60000).sum())
-        print(indices_to_maximize.shape)
-        print(indices_to_maximize)
+        ex_idx_to_maximize = [ex_idx[i] for i in indices_to_maximize]
+        
+        print("Indices to maximize shape:", indices_to_maximize.shape)
+        print("Indices to maximize:", indices_to_maximize)
         max_losses = []
 
         for epoch in range(later_epochs):
