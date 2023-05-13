@@ -39,7 +39,9 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False):
 
 
 def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, log_predictions=False,
-          use_autocast=False, flooding_threshold=None, loss_max_indices=None):
+          use_autocast=False, flooding_threshold=None, loss_max_indices=None, gradient_ascent=False,
+          flooding_type='flooding'):
+    assert flooding_type in ['lga', 'flooding']
     model.train()
     optimizer.zero_grad()
 
@@ -58,7 +60,11 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
             loss = criterion(output, target)
             loss = torch.clamp(loss, max=100)
             if flooding_threshold is not None:
-                loss = torch.sign(loss - flooding_threshold) * loss
+                if flooding_type == 'lga':
+                    loss = torch.sign(loss - flooding_threshold) * loss
+                else:
+                    assert flooding_type == 'flooding', flooding_type
+                    loss = (loss - flooding_threshold).abs() + flooding_threshold
             
             if loss_max_indices is not None:
                 multipliers = torch.ones(loss.shape, dtype=torch.float32, device=loss.device)
@@ -71,6 +77,8 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
 
         assert loss.shape == (len(data),)
         loss = loss.mean()  # Reduction has been disabled -- do explicit reduction
+        if gradient_ascent:
+            loss = -loss
 
         if use_autocast:
             scaler.scale(loss).backward()

@@ -328,14 +328,21 @@ if not os.path.exists(model_file):
         if "cifar" in dataset:
             num_epochs = 100
         
+        clean_finetuning_epochs = 60
+        unlearning_epochs = 5
+        
         initial_split = 0.2
         initial_epochs = int(num_epochs * initial_split)
         later_epochs = num_epochs - initial_epochs
         flooding_threshold = 0.5
         selection_threshold = 0.01  # 1% of the total examples, even though the poisoning ratio is 10%
-        for epoch in range(initial_epochs):
+        
+        # Step # 01: Regular pretraining
+        print("!! Performing initial pertraining with all examples (using loss flooding)...")
+        for epoch in range(num_epochs):
             train(model, device, new_idx_loader, optimizer, criterion, scaler, flooding_threshold=flooding_threshold)
         
+        # Step # 02: identify backdoored examples based on the loss value
         # Get the loss values for all examples in the dataset
         _, pred_output_dict = test(model, device, criterion, new_idx_loader, distributed, rank, log_predictions=True)
         losses = pred_output_dict["loss"]
@@ -360,18 +367,27 @@ if not os.path.exists(model_file):
         if use_gt_probes:
             print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
             indices_to_maximize = ground_truth_probes
-        indices_to_maximize = np.array(indices_to_maximize)  # used in train function
+        remaining_indices = [i for i in range(total_ex) if i not in indices_to_maximize and i not in missing_vals]
+        print(f"Selected indices / Clean indices: {len(remaining_indices)} / Backdoored indices: {len(indices_to_maximize)}")
         
-        # max_losses = []
+        # Step # 03: generate dataloaders based on the clean and backdoor indices
+        clean_dl = get_loader(new_idx_loader.dataset, remaining_indices)
+        detected_backdoors_dl = get_loader(new_idx_loader.dataset, indices_to_maximize)
         
-        for epoch in range(later_epochs):
+        # Step # 04: finetune the model only on clean data
+        print("!! Starting finetuning phase on the clean examples...")
+        for epoch in range(clean_finetuning_epochs):
+            output_dict = train(model, device, clean_dl, optimizer, criterion, scaler)
+        
+        # Step # 05: perform unlearning step on the identified backdoored examples
+        print("!! Starting unlearning phase on the identified backdoor examples...")
+        for epoch in range(unlearning_epochs):
             backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
                                                          probes["backdoor_labels"], msg="Backdoor probe",
                                                          log_predictions=log_predictions)
             clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
                                                    msg="Clean probe", log_predictions=log_predictions)
-            output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler,
-                                loss_max_indices=indices_to_maximize)
+            output_dict = train(model, device, detected_backdoors_dl, optimizer, criterion, scaler, gradient_ascent=True)
         
         # TODO
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
