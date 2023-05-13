@@ -49,19 +49,6 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
     loss_values = []
 
     pbar = tqdm(train_loader)
-    losses = torch.zeros(len(train_loader.dataset), device=next(model.parameters()).device)
-    if loss_max_indices is not None:
-        max_losses = torch.zeros(loss_max_indices.shape)
-        max_data = []
-        max_targets = []
-        for idx in loss_max_indices:
-            max_data.append(train_loader.dataset[idx][0][0])
-            max_targets.append(train_loader.dataset[idx][0][1])
-
-        max_data = torch.stack(max_data).to(next(model.parameters()).device)
-        max_targets = torch.tensor(max_targets).to(next(model.parameters()).device)
-        max_grad_losses = [criterion(model(max_data), max_targets).detach().cpu()]
-
     for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
@@ -70,7 +57,6 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
             output = model(data)
             loss = criterion(output, target)
             loss = torch.clamp(loss, max=100)
-            losses[ex_idx] = loss.detach()
             if flooding_threshold is not None:
                 loss = torch.sign(loss - flooding_threshold) * loss
             
@@ -79,7 +65,6 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
                 for i, idx in enumerate(ex_idx):
                     if idx in loss_max_indices:
                         multipliers[i] = -1
-                        max_losses[(loss_max_indices == idx).nonzero().item()] = loss[i]
                 loss = loss * multipliers
 
         loss_values.append(loss.detach().clone())
@@ -94,9 +79,6 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         else:
             loss.backward()
             optimizer.step()
-
-        if loss_max_indices is not None:
-            max_grad_losses.append(criterion(model(max_data), max_targets).detach().cpu())
 
         if log_predictions:
             predictions.append(output.argmax(dim=1).detach())
@@ -128,10 +110,6 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
         output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
 
-    output_dict["all_losses"] = losses
-
-    if loss_max_indices is not None:
-        output_dict["maxes"] = max_losses
     return output_dict
 
 

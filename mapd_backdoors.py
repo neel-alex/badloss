@@ -109,23 +109,7 @@ if distributed:
 main_proc = dist_utils.is_main_proc(local_rank, shared_fs=True)
 print("Is main proc?", main_proc)
 
-
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    import builtins as __builtin__
-    builtin_print = __builtin__.print
-
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
-
-    __builtin__.print = print
-
-
-setup_for_distributed(main_proc)
+dist_utils.setup_for_distributed(main_proc)
 warnings.filterwarnings("ignore", "Warning: Leaking Caffe2 thread-pool after fork. (function pthreadpool)", UserWarning)
 
 
@@ -359,12 +343,27 @@ if not os.path.exists(model_file):
 
         loss_idx = np.argsort(losses)  # Ascending sort
         indices_to_maximize = loss_idx[:int(len(train_set) * selection_threshold)]
-        ex_idx_to_maximize = [ex_idx[i] for i in indices_to_maximize]
+        indices_to_maximize = [int(ex_idx[i]) for i in indices_to_maximize]
+         
+        # Identify the maximum indices
+        total_ex = len(new_idx_loader.dataset)
+        missing_vals = [x for x in range(total_ex) if x not in ex_idx]
+        print(f"Ex idx stats / # vals: {total_ex} / Total: {len(ex_idx)} / Unique vals: {len(np.unique(ex_idx))} / Missing vals: {len(missing_vals)} / max idx: {np.max(ex_idx)}")
+        print(f"Indices to maximize / Len: {len(indices_to_maximize)} / Indices: {indices_to_maximize}")
         
-        print("Indices to maximize shape:", indices_to_maximize.shape)
-        print("Indices to maximize:", indices_to_maximize)
-        max_losses = []
-
+        ground_truth_probes = [i for i in range(len(ex_idx), total_ex)]
+        probes_detected = [i for i in indices_to_maximize if i >= len(ex_idx)]
+        print(f"Backdoor probe examples flagged: {len(probes_detected)} / {probes_detected}")
+        print(f"Ground truth probes: {len(ground_truth_probes)} / {ground_truth_probes}")
+        
+        use_gt_probes = True
+        if use_gt_probes:
+            print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
+            indices_to_maximize = ground_truth_probes
+        indices_to_maximize = np.array(indices_to_maximize)  # used in train function
+        
+        # max_losses = []
+        
         for epoch in range(later_epochs):
             backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
                                                          probes["backdoor_labels"], msg="Backdoor probe",
@@ -373,13 +372,7 @@ if not os.path.exists(model_file):
                                                    msg="Clean probe", log_predictions=log_predictions)
             output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler,
                                 loss_max_indices=indices_to_maximize)
-            max_losses.append(output_dict['maxes'])
-
-        max_losses = torch.stack(max_losses)
-        for i in range(10):
-            plt.plot(range(later_epochs), max_losses[:, i].detach().cpu().numpy())
-        plt.show()
-
+        
         # TODO
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                       log_predictions=log_predictions)
