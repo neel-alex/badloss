@@ -40,7 +40,8 @@ from torch_utils import get_model, train, test, test_tensor
 
 # Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning)
 #   TODO: ss (spectral signatures), freq (frequency analysis)
-defense = "mapd"
+defense = "ac"
+defenses_that_want_only_one_attack = {'abl'}
 
 # Set random seed
 seed = 3
@@ -69,7 +70,7 @@ log_predictions = True
 distributed = True if dataset == "imagenet" else False
 num_train_probes = 250
 num_val_probes = 250
-if defense == 'abl':
+if defense in defenses_that_want_only_one_attack:
     num_train_probes = 2500
     num_val_probes = 2500
 use_val_probes_for_training = True
@@ -166,7 +167,7 @@ else:
 print(dataset, num_classes)
 
 attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "warped"]
-if defense == 'abl':
+if defense in defenses_that_want_only_one_attack:
     attack_types = [""]
 probes, chosen_attack_targets, random_pattern = make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
                                                             random_backdoor_alpha, experiment_output_dir, main_proc, img_size, device)
@@ -249,7 +250,7 @@ label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
 
 
 if not os.path.exists(model_file):
-    if defense in {"mapd", "nc", "ac", "freq"}:
+    if defense in {"mapd", "nc", "ac", "ss", "freq"}:
         statistics = {"train": [], "test": []}
         statistics.update({k: [] for k in ref_probe_classes})
         statistics.update({f"{k}_val": [] for k in ref_probe_classes})  # Add keys for validation probes
@@ -277,17 +278,12 @@ if not os.path.exists(model_file):
             clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
             val_clean_stats, val_clean_preds = test_tensor(model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
 
-            val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"],
-                                                                                   msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
-            val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"],
-                                                                                       msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
-            val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"],
-                                                                                                         val_probes["backdoor_reversed_single_pix_labels"],
-                                                                                                         msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
-            val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"],
-                                                                               msg="Backdoor random (val)", log_predictions=log_predictions)
-            val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"],
-                                                                               msg="Backdoor warped (val)", log_predictions=log_predictions)
+            if defense not in defenses_that_want_only_one_attack:
+                val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
+                val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
+                val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
+                val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
+                val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
 
             if log_predictions:
                 statistics["train"].append(train_stats)
@@ -300,22 +296,24 @@ if not os.path.exists(model_file):
                 predictions[epoch]["clean_val"] = val_clean_preds
                 predictions[epoch]["backdoor"] = backdoor_preds
                 predictions[epoch]["backdoor_val"] = val_backdoor_preds
-                predictions[epoch]["backdoor_reversed_val"] = val_backdoor_reversed_preds
-                predictions[epoch]["backdoor_single_pix_val"] = val_backdoor_single_pix_preds
-                predictions[epoch]["backdoor_reversed_single_pix_val"] = val_backdoor_reversed_single_pix_preds
-                predictions[epoch]["backdoor_random_val"] = val_backdoor_random_preds
-                predictions[epoch]["backdoor_warped_val"] = val_backdoor_warped_preds
+                if defense not in defenses_that_want_only_one_attack:
+                    predictions[epoch]["backdoor_reversed_val"] = val_backdoor_reversed_preds
+                    predictions[epoch]["backdoor_single_pix_val"] = val_backdoor_single_pix_preds
+                    predictions[epoch]["backdoor_reversed_single_pix_val"] = val_backdoor_reversed_single_pix_preds
+                    predictions[epoch]["backdoor_random_val"] = val_backdoor_random_preds
+                    predictions[epoch]["backdoor_warped_val"] = val_backdoor_warped_preds
 
             statistics["test"].append(test_stats)
             statistics["clean"].append(clean_stats)
             statistics["clean_val"].append(val_clean_stats)
             statistics["backdoor"].append(backdoor_stats)
             statistics["backdoor_val"].append(val_backdoor_stats)
-            statistics["backdoor_reversed_val"].append(val_backdoor_reversed_stats)
-            statistics["backdoor_single_pix_val"].append(val_backdoor_single_pix_stats)
-            statistics["backdoor_reversed_single_pix_val"].append(val_backdoor_reversed_single_pix_stats)
-            statistics["backdoor_random_val"].append(val_backdoor_random_stats)
-            statistics["backdoor_warped_val"].append(val_backdoor_warped_stats)
+            if defense not in defenses_that_want_only_one_attack:
+                statistics["backdoor_reversed_val"].append(val_backdoor_reversed_stats)
+                statistics["backdoor_single_pix_val"].append(val_backdoor_single_pix_stats)
+                statistics["backdoor_reversed_single_pix_val"].append(val_backdoor_reversed_single_pix_stats)
+                statistics["backdoor_random_val"].append(val_backdoor_random_stats)
+                statistics["backdoor_warped_val"].append(val_backdoor_warped_stats)
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -988,6 +986,152 @@ if defense == "mapd":
         print("=" * 100)
 
 
+def get_last_layer_activations(model, loader, masking_op=None):
+    """
+        masking_op: Masking operation used on batch images -- used in neural cleanse.
+
+        Returns a tuple of tensors: activations, indices, true classes, predicted classes
+            (# examples x activation dim), (# examples), (# examples), (# examples)
+    """
+    activations = {}
+
+    def get_activation(name):
+        def hook(model, input, output):
+            activations[name] = output.detach()
+
+        return hook
+
+    # TODO: Check that this is correct for non-MNIST
+    if dataset != 'mnist':
+        raise NotImplementedError("Remember, this isn't guaranteed to work for non-MNIST yet.")
+    handle = model.fc1_act.register_forward_hook(get_activation('fc1_act'))
+
+    all_acts, example_indices, classes, class_preds = [], [], [], []
+
+    pbar = tqdm(loader)
+    for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
+        data = data.to(device)
+        if masking_op is not None:
+            data = masking_op(data)
+        with torch.cuda.amp.autocast(enabled=False):
+            output = model(data)
+            predictions = torch.argmax(output, 1)
+
+        all_acts.append(activations['fc1_act'])
+        example_indices.append(ex_idx)
+        classes.append(target)
+        class_preds.append(predictions)
+
+    handle.remove()
+
+    return (torch.vstack(all_acts), torch.hstack(example_indices),
+            torch.hstack(classes), torch.hstack(class_preds))
+
+
+def get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes):
+    """
+        identified_indices: np array of indices considered to be poisonous by a detector.
+    """
+    false_pos = np.intersect1d(identified_indices, torch.tensor(range(len(train_set))))
+    true_pos = np.array([])
+    import itertools
+    results = {k: 0 for k in itertools.chain(set(probe_identity), set(val_probe_identity))}
+    for i, id in enumerate(probe_identity):
+        if len(train_set) + i in identified_indices:
+            results[id] += 1
+            if id == 'clean':
+                false_pos = np.append(false_pos, i)
+            else:
+                true_pos = np.append(true_pos, i)
+
+    for i, id in enumerate(val_probe_identity):
+        if len(train_set) + len(probe_identity) + i in identified_indices:
+            results[id] += 1
+            if id == 'clean_val':
+                false_pos = np.append(false_pos, i)
+            else:
+                true_pos = np.append(true_pos, i)
+
+    num_attacks = len(attack_types * 2 * num_train_probes)
+    clean_train = len(train_set) - num_attacks
+
+    false_positive = len(false_pos)
+    true_positive = len(true_pos)
+    true_negative = clean_train - false_positive
+    false_negative = num_attacks - true_positive
+
+    per_class = {
+        'clean': (num_train_probes - results['clean']) / num_train_probes,
+        'backdoor': results['backdoor'] / num_train_probes,
+        'clean_val': (num_train_probes - results['clean_val']) / num_train_probes,
+        'backdoor_val': results['backdoor_val'] / num_train_probes,
+    }
+
+    for attack in attack_types:
+        if not attack:
+            continue
+        per_class[attack] = results['backdoor_' + attack + '_val'] / (num_train_probes * 2)
+
+    print(f"FPR: {false_positive / (false_positive + true_negative)}")
+    print(f"FNR: {false_negative / (false_negative + true_positive)}")
+    print("Per class accuracies of detector...")
+    for k in per_class:
+        print(f"Accuracy ({k}): {per_class[k]}")
+
+
+def retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
+                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  detection_thresh, criterion, probes, log_predictions):
+    print(f"Retraining with {identified_indices.shape[0]} elements removed.")
+    retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
+    from dataset_utils import get_loader
+
+    retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
+                                  indices=retrain_indices, batch_size=batch_size)
+
+    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+    clean_optimizer = torch.optim.SGD(clean_model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    clean_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(clean_optimizer, T_max=num_epochs)
+    clean_scaler = torch.cuda.amp.GradScaler()
+
+    output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
+    if main_proc and not os.path.exists(output_checkpoint_dir):
+        os.mkdir(output_checkpoint_dir)
+    output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_{detection_thresh:.1f}.pth")
+
+    print("Selected output checkpoint:", output_checkpoint)
+    if not os.path.exists(output_checkpoint):  # Train the model
+        print("!! Output checkpoint not found. Training model from scratch...")
+        for _ in range(num_epochs):
+            train(clean_model, device, retrain_set_dl, clean_optimizer, criterion, clean_scaler)
+            if clean_lr_scheduler is not None:
+                clean_lr_scheduler.step()
+        torch.save(clean_model.state_dict(), output_checkpoint)
+    else:  # Load the model
+        print("!! Loading model from pretrained checkpoint:", output_checkpoint)
+        clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
+
+    # Evaluate accuracy
+    backdoor_stats, backdoor_preds = test_tensor(clean_model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
+    val_backdoor_stats, val_backdoor_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
+    clean_stats, clean_preds = test_tensor(clean_model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
+    val_clean_stats, val_clean_preds = test_tensor(clean_model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
+
+    if defense not in defenses_that_want_only_one_attack:
+        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
+        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
+        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
+        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
+        val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
+
+    # Get overall clean accuracy
+    test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
+    print(f"Freq: Clean acc: {test_stats['acc']}")
+    print(test_stats, test_preds)
+
+    return clean_model
+
+
 if defense == "nc":
     print("Final train accuracy:", statistics["train"][-1])
     print("Final test accuracy:", statistics["test"][-1])
@@ -997,71 +1141,147 @@ if defense == "nc":
         return batch * (1 - mask) + mask * trigger
 
 
-    def train_cleanse(model, mask, trigger, optimizer, target_class, use_autocast=False, log_interval=5):
+    def train_cleanse(model, mask, trigger, optimizer, target_class, l1_penalty, train_set,
+                      use_autocast=False, log_interval=5):
         optimizer.zero_grad()
         pbar = tqdm(new_idx_loader)
+        total_in_cls = 0
         for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
             data = data.to(device)
-            data = apply_mask_and_trigger(data, mask, trigger)
+            triggered_data = apply_mask_and_trigger(data, mask, trigger)
             cleanse_target = torch.full(target.shape, target_class, device='cuda')
             optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(enabled=use_autocast):
-                output = model(data)
+                output = model(triggered_data)
+                predictions = torch.argmax(output, 1)
+                total_in_cls += (predictions == target_class).sum().item()
+
                 trigger_loss = criterion(output, cleanse_target).mean()
-                l1_loss = torch.norm(mask, p=1)
+                l1_loss = torch.norm(mask, p=1) * l1_penalty
                 loss = trigger_loss + l1_loss
 
             loss.backward()
             optimizer.step()
 
+            mask.data.clamp_(0, 1)
+            trigger.data.clamp_(0, 1)
+
             if batch_idx % log_interval == 0:
                 pbar.set_description(f"Loss: {float(loss):.4f}")
             torch.cuda.synchronize()
+        print(f"Classifies {total_in_cls} as {target_class}")
+        # TODO: This isn't what they did in their paper, but what they did is very fiddly. I suspect this will get
+        #   very similar results though.
+        if total_in_cls < 0.99 * len(train_set):
+            # If not enough are being misclassified, reduce the L1 penalty to allow a larger mask
+            l1_penalty /= 2
+        if total_in_cls > 0.99 * len(train_set):
+            # If more than enough are being misclassified, increase the L1 penalty to keep the mask small.
+            l1_penalty *= 2
 
+        return l1_penalty
 
-    l1_penalty_ratio = 1.0
     cleanse_epochs = 20
 
+    masks, norms, triggers = [], [], []
+
     for cls in range(num_classes):
+        l1_penalty = 1.0
         # for every possible label
-        mask = torch.nn.Parameter(torch.rand(size=img_size, device='cuda'))
+        mask = torch.nn.Parameter(torch.rand(size=(img_size[-1:] + img_size[:-1]), device='cuda'))
         mask_original = mask.clone()
-        trigger = torch.nn.Parameter(torch.rand(size=img_size, device='cuda'))
+        trigger = torch.nn.Parameter(torch.rand(size=(img_size[-1:] + img_size[:-1]), device='cuda'))
         cleanse_opt = torch.optim.Adam((mask, trigger))
         for _ in range(cleanse_epochs):
-            train_cleanse(model, mask, trigger, cleanse_opt, cls)
-            # print(mask - mask_original)
+            l1_penalty = train_cleanse(model, mask, trigger, cleanse_opt, cls, l1_penalty, train_set)
 
-        print(cls, float(torch.norm(mask, p=1)))
+        masks.append(mask.detach())
+        triggers.append(trigger.detach())
+        norms.append(torch.norm(mask, p=1))
+        print(f"Trained mask for class {cls}. Final l1 penalty: {l1_penalty}, final mask magnitude: {mask.norm(p=1)}")
+
+    # Calculate MAD
+    torch.tensor(norms).median()
+    norms = torch.tensor(norms)
+    median = norms.median()
+    absolute_deviations = (norms - median).abs()
+    mad = 1.4826 * absolute_deviations.median()  # magic number from paper +
+                                                 #  https://en.wikipedia.org/wiki/Median_absolute_deviation
+    anomaly_index = absolute_deviations / mad
+
+    attacked_classes = (anomaly_index >= 2).nonzero()[:, 0]  # threshold 2 recommended in paper
+
+    rejected_indices = []
+    # from paper -- take top 1% of neurons by diff in activations
+    adv_neuron_thresh = 0.01
+    # again, from paper. Can adjust? TODO: maybe need to adjust for multiple attack classes
+    print("Skipping detected attacks where norm is above median.")
+    attacked_classes = attacked_classes[(norms[attacked_classes] <= median).nonzero()[:, 0]]
+    fpr_thresh = 0.05 / len(attacked_classes)
+
+    for atk_class in attacked_classes:
+        # Get all activations
+        mask, trigger = masks[atk_class], triggers[atk_class]
+        clean_activations, clean_indices, _, _ = get_last_layer_activations(model, new_idx_loader)
+        dirty_activations, dirty_indices, _, dirty_predictions = get_last_layer_activations(model, new_idx_loader,
+                                                                            masking_op=lambda img: apply_mask_and_trigger(img, mask, trigger))
+        # See how successful the attacks were
+        attack_success = (dirty_predictions == atk_class).sum()
+        print(f"Anomalous class {atk_class.item()} with index {anomaly_index[atk_class].item():.3f} "
+              f"has mask magnitude {norms[atk_class].item():.3f} which classifies {attack_success.item()} as {atk_class.item()}")
+        # Reorder the activations (train loader doesn't guarantee order)
+        clean_order = clean_indices.argsort()
+        clean_activations, clean_indices = clean_activations[clean_order], clean_indices[clean_order]
+        dirty_order = dirty_indices.argsort()
+        dirty_activations, dirty_indices = dirty_activations[dirty_order], dirty_indices[dirty_order]
+
+        # per example differences
+        mean_activation_diff = (dirty_activations - clean_activations).mean(axis=0)
+        neurons_to_select = int(len(mean_activation_diff) * adv_neuron_thresh)
+        poisoned_neurons = mean_activation_diff.sort()[1][-neurons_to_select:]  # Select indices of poisoned neurons
+
+        # Activations of poisoned neurons on clean images
+        #    if this is high, then the image itself likely carries the poison.
+        acts_of_poisoned = clean_activations[:, poisoned_neurons].mean(axis=1)
+
+        clean_probe_indices = len(train_set) + \
+                              torch.tensor([i for i, out in enumerate([p == 'clean' for p in probe_identity]) if out])
+        indices_to_check = torch.isin(clean_indices, clean_probe_indices).nonzero()[:, 0]
+        upper_limit = 1 + int(len(clean_probe_indices) * fpr_thresh)
+
+        # Set a threshold that rejects no more than fpr_thresh of clean probe examples.
+        reject_thresh = acts_of_poisoned[indices_to_check].sort()[0][-upper_limit]
+
+        rejected_indices.append((acts_of_poisoned > reject_thresh).nonzero()[:, 0])
+
+    rejected_indices = torch.hstack(rejected_indices).unique()
+    identified_indices = clean_indices[rejected_indices.cpu()].numpy()
+
+    # Print confusion stats...
+    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
+    clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
+                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                experiment_output_dir, fpr_thresh, criterion, probes, log_predictions)
+    # fpr_thresh is only misnamed parameter...
+    print("Done with nc")
+    # TODO: retrain, repeat...
+    # This doesn't work because the norms of the selected classes are higher than the median! Can rule these out,
+    #   but that would mean that, by default, NC would pick up on nothing!!
+    # Solution... somehow check the difference between high and lows?? This is a substantial extension...
+
 
 if defense == "ac":
-    activations = {}
-
-    def get_activation(name):
-        def hook(model, input, output):
-            activations[name] = output.detach()
-
-        return hook
-
-    model.fc1_act.register_forward_hook(get_activation('fc1_act'))
-    activations_by_class = {i: [] for i in range(10)}
-
-    pbar = tqdm(new_idx_loader)
-    for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
-        data = data.to(device)
-        with torch.cuda.amp.autocast(enabled=False):
-            output = model(data)
-            predictions = torch.argmax(output, 1)
-
-        for predicted_class, activation in zip(predictions, activations['fc1_act']):
-            activations_by_class[predicted_class.item()].append(activation)
+    activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader)
+    activation_by_predicted_class = {
+        i: activations[(predictions == i).nonzero()[:, 0]] for i in range(num_classes)
+    }
 
     dim_reducer = sklearn.decomposition.FastICA(n_components=10)  # Magic number from paper
     clusterer = sklearn.cluster.KMeans(n_clusters=2)  # Unclear if this can be reasonably extended -- are there clustering algos that learn the number of clusters?
 
     for cls in range(num_classes):
-        data = torch.vstack(activations_by_class[cls]).to('cpu')
+        data = activation_by_predicted_class[cls].cpu()
         data = data[:, data.sum(dim=0).bool()]  # remove zero columns, otherwise dim reduction outputs all 0s
 
         fit = dim_reducer.fit_transform(data)
@@ -1073,6 +1293,45 @@ if defense == "ac":
         print(cls, f"{rsc_score:.3f}")
         sil_score = sklearn.metrics.silhouette_score(fit, clustering)
         print(cls, f"{sil_score:.3f}")
+    # Use probes to get expected clean silhouette scores per class
+    # Get silhouette score -- if it's far from clean, then mark the smaller cluster as dirty. Repeat through all classes.
+    # Ex-Re? It seems too difficult to do Ex-Re 20x training runs for each of 10 classes,
+    #   then do AC all over again on the retrained model to find the second backdoor...
+
+if defense == "ss":
+    # For every class:
+    #   n = # training examples labeled y
+    #   R_hat = average d-dim representation (at last layer) of train examples
+    #   M = [R(x) - R_hat] = n x d matrix of centered representation
+    #   v = top right singular vector of M
+    #   tau = ([R(x_i) - R_hat] * v)^2 for all i (n dimensional)
+    #   Remove the top 1.5*epsilon (thresholding value) from dataset.
+    # Retrain
+    epsilon_thresh = 0.1  # From paper, assuming 10% poisoning max
+    activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader)
+    rejected_indices = []
+    for cls in range(num_classes):
+        cls_indices = (classes == cls).nonzero()[:, 0]
+        cls_activations = activations[cls_indices]
+        m = cls_activations - cls_activations.mean(axis=0)
+        u, s, v = m.svd()
+        v_top = v[:, 0]  # TODO: Check this
+        tau = m.matmul(v_top) ** 2
+
+        num_to_remove = int(len(tau) * epsilon_thresh * 1.5)
+        rejected_indices.append(cls_indices[tau.argsort()[-num_to_remove:].cpu()])
+
+    rejected_indices = torch.hstack(rejected_indices).unique()
+    identified_indices = indices[rejected_indices.cpu()].numpy()
+
+    # Print confusion stats...
+    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
+    clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
+                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                experiment_output_dir, epsilon_thresh, criterion, probes, log_predictions)
+    print("Done with ss")
+    # TODO: retrain, repeat...
+
 
 if defense == "freq":
     # They use a series of transformations similar to backdoor images to train their detector.
@@ -1161,98 +1420,13 @@ if defense == "freq":
         identified_indices.append(indices[(probs.cpu() >= detection_thresh).nonzero()[:, 0]])
 
     identified_indices = torch.hstack(identified_indices)
-    false_pos = np.intersect1d(identified_indices, torch.tensor(range(len(train_set))))
-    true_pos = np.array([])
-    import itertools
-    results = {k: 0 for k in itertools.chain(set(probe_identity), set(val_probe_identity))}
-    for i, id in enumerate(probe_identity):
-        if len(train_set) + i in identified_indices:
-            if id == 'clean':
-                false_pos = np.append(false_pos, i)
-            else:
-                results[id] += 1
-                true_pos = np.append(true_pos, i)
 
-    for i, id in enumerate(val_probe_identity):
-        if len(train_set) + len(probe_identity) + i in identified_indices:
-            if id == 'clean_val':
-                false_pos = np.append(false_pos, i)
-            else:
-                results[id] += 1
-                true_pos = np.append(true_pos, i)
-
-    num_attacks = len(attack_types * 2 * num_train_probes)
-    clean_train = len(train_set) - num_attacks
-
-    false_positive = len(false_pos)
-    true_positive = len(true_pos)
-    true_negative = clean_train - false_positive
-    false_negative = num_attacks - true_positive
-
-    per_class = {
-        'clean': (num_train_probes - results['clean']) / num_train_probes,
-        'backdoor': results['backdoor'] / num_train_probes,
-        'clean_val': (num_train_probes - results['clean']) / num_train_probes,
-        'backdoor_val': results['backdoor_val'] / num_train_probes,
-    }
-
-    for attack in attack_types:
-        if not attack:
-            continue
-        per_class[attack] = results['backdoor_' + attack + '_val'] / (num_train_probes * 2)
-
-    print(f"FPR: {false_positive / (false_positive + true_negative)}")
-    print(f"FNR: {false_negative / (false_negative + true_positive)}")
-    print("Per class accuracies of frequency detector...")
-    for k in per_class:
-        print(f"Accuracy ({k}): {per_class[k]}")
+    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
 
     # Remove and retrain...
-    retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
-    from dataset_utils import get_loader
-
-    retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
-                                  indices=retrain_indices, batch_size=batch_size)
-
-    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
-    clean_optimizer = torch.optim.SGD(clean_model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
-    clean_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-    clean_scaler = torch.cuda.amp.GradScaler()
-
-    output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
-    if main_proc and not os.path.exists(output_checkpoint_dir):
-        os.mkdir(output_checkpoint_dir)
-    output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_{detection_thresh:.1f}.pth")
-
-    print("Selected output checkpoint:", output_checkpoint)
-    if not os.path.exists(output_checkpoint):  # Train the model
-        print("!! Output checkpoint not found. Training model from scratch...")
-        for _ in range(num_epochs):
-            train(clean_model, device, retrain_set_dl, clean_optimizer, criterion, clean_scaler)
-            if clean_lr_scheduler is not None:
-                clean_lr_scheduler.step()
-        torch.save(clean_model.state_dict(), output_checkpoint)
-    else:  # Load the model
-        print("!! Loading model from pretrained checkpoint:", output_checkpoint)
-        clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
-
-    # Evaluate accuracy
-    backdoor_stats, backdoor_preds = test_tensor(clean_model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
-    val_backdoor_stats, val_backdoor_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
-    clean_stats, clean_preds = test_tensor(clean_model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
-    val_clean_stats, val_clean_preds = test_tensor(clean_model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
-
-    val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
-    val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
-    val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
-    val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
-    val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
-
-    # Get overall clean accuracy
-    test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-    print(f"Freq: Clean acc: {test_stats['acc']}")
-    print(test_stats, test_preds)
-
+    retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
+                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  detection_thresh, criterion, probes, log_predictions)
 
 
 
