@@ -38,6 +38,14 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False):
     return model
 
 
+def get_optimizer(model, device, lr, momentum, wd, num_epochs):    
+    criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    scaler = torch.cuda.amp.GradScaler()
+    return criterion, optimizer, lr_scheduler, scaler
+
+
 def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, log_predictions=False,
           use_autocast=False, flooding_threshold=None, loss_max_indices=None, gradient_ascent=False,
           flooding_type='flooding'):

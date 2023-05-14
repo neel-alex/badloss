@@ -35,7 +35,7 @@ from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other
     plot_confusion_matrix_from_preds, plot_attack_success_stats
 from plot_utils import num_queue_plots
 from backdoors import make_probes
-from torch_utils import get_model, train, test, test_tensor
+from torch_utils import get_model, get_optimizer, train, test, test_tensor
 
 
 # Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning)
@@ -187,12 +187,7 @@ wd = 0.0001
 
 
 model = get_model(dataset, num_classes, device, local_rank, verbose=True)
-
-criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
-optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
-lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-scaler = torch.cuda.amp.GradScaler()
-
+criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_epochs)
 
 comb_train_set, comb_train_indices, dataset_probe_identity = \
     combine_dataset(train_set, train_indices, probe_dataset_standard, val_probe_dataset_standard,
@@ -339,6 +334,7 @@ if not os.path.exists(model_file):
         print("!! Performing initial pertraining with all examples (using loss flooding)...")
         output_checkpoint_file = os.path.join(experiment_output_dir, "model_pretrain.pth")
         if not os.path.exists(output_checkpoint_file):
+            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_epochs)
             for epoch in tqdm(range(num_epochs)):
                 backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
                                                              probes["backdoor_labels"], msg="Backdoor probe",
@@ -358,7 +354,8 @@ if not os.path.exists(model_file):
         ex_idx = pred_output_dict["ex_idx"]
 
         loss_idx = np.argsort(losses)  # Ascending sort
-        indices_to_maximize = loss_idx[:int(len(train_set) * selection_threshold)]
+        num_ex_unlearning = int(len(train_set) * selection_threshold)
+        indices_to_maximize = loss_idx[:num_ex_unlearning]
         indices_to_maximize = [int(ex_idx[i]) for i in indices_to_maximize]
          
         # Identify the maximum indices
@@ -377,7 +374,7 @@ if not os.path.exists(model_file):
         use_gt_probes = True
         if use_gt_probes:
             print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
-            indices_to_maximize = backdoor_probe_idx
+            indices_to_maximize = backdoor_probe_idx[:num_ex_unlearning]
             print(f"Total probe idx: {len(ground_truth_probes)} / Backdoor idx: {len(backdoor_probe_idx)}")
         remaining_indices = [i for i in range(total_ex) if i not in indices_to_maximize and i not in missing_vals]
         print(f"Selected indices / Clean indices: {len(remaining_indices)} / Backdoored indices: {len(indices_to_maximize)}")
@@ -392,6 +389,8 @@ if not os.path.exists(model_file):
         print("!! Starting finetuning phase on the clean examples...")
         output_checkpoint_file = os.path.join(experiment_output_dir, "model_clean_ft.pth")
         if not os.path.exists(output_checkpoint_file):
+            lr = 0.1
+            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, clean_finetuning_epochs)
             for epoch in tqdm(range(clean_finetuning_epochs)):
                 backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
                                                              probes["backdoor_labels"], msg="Backdoor probe",
@@ -408,6 +407,8 @@ if not os.path.exists(model_file):
         print("!! Starting unlearning phase on the identified backdoor examples...")
         output_checkpoint_file = os.path.join(experiment_output_dir, "model_unlearned.pth")
         if not os.path.exists(output_checkpoint_file):
+            lr = 5e-4
+            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, unlearning_epochs)
             for epoch in tqdm(range(unlearning_epochs)):
                 backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
                                                              probes["backdoor_labels"], msg="Backdoor probe",
