@@ -324,6 +324,16 @@ class AttackDataset(torch.utils.data.Dataset):
                  no_transform, random_pattern, random_backdoor_alpha, img_size):
         super().__init__()
 
+        fixed_pattern = np.zeros(img_size, dtype=np.float32)
+        fixed_pattern[::2, ::2, :] = 1
+        fixed_pattern = transforms.ToTensor()(fixed_pattern)
+
+        sin_pattern = np.zeros(img_size, dtype=np.float32)
+        f = 6
+        for col in range(sin_pattern.shape[1]):
+            sin_pattern[:, col, :] = np.sin(2 * np.pi * col * f / sin_pattern.shape[1])
+        sin_pattern = transforms.ToTensor()(sin_pattern)
+
         if attack_type == "clean":
             backdoor_transform = no_transform
             self.attack_target = -1
@@ -332,6 +342,12 @@ class AttackDataset(torch.utils.data.Dataset):
                 backdoor = BackdoorPatch()
             elif attack_type == "random":
                 backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
+            elif attack_type == "fixed":
+                backdoor = BackdoorPatch(pattern=fixed_pattern,
+                                     alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
+            elif attack_type == "sinusoid":
+                backdoor = BackdoorPatch(pattern=sin_pattern,
+                                         alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
             elif attack_type == "reversed":
                 backdoor = BackdoorPatch(reverse_backdoor=True)
             elif attack_type == "single_pix":

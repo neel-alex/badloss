@@ -109,11 +109,26 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
     random_pattern = transforms.ToTensor()(random_pattern_img)
     print(f"Random Pattern / Loaded shape: {random_pattern_img.shape} / Tensor shape: {random_pattern.shape} / Min: {random_pattern.min()} / Max: {random_pattern.max()}")
 
+    fixed_pattern = np.zeros(img_size, dtype=np.float32)
+    fixed_pattern[::2, ::2, :] = 1
+    fixed_pattern = transforms.ToTensor()(fixed_pattern)
+
+    sin_pattern = np.zeros(img_size, dtype=np.float32)
+    f = 6
+    for col in range(sin_pattern.shape[1]):
+        sin_pattern[:, col, :] = np.sin(2 * np.pi * col * f / sin_pattern.shape[1])
+    sin_pattern = transforms.ToTensor()(sin_pattern)
+
     for i, attack_type in enumerate(attack_types):
+        print(attack_type)
         if attack_type == "":
             backdoor = BackdoorPatch()
         elif attack_type == "random":
             backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
+        elif attack_type == "fixed":
+            backdoor = BackdoorPatch(pattern=fixed_pattern, alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
+        elif attack_type == "sinusoid":
+            backdoor = BackdoorPatch(pattern=sin_pattern, alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
         elif attack_type == "reversed":
             backdoor = BackdoorPatch(reverse_backdoor=True)
         elif attack_type == "single_pix":
@@ -133,6 +148,22 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
             prefix = f"backdoor"
         else:
             prefix = f"backdoor_{attack_type}"
+
+        if attack_type == "sinusoid":
+            # Choose clean label indices
+            clean_indices = (train_set.targets == fake_backdoor_label).nonzero()[:, 0]
+            num_in_class = len(clean_indices)
+            # Just remove all already chosen indices to avoid conflicts.
+            clean_indices = [idx.item() for idx in clean_indices if idx.item() not in new_indices]
+            # TODO: Sinusoid backdoor needs a very high poisoning ratio, like 30%.
+            #  Sets this manually, but do this better in the future!??
+            current_idx = np.random.choice(clean_indices, size=int(0.3 * num_in_class), replace=False)
+
+            new_indices = np.concatenate((new_indices[:i * num_example_probes],
+                                          current_idx,
+                                          new_indices[(i + 1) * num_example_probes:]))
+            probes.update({"all_backdoor_idx": new_indices})
+
 
         probes[f"{prefix}_idx"] = current_idx
         probes[f"{prefix}_original"] = torch.stack([train_set_wo_aug[i][0] for i in current_idx], dim=0).to(device)

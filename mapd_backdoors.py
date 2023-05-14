@@ -38,8 +38,8 @@ from backdoors import make_probes
 from torch_utils import get_model, train, test, test_tensor
 
 
-# Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning)
-#   TODO: ss (spectral signatures), freq (frequency analysis)
+# Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning),
+#           ss (spectral signatures), freq (frequency analysis)
 defense = "ac"
 defenses_that_want_only_one_attack = {'abl'}
 
@@ -166,7 +166,7 @@ else:
     assert num_classes == 1000
 print(dataset, num_classes)
 
-attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "warped"]
+attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "fixed", "sinusoid", "warped"]
 if defense in defenses_that_want_only_one_attack:
     attack_types = [""]
 probes, chosen_attack_targets, random_pattern = make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
@@ -239,6 +239,8 @@ if main_proc and not os.path.exists(model_dir):
 ref_probe_classes = ["backdoor", "clean"]
 label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
                   "backdoor_random_val": "Backdoor (random) [Val]",
+                  "backdoor_fixed_val": "Backdoor (fixed) [Val]",
+                  "backdoor_sinusoid_val": "Backdoor (sinusoid) [Val]",
                   "backdoor_reversed_val": "Backdoor (reversed) [Val]",
                   "backdoor_single_pix_val": "Backdoor (single pixel) [Val]",
                   "backdoor_reversed_single_pix_val": "Backdoor (reversed single pixel) [Val]",
@@ -247,6 +249,50 @@ label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
 
 
 # In[ ]:
+
+def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
+                                           rank, new_idx_loader_wo_aug, attack_types, probes, val_probes,
+                                           statistics=None, predictions=None):
+    test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
+                                  log_predictions=log_predictions)
+    if statistics is not None:
+        statistics["test"].append(test_stats)
+
+    if log_predictions:
+        # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
+        train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank,
+                                        set_name="Train", log_predictions=log_predictions)
+        if statistics is not None:
+            statistics["train"].append(train_stats)
+
+        # Add predictions from all the different sets / probes
+        if predictions is not None:
+            predictions[epoch] = {}  # Dict of dict
+            predictions[epoch]["train"] = train_preds
+            predictions[epoch]["test"] = test_preds
+
+    # Collect probe statistics
+    atks = ["backdoor_" + atk if atk else "backdoor" for atk in attack_types] + ["clean"]
+
+    for attack_type in atks:
+        if attack_type in {'clean', 'backdoor'}:
+            stats, preds = test_tensor(model, device, criterion, probes[attack_type],
+                                       probes[f"{attack_type}_labels"],
+                                       msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
+                                       log_predictions=log_predictions)
+            if predictions is not None:
+                predictions[epoch][attack_type] = preds
+            if statistics is not None:
+                statistics[attack_type].append(stats)
+
+        val_stats, val_preds = test_tensor(model, device, criterion, val_probes[attack_type],
+                                           val_probes[f"{attack_type}_labels"],
+                                           msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
+                                           log_predictions=log_predictions)
+        if predictions is not None:
+            predictions[epoch][attack_type + "_val"] = val_preds
+        if statistics is not None:
+            statistics[attack_type + "_val"].append(val_stats)
 
 
 if not os.path.exists(model_file):
@@ -266,54 +312,9 @@ if not os.path.exists(model_file):
 
             # Collect test set statistics
             print("Stats for epoch #", epoch+1)
-            if log_predictions:
-                # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
-                train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank, set_name="Train", log_predictions=log_predictions)
-
-            test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-
-            # Collect probe statistics
-            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
-            val_backdoor_stats, val_backdoor_preds = test_tensor(model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
-            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
-            val_clean_stats, val_clean_preds = test_tensor(model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
-
-            if defense not in defenses_that_want_only_one_attack:
-                val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
-                val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
-                val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
-                val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
-                val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
-
-            if log_predictions:
-                statistics["train"].append(train_stats)
-
-                # Add predictions from all the different sets / probes
-                predictions[epoch] = {}  # Dict of dict
-                predictions[epoch]["train"] = train_preds
-                predictions[epoch]["test"] = test_preds
-                predictions[epoch]["clean"] = backdoor_preds
-                predictions[epoch]["clean_val"] = val_clean_preds
-                predictions[epoch]["backdoor"] = backdoor_preds
-                predictions[epoch]["backdoor_val"] = val_backdoor_preds
-                if defense not in defenses_that_want_only_one_attack:
-                    predictions[epoch]["backdoor_reversed_val"] = val_backdoor_reversed_preds
-                    predictions[epoch]["backdoor_single_pix_val"] = val_backdoor_single_pix_preds
-                    predictions[epoch]["backdoor_reversed_single_pix_val"] = val_backdoor_reversed_single_pix_preds
-                    predictions[epoch]["backdoor_random_val"] = val_backdoor_random_preds
-                    predictions[epoch]["backdoor_warped_val"] = val_backdoor_warped_preds
-
-            statistics["test"].append(test_stats)
-            statistics["clean"].append(clean_stats)
-            statistics["clean_val"].append(val_clean_stats)
-            statistics["backdoor"].append(backdoor_stats)
-            statistics["backdoor_val"].append(val_backdoor_stats)
-            if defense not in defenses_that_want_only_one_attack:
-                statistics["backdoor_reversed_val"].append(val_backdoor_reversed_stats)
-                statistics["backdoor_single_pix_val"].append(val_backdoor_single_pix_stats)
-                statistics["backdoor_reversed_single_pix_val"].append(val_backdoor_reversed_single_pix_stats)
-                statistics["backdoor_random_val"].append(val_backdoor_random_stats)
-                statistics["backdoor_warped_val"].append(val_backdoor_warped_stats)
+            log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
+                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes,
+                                                   statistics=statistics, predictions=predictions)
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -384,31 +385,9 @@ if not os.path.exists(model_file):
             plt.plot(range(later_epochs), max_losses[:, i].detach().cpu().numpy())
         plt.show()
 
-        # TODO
-        test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
-                                      log_predictions=log_predictions)
-        print(f"ABL: Clean acc: {test_stats['acc']}")
+        log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
+                                               rank, new_idx_loader_wo_aug, attack_types, probes, val_probes)
 
-        backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
-        val_backdoor_stats, val_backdoor_preds = test_tensor(model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
-        clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
-        val_clean_stats, val_clean_preds = test_tensor(model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
-
-        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
-        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
-        val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
-
-        print(f"ABL: ASR (normal): {backdoor_stats['acc']}")
-        print(f"ABL: ASR (val): {val_backdoor_stats['acc']}")
-        print(f"ABL: ASR (reversed): {val_backdoor_reversed_stats['acc']}")
-        print(f"ABL: ASR (single_pix): {val_backdoor_single_pix_stats['acc']}")
-        print(f"ABL: ASR (single_pix_reversed): {val_backdoor_reversed_single_pix_stats['acc']}")
-        print(f"ABL: ASR (blended): {val_backdoor_random_stats['acc']}")
-        print(f"ABL: ASR (warped): {val_backdoor_warped_stats['acc']}")
-
-        # Cause an error because there's no statistics dictionary
     else:
         raise NotImplementedError
 else:
@@ -1112,23 +1091,8 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
         clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
 
     # Evaluate accuracy
-    backdoor_stats, backdoor_preds = test_tensor(clean_model, device, criterion, probes["backdoor"], probes["backdoor_labels"], msg="Backdoor probe", log_predictions=log_predictions)
-    val_backdoor_stats, val_backdoor_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor"], val_probes["backdoor_labels"], msg="Backdoor probe (val)", log_predictions=log_predictions)
-    clean_stats, clean_preds = test_tensor(clean_model, device, criterion, probes["clean"], probes["clean_labels"], msg="Clean probe", log_predictions=log_predictions)
-    val_clean_stats, val_clean_preds = test_tensor(clean_model, device, criterion, val_probes["clean"], val_probes["clean_labels"], msg="Clean probe (val)", log_predictions=log_predictions)
-
-    if defense not in defenses_that_want_only_one_attack:
-        val_backdoor_reversed_stats, val_backdoor_reversed_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed"], val_probes["backdoor_reversed_labels"], msg="Backdoor reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_single_pix_stats, val_backdoor_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_single_pix"], val_probes["backdoor_single_pix_labels"], msg="Backdoor single pixel probe (val)", log_predictions=log_predictions)
-        val_backdoor_reversed_single_pix_stats, val_backdoor_reversed_single_pix_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_reversed_single_pix"], val_probes["backdoor_reversed_single_pix_labels"], msg="Backdoor single pixel reversed probe (val)", log_predictions=log_predictions)
-        val_backdoor_random_stats, val_backdoor_random_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_random"], val_probes["backdoor_random_labels"], msg="Backdoor random (val)", log_predictions=log_predictions)
-        val_backdoor_warped_stats, val_backdoor_warped_preds = test_tensor(clean_model, device, criterion, val_probes["backdoor_warped"], val_probes["backdoor_warped_labels"], msg="Backdoor warped (val)", log_predictions=log_predictions)
-
-    # Get overall clean accuracy
-    test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-    print(f"Freq: Clean acc: {test_stats['acc']}")
-    print(test_stats, test_preds)
-
+    log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
+                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes)
     return clean_model
 
 
@@ -1273,15 +1237,19 @@ if defense == "nc":
 
 if defense == "ac":
     activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader)
-    activation_by_predicted_class = {
-        i: activations[(predictions == i).nonzero()[:, 0]] for i in range(num_classes)
-    }
+    activation_by_predicted_class = {}
+    for i in range(num_classes):
+        indices_to_pick = np.where(predictions.cpu() == i)[0]
+        activation_by_predicted_class[i] = (activations[indices_to_pick], indices[indices_to_pick])
 
     dim_reducer = sklearn.decomposition.FastICA(n_components=10)  # Magic number from paper
     clusterer = sklearn.cluster.KMeans(n_clusters=2)  # Unclear if this can be reasonably extended -- are there clustering algos that learn the number of clusters?
 
+    clusterings = []
+    rsc_scores = []
+    sil_scores = []
     for cls in range(num_classes):
-        data = activation_by_predicted_class[cls].cpu()
+        data = activation_by_predicted_class[cls][0].cpu()
         data = data[:, data.sum(dim=0).bool()]  # remove zero columns, otherwise dim reduction outputs all 0s
 
         fit = dim_reducer.fit_transform(data)
@@ -1290,9 +1258,43 @@ if defense == "ac":
         rsc_score = sum(clustering) / len(data)
         if rsc_score > 0.5:
             rsc_score = 1 - rsc_score
-        print(cls, f"{rsc_score:.3f}")
         sil_score = sklearn.metrics.silhouette_score(fit, clustering)
-        print(cls, f"{sil_score:.3f}")
+
+        clusterings.append(clustering)
+        rsc_scores.append(rsc_score)
+        sil_scores.append(sil_score)
+
+    # TODO: Use ExRe? Seems like there's too much of a cost in terms of computation...
+    # Use this to select which score to reclassify with.
+    mode = "sil"
+    if mode == "sil":
+        detect_thresh = 0.15  # Less aggressive -- 0.1 would be more aggressive.
+        detected_classes = [i for i in range(num_classes) if sil_scores[i] > detect_thresh]
+    elif mode == "rsc":
+        detect_thresh = 0.3  # Worst case from AC
+        detected_classes = [i for i in range(num_classes) if rsc_scores[i] < detect_thresh]
+    else:
+        raise NotImplementedError
+
+    identified_indices = []
+    for cls in detected_classes:
+        clustering = clusterings[cls]
+        # If more 1s than 0s, get indices of 0s
+        if sum(clustering)*2 > len(clustering):
+            selected_indices = np.where(clustering == 0)
+        else:
+            selected_indices = np.where(clustering == 1)
+        dataset_indices = activation_by_predicted_class[cls][1][selected_indices]
+        identified_indices.append(dataset_indices)
+
+    identified_indices = torch.hstack(identified_indices)
+    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
+    clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
+                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                experiment_output_dir, detect_thresh, criterion, probes, log_predictions) # detect_thresh...
+
+
+
     # Use probes to get expected clean silhouette scores per class
     # Get silhouette score -- if it's far from clean, then mark the smaller cluster as dirty. Repeat through all classes.
     # Ex-Re? It seems too difficult to do Ex-Re 20x training runs for each of 10 classes,
