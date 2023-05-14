@@ -45,6 +45,8 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, ou
 
             # Scale the maximum value to 1 for better visibility
             max_vals = input.reshape(len(input), -1).max(axis=1)
+            max_vals[max_vals == 0] = 1.
+            
             if is_grayscale:
                 input = input / max_vals[:, None, None]
             else:

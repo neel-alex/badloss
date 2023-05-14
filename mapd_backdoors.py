@@ -29,7 +29,7 @@ import sklearn.metrics
 
 import dist_utils
 from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, combine_dataset, \
-    make_attack_dataset
+    make_attack_dataset, get_loader, IdxDataset
 from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other_plot, make_normalizers, \
     yet_another_plot, one_more_plot, plot_loss_dynamics_and_violin, visualize_loss_trajectories, \
     plot_confusion_matrix_from_preds, plot_attack_success_stats
@@ -325,9 +325,7 @@ if not os.path.exists(model_file):
                 pickle.dump(statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     elif defense == "abl":
-        if "cifar" in dataset:
-            num_epochs = 100
-        
+        num_epochs = 100
         clean_finetuning_epochs = 60
         unlearning_epochs = 5
         
@@ -339,7 +337,12 @@ if not os.path.exists(model_file):
         
         # Step # 01: Regular pretraining
         print("!! Performing initial pertraining with all examples (using loss flooding)...")
-        for epoch in range(num_epochs):
+        for epoch in tqdm(range(num_epochs)):
+            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
+                                                         probes["backdoor_labels"], msg="Backdoor probe",
+                                                         log_predictions=log_predictions)
+            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
+                                                   msg="Clean probe", log_predictions=log_predictions)
             train(model, device, new_idx_loader, optimizer, criterion, scaler, flooding_threshold=flooding_threshold)
         
         # Step # 02: identify backdoored examples based on the loss value
@@ -366,22 +369,31 @@ if not os.path.exists(model_file):
         use_gt_probes = True
         if use_gt_probes:
             print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
-            indices_to_maximize = ground_truth_probes
+            backdoor_probe_idx = [i for i in ground_truth_probes if "clean" not in dataset_probe_identity[i]]
+            indices_to_maximize = backdoor_probe_idx
+            print(f"Total probe idx: {len(ground_truth_probes)} / Backdoor idx: {len(backdoor_probe_idx)}")
         remaining_indices = [i for i in range(total_ex) if i not in indices_to_maximize and i not in missing_vals]
         print(f"Selected indices / Clean indices: {len(remaining_indices)} / Backdoored indices: {len(indices_to_maximize)}")
         
         # Step # 03: generate dataloaders based on the clean and backdoor indices
-        clean_dl = get_loader(new_idx_loader.dataset, remaining_indices)
-        detected_backdoors_dl = get_loader(new_idx_loader.dataset, indices_to_maximize)
+        clean_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=remaining_indices,
+                              num_workers=num_workers, batch_size=batch_size)
+        detected_backdoors_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=indices_to_maximize,
+                                           num_workers=num_workers, batch_size=batch_size)
         
         # Step # 04: finetune the model only on clean data
         print("!! Starting finetuning phase on the clean examples...")
-        for epoch in range(clean_finetuning_epochs):
+        for epoch in tqdm(range(clean_finetuning_epochs)):
+            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
+                                                         probes["backdoor_labels"], msg="Backdoor probe",
+                                                         log_predictions=log_predictions)
+            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
+                                                   msg="Clean probe", log_predictions=log_predictions)
             output_dict = train(model, device, clean_dl, optimizer, criterion, scaler)
         
         # Step # 05: perform unlearning step on the identified backdoored examples
         print("!! Starting unlearning phase on the identified backdoor examples...")
-        for epoch in range(unlearning_epochs):
+        for epoch in tqdm(range(unlearning_epochs)):
             backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
                                                          probes["backdoor_labels"], msg="Backdoor probe",
                                                          log_predictions=log_predictions)
@@ -389,7 +401,6 @@ if not os.path.exists(model_file):
                                                    msg="Clean probe", log_predictions=log_predictions)
             output_dict = train(model, device, detected_backdoors_dl, optimizer, criterion, scaler, gradient_ascent=True)
         
-        # TODO
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                       log_predictions=log_predictions)
         print(f"ABL: Clean acc: {test_stats['acc']}")
@@ -921,8 +932,6 @@ if defense == "mapd":
     thresh_list = [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
 
-    from dataset_utils import get_loader, IdxDataset
-
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
     if not os.path.exists(output_checkpoint_dir):
         os.makedirs(output_checkpoint_dir)
@@ -1212,8 +1221,6 @@ if defense == "freq":
 
     # Remove and retrain...
     retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
-    from dataset_utils import get_loader
-
     retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
                                   indices=retrain_indices, batch_size=batch_size)
 
