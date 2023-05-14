@@ -164,7 +164,7 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
 
         if attack_type == "sinusoid":
             # Choose clean label indices
-            clean_indices = (train_set.targets == fake_backdoor_label).nonzero()[:, 0]
+            clean_indices = np.where(train_set.targets == fake_backdoor_label)[0]
             num_in_class = len(clean_indices)
             # Just remove all already chosen indices to avoid conflicts.
             clean_indices = [idx.item() for idx in clean_indices if idx.item() not in new_indices]
