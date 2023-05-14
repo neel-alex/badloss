@@ -320,7 +320,7 @@ if not os.path.exists(model_file):
                 pickle.dump(statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     elif defense == "abl":
-        num_epochs = 100
+        num_epochs = 10
         clean_finetuning_epochs = 60
         unlearning_epochs = 5
         use_gt_backdoors = False
@@ -358,7 +358,7 @@ if not os.path.exists(model_file):
         num_ex_unlearning = int(len(train_set) * selection_threshold)
         indices_to_maximize = loss_idx[:num_ex_unlearning]
         indices_to_maximize = [int(ex_idx[i]) for i in indices_to_maximize]
-         
+        
         # Identify the maximum indices
         total_ex = len(new_idx_loader.dataset)
         missing_vals = [x for x in range(total_ex) if x not in ex_idx]
