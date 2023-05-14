@@ -323,6 +323,7 @@ if not os.path.exists(model_file):
         num_epochs = 100
         clean_finetuning_epochs = 60
         unlearning_epochs = 5
+        use_gt_backdoors = False
         
         initial_split = 0.2
         initial_epochs = int(num_epochs * initial_split)
@@ -371,8 +372,7 @@ if not os.path.exists(model_file):
         print(f"Backdoor probe examples flagged: {len(backdoor_probes_detected)} / {backdoor_probes_detected}")
         print(f"Ground truth probes: {len(ground_truth_probes)} / {ground_truth_probes}")
         
-        use_gt_probes = True
-        if use_gt_probes:
+        if use_gt_backdoors:
             print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
             indices_to_maximize = backdoor_probe_idx[:num_ex_unlearning]
             print(f"Total probe idx: {len(ground_truth_probes)} / Backdoor idx: {len(backdoor_probe_idx)}")
@@ -387,7 +387,8 @@ if not os.path.exists(model_file):
         
         # Step # 04: finetune the model only on clean data
         print("!! Starting finetuning phase on the clean examples...")
-        output_checkpoint_file = os.path.join(experiment_output_dir, "model_clean_ft.pth")
+        model_postfix = "_gt_backdoors" if use_gt_backdoors else ""
+        output_checkpoint_file = os.path.join(experiment_output_dir, f"model_clean_ft{model_postfix}.pth")
         if not os.path.exists(output_checkpoint_file):
             lr = 0.1
             criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, clean_finetuning_epochs)
@@ -405,7 +406,7 @@ if not os.path.exists(model_file):
         
         # Step # 05: perform unlearning step on the identified backdoored examples
         print("!! Starting unlearning phase on the identified backdoor examples...")
-        output_checkpoint_file = os.path.join(experiment_output_dir, "model_unlearned.pth")
+        output_checkpoint_file = os.path.join(experiment_output_dir, f"model_unlearned{model_postfix}.pth")
         if not os.path.exists(output_checkpoint_file):
             lr = 5e-4
             criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, unlearning_epochs)
