@@ -87,7 +87,7 @@ class WarpingAttack(object):
 
 
 def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
-                random_backdoor_alpha, output_dir, main_proc, img_size, device):
+                default_attack, random_backdoor_alpha, output_dir, main_proc, img_size, device):
     probes = {"backdoor": [], "clean": []}
 
     chosen_attack_targets = {k: np.random.choice(np.arange(num_classes)) for k in attack_types}
@@ -122,7 +122,20 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
     for i, attack_type in enumerate(attack_types):
         print(attack_type)
         if attack_type == "":
-            backdoor = BackdoorPatch()
+            if default_attack == "patch":
+                backdoor = BackdoorPatch()
+            elif default_attack == "random":
+                backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
+            elif default_attack == "fixed":
+                backdoor = BackdoorPatch(pattern=fixed_pattern, alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
+            elif default_attack == "sinusoid":
+                backdoor = BackdoorPatch(pattern=sin_pattern, alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
+            elif default_attack == "single_pix":
+                backdoor = BackdoorPatch(single_pixel_backdoor=True)
+            elif default_attack == "warped":
+                backdoor = WarpingAttack(img_size[0])
+            else:
+                raise NotImplementedError(f"Cannot parse default attack {default_attack}")
         elif attack_type == "random":
             backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
         elif attack_type == "fixed":
@@ -183,3 +196,69 @@ def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, at
     # In[ ]:
     return probes, chosen_attack_targets, random_pattern
 
+
+def make_test_probes(num_classes, test_set, num_test_probes, attack_types, default_attack, chosen_attack_targets,
+                     random_pattern, random_backdoor_alpha, experiment_output_dir, main_proc, img_size, device):
+    test_probes = {}
+
+    fixed_pattern = np.zeros(img_size, dtype=np.float32)
+    fixed_pattern[::2, ::2, :] = 1
+    fixed_pattern = transforms.ToTensor()(fixed_pattern)
+
+    sin_pattern = np.zeros(img_size, dtype=np.float32)
+    f = 6
+    for col in range(sin_pattern.shape[1]):
+        sin_pattern[:, col, :] = np.sin(2 * np.pi * col * f / sin_pattern.shape[1])
+    sin_pattern = transforms.ToTensor()(sin_pattern)
+
+    for i, attack_type in enumerate(attack_types):
+        print(attack_type)
+        if attack_type == "":
+            if default_attack == "patch":
+                backdoor = BackdoorPatch()
+            elif default_attack == "random":
+                backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
+            elif default_attack == "fixed":
+                backdoor = BackdoorPatch(pattern=fixed_pattern, alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
+            elif default_attack == "sinusoid":
+                backdoor = BackdoorPatch(pattern=sin_pattern, alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
+            elif default_attack == "single_pix":
+                backdoor = BackdoorPatch(single_pixel_backdoor=True)
+            elif default_attack == "warped":
+                backdoor = WarpingAttack(img_size[0])
+            else:
+                raise NotImplementedError(f"Cannot parse default attack {default_attack}")
+        elif attack_type == "random":
+            backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
+        elif attack_type == "fixed":
+            backdoor = BackdoorPatch(pattern=fixed_pattern, alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
+        elif attack_type == "sinusoid":
+            backdoor = BackdoorPatch(pattern=sin_pattern, alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
+        elif attack_type == "reversed":
+            backdoor = BackdoorPatch(reverse_backdoor=True)
+        elif attack_type == "single_pix":
+            backdoor = BackdoorPatch(single_pixel_backdoor=True)
+        elif attack_type == "reversed_single_pix":
+            backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
+        else:
+            assert attack_type == "warped"
+            backdoor = WarpingAttack(img_size[0])
+        backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
+
+        fake_backdoor_label = chosen_attack_targets[attack_type]
+
+        current_idx = np.random.choice(list(range(len(test_set))), size=num_test_probes, replace=False)
+
+        if attack_type == "":
+            prefix = f"backdoor"
+        else:
+            prefix = f"backdoor_{attack_type}"
+
+        test_probes[f"{prefix}_idx"] = current_idx
+        test_probes[f"{prefix}_original"] = torch.stack([test_set[i][0] for i in current_idx], dim=0).to(device)
+        test_probes[f"{prefix}"] = torch.stack([backdoor_transform(test_set[i][0]) for i in current_idx], dim=0).to(
+            device)
+        test_probes[f"{prefix}_diff"] = test_probes[f"{prefix}_original"] - test_probes[f"{prefix}"]
+        test_probes[f"{prefix}_labels"] = torch.from_numpy(np.array([fake_backdoor_label for i in current_idx])).to(device)
+
+    return test_probes

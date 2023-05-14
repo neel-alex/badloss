@@ -34,14 +34,17 @@ from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other
     yet_another_plot, one_more_plot, plot_loss_dynamics_and_violin, visualize_loss_trajectories, \
     plot_confusion_matrix_from_preds, plot_attack_success_stats
 from plot_utils import num_queue_plots
-from backdoors import make_probes
+from backdoors import make_probes, make_test_probes
 from torch_utils import get_model, train, test, test_tensor
 
 
 # Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning),
 #           ss (spectral signatures), freq (frequency analysis)
-defense = "ac"
+defense = "nc"
 defenses_that_want_only_one_attack = {'abl'}
+
+# Attacks: all, patch, single_pix, (blended) random, fixed, sinusoid, warped
+attack = "all"
 
 # Set random seed
 seed = 3
@@ -70,13 +73,14 @@ log_predictions = True
 distributed = True if dataset == "imagenet" else False
 num_train_probes = 250
 num_val_probes = 250
-if defense in defenses_that_want_only_one_attack:
+if attack != "all":
     num_train_probes = 2500
     num_val_probes = 2500
+num_test_probes = 10000
 use_val_probes_for_training = True
 num_example_probes = num_train_probes + num_val_probes
 random_backdoor_alpha = 0.1
-experiment_output_dir = f"./backdoor_exp06_{dataset}_alpha_{random_backdoor_alpha}_{defense}"
+experiment_output_dir = f"./backdoor_exp06_{dataset}_alpha_{random_backdoor_alpha}_{defense}_{attack}"
 num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
@@ -166,12 +170,20 @@ else:
     assert num_classes == 1000
 print(dataset, num_classes)
 
-attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "fixed", "sinusoid", "warped"]
-if defense in defenses_that_want_only_one_attack:
+if attack == "all":
+    attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "fixed", "sinusoid", "warped"]
+    default_attack = "patch"
+else:
     attack_types = [""]
-probes, chosen_attack_targets, random_pattern = make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
-                                                            random_backdoor_alpha, experiment_output_dir, main_proc, img_size, device)
+    default_attack = attack
+probes, chosen_attack_targets, random_pattern = make_probes(num_classes, train_set, train_set_wo_aug,
+                                                            num_example_probes, attack_types, default_attack,
+                                                            random_backdoor_alpha, experiment_output_dir, main_proc,
+                                                            img_size, device)
 
+test_probes = make_test_probes(num_classes, test_set, num_test_probes, attack_types, default_attack,
+                               chosen_attack_targets, random_pattern, random_backdoor_alpha,
+                               experiment_output_dir, main_proc, img_size, device)
 
 plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
 
@@ -295,6 +307,14 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             statistics[attack_type + "_val"].append(val_stats)
 
 
+def test_unseen_probes(log_predictions, model, device, criterion, test_probes, attack_types):
+    atks = ["backdoor_" + atk if atk else "backdoor" for atk in attack_types]
+    for attack_type in atks:
+        test_tensor(model, device, criterion, test_probes[attack_type], test_probes[f"{attack_type}_labels"],
+                    msg=f"{attack_type.capitalize().replace('_', ' ')} probe (test; unseen)",
+                    log_predictions=log_predictions)
+
+
 if not os.path.exists(model_file):
     if defense in {"mapd", "nc", "ac", "ss", "freq"}:
         statistics = {"train": [], "test": []}
@@ -327,6 +347,8 @@ if not os.path.exists(model_file):
 
             # Close all figures
             plt.close('all')
+
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, attack_types)
 
         if log_predictions:
             statistics["predictions"] = predictions
@@ -387,6 +409,7 @@ if not os.path.exists(model_file):
 
         log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                                rank, new_idx_loader_wo_aug, attack_types, probes, val_probes)
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, attack_types)
 
     else:
         raise NotImplementedError
@@ -1060,7 +1083,7 @@ def get_confusion_stats(identified_indices, train_set, probe_identity, val_probe
 
 def retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                  detection_thresh, criterion, probes, log_predictions):
+                  detection_thresh, criterion, probes, log_predictions, test_probes):
     print(f"Retraining with {identified_indices.shape[0]} elements removed.")
     retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
     from dataset_utils import get_loader
@@ -1093,6 +1116,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     # Evaluate accuracy
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
                                            distributed, rank, retrain_set_dl, attack_types, probes, val_probes)
+    test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, attack_types)
     return clean_model
 
 
@@ -1226,7 +1250,7 @@ if defense == "nc":
     get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                experiment_output_dir, fpr_thresh, criterion, probes, log_predictions)
+                                experiment_output_dir, fpr_thresh, criterion, probes, log_predictions, test_probes)
     # fpr_thresh is only misnamed parameter...
     print("Done with nc")
     # TODO: retrain, repeat...
@@ -1291,7 +1315,7 @@ if defense == "ac":
     get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                experiment_output_dir, detect_thresh, criterion, probes, log_predictions) # detect_thresh...
+                                experiment_output_dir, detect_thresh, criterion, probes, log_predictions, test_probes) # detect_thresh...
 
 
 
@@ -1330,7 +1354,7 @@ if defense == "ss":
     get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                experiment_output_dir, epsilon_thresh, criterion, probes, log_predictions)
+                                experiment_output_dir, epsilon_thresh, criterion, probes, log_predictions, test_probes)
     print("Done with ss")
     # TODO: retrain, repeat...
 
@@ -1428,7 +1452,4 @@ if defense == "freq":
     # Remove and retrain...
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                  detection_thresh, criterion, probes, log_predictions)
-
-
-
+                  detection_thresh, criterion, probes, log_predictions, test_probes)
