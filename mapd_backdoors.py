@@ -337,13 +337,19 @@ if not os.path.exists(model_file):
         
         # Step # 01: Regular pretraining
         print("!! Performing initial pertraining with all examples (using loss flooding)...")
-        for epoch in tqdm(range(num_epochs)):
-            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
-                                                         probes["backdoor_labels"], msg="Backdoor probe",
-                                                         log_predictions=log_predictions)
-            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
-                                                   msg="Clean probe", log_predictions=log_predictions)
-            train(model, device, new_idx_loader, optimizer, criterion, scaler, flooding_threshold=flooding_threshold)
+        output_checkpoint_file = os.path.join(experiment_output_dir, "model_pretrain.pth")
+        if not os.path.exists(output_checkpoint_file):
+            for epoch in tqdm(range(num_epochs)):
+                backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
+                                                             probes["backdoor_labels"], msg="Backdoor probe",
+                                                             log_predictions=log_predictions)
+                clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
+                                                       msg="Clean probe", log_predictions=log_predictions)
+                train(model, device, new_idx_loader, optimizer, criterion, scaler, flooding_threshold=flooding_threshold)
+            torch.save(model.state_dict(), output_checkpoint_file)
+        else:
+            print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
+            model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
         
         # Step # 02: identify backdoored examples based on the loss value
         # Get the loss values for all examples in the dataset
@@ -362,14 +368,15 @@ if not os.path.exists(model_file):
         print(f"Indices to maximize / Len: {len(indices_to_maximize)} / Indices: {indices_to_maximize}")
         
         ground_truth_probes = [i for i in range(len(ex_idx), total_ex)]
-        probes_detected = [i for i in indices_to_maximize if i >= len(ex_idx)]
-        print(f"Backdoor probe examples flagged: {len(probes_detected)} / {probes_detected}")
+        backdoor_probe_idx = [i for i in ground_truth_probes if "clean" not in dataset_probe_identity[i]]
+        
+        backdoor_probes_detected = [i for i in indices_to_maximize if i in backdoor_probe_idx]
+        print(f"Backdoor probe examples flagged: {len(backdoor_probes_detected)} / {backdoor_probes_detected}")
         print(f"Ground truth probes: {len(ground_truth_probes)} / {ground_truth_probes}")
         
         use_gt_probes = True
         if use_gt_probes:
             print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
-            backdoor_probe_idx = [i for i in ground_truth_probes if "clean" not in dataset_probe_identity[i]]
             indices_to_maximize = backdoor_probe_idx
             print(f"Total probe idx: {len(ground_truth_probes)} / Backdoor idx: {len(backdoor_probe_idx)}")
         remaining_indices = [i for i in range(total_ex) if i not in indices_to_maximize and i not in missing_vals]
@@ -383,23 +390,35 @@ if not os.path.exists(model_file):
         
         # Step # 04: finetune the model only on clean data
         print("!! Starting finetuning phase on the clean examples...")
-        for epoch in tqdm(range(clean_finetuning_epochs)):
-            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
-                                                         probes["backdoor_labels"], msg="Backdoor probe",
-                                                         log_predictions=log_predictions)
-            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
-                                                   msg="Clean probe", log_predictions=log_predictions)
-            output_dict = train(model, device, clean_dl, optimizer, criterion, scaler)
+        output_checkpoint_file = os.path.join(experiment_output_dir, "model_clean_ft.pth")
+        if not os.path.exists(output_checkpoint_file):
+            for epoch in tqdm(range(clean_finetuning_epochs)):
+                backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
+                                                             probes["backdoor_labels"], msg="Backdoor probe",
+                                                             log_predictions=log_predictions)
+                clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
+                                                       msg="Clean probe", log_predictions=log_predictions)
+                output_dict = train(model, device, clean_dl, optimizer, criterion, scaler)
+            torch.save(model.state_dict(), output_checkpoint_file)
+        else:
+            print(f"!! Loading clean finetuned checkpoint file:", output_checkpoint_file)
+            model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
         
         # Step # 05: perform unlearning step on the identified backdoored examples
         print("!! Starting unlearning phase on the identified backdoor examples...")
-        for epoch in tqdm(range(unlearning_epochs)):
-            backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
-                                                         probes["backdoor_labels"], msg="Backdoor probe",
-                                                         log_predictions=log_predictions)
-            clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
-                                                   msg="Clean probe", log_predictions=log_predictions)
-            output_dict = train(model, device, detected_backdoors_dl, optimizer, criterion, scaler, gradient_ascent=True)
+        output_checkpoint_file = os.path.join(experiment_output_dir, "model_unlearned.pth")
+        if not os.path.exists(output_checkpoint_file):
+            for epoch in tqdm(range(unlearning_epochs)):
+                backdoor_stats, backdoor_preds = test_tensor(model, device, criterion, probes["backdoor"],
+                                                             probes["backdoor_labels"], msg="Backdoor probe",
+                                                             log_predictions=log_predictions)
+                clean_stats, clean_preds = test_tensor(model, device, criterion, probes["clean"], probes["clean_labels"],
+                                                       msg="Clean probe", log_predictions=log_predictions)
+                output_dict = train(model, device, detected_backdoors_dl, optimizer, criterion, scaler, gradient_ascent=True)
+            torch.save(model.state_dict(), output_checkpoint_file)
+        else:
+            print(f"!! Loading unlearned checkpoint file:", output_checkpoint_file)
+            model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
         
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                       log_predictions=log_predictions)
