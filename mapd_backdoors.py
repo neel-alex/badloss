@@ -1225,7 +1225,7 @@ if defense == "nc":
     # again, from paper. Can adjust? TODO: maybe need to adjust for multiple attack classes
     print("Skipping detected attacks where norm is above median.")
     attacked_classes = attacked_classes[(norms[attacked_classes] <= median).nonzero()[:, 0]]
-    fpr_thresh = 0.05 / len(attacked_classes)
+    fpr_thresh = 0.05 / min(len(attacked_classes), 1)
 
     clean_indices = None
 
