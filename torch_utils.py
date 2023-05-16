@@ -193,18 +193,40 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
 # In[ ]:
 
 
-def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False):
+def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False, batch_size=None):
     assert torch.is_tensor(data) and torch.is_tensor(target)
 
     model.eval()
     with torch.no_grad():
-        output = model(data)
-        loss_vals = criterion(output, target)
-        test_loss = float(loss_vals.mean())
+        if batch_size is None:
+            output = model(data)
+            loss_vals = criterion(output, target)
+            test_loss = float(loss_vals.mean())
 
-        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-        correct = pred.eq(target.view_as(pred)).sum().item()
-        total = len(data)
+            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            correct = pred.eq(target.view_as(pred)).sum().item()
+            total = len(data)
+        else:
+            total = 0
+            correct = 0
+            loss_vals_list = []
+            pred_list = []
+            
+            num_batches = int(np.ceil(len(data) / float(batch_size)))
+            for i in range(num_batches):
+                start, end = i * batch_size, (i+1) * batch_size
+                output = model(data[start:end])
+                loss_vals = criterion(output, target[start:end])
+                loss_vals_list.append(loss_vals.detach())
+                
+                pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+                pred_list.append(pred.detach())
+                correct += pred.eq(target[start:end].view_as(pred)).sum().item()
+                total += len(output)
+            
+            loss_vals = torch.cat(loss_vals_list, dim=0)
+            pred = torch.cat(pred_list, dim=0)
+            test_loss = float(loss_vals.mean())
 
     test_acc = 100. * correct / total
     output_dict = dict(loss=test_loss, acc=test_acc, correct=correct, total=total)
@@ -223,8 +245,7 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
         pred_dict["targets"] = target.detach().cpu().numpy()
 
     header = "Test set" if msg is None else msg
-    print(
-        f"{header} | Loss mean: {output_dict['loss_mean']:.4f} | Loss std: {output_dict['loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
+    print(f"{header} | Loss mean: {output_dict['loss_mean']:.4f} | Loss std: {output_dict['loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
 
     return output_dict, pred_dict
 
