@@ -214,9 +214,8 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
         plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0),
              class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png", output_dir=output_dir)
 
-    attack_numbers = {attack: int(len(train_set) * num_val_probes[attack]) for attack in val_probe_attacks}
     # TODO: Note how this adds "val".... hopefully this just solves problems and doesn't cause any lol
-    val_probe_identity = list(itertools.chain(*([f"backdoor_{identity}_val"] * attack_numbers[identity]
+    val_probe_identity = list(itertools.chain(*([f"backdoor_{identity}_val"] * len(probes[f"backdoor_{identity}"])
                                                 for identity in val_probe_attacks)))
 
     # Create the validation set for probes
@@ -278,7 +277,7 @@ def make_index_dataset(comb_train_set, comb_train_indices, test_set,
 
 class AttackDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, attack_type, chosen_attack_targets,
-                 no_transform, random_pattern, warping_grids, img_size, train_probe_attack):
+                 no_transform, random_pattern, warping_grids, img_size, train_probe_attack, train_aux_data):
         super().__init__()
 
         aux_data = None
@@ -296,6 +295,7 @@ class AttackDataset(torch.utils.data.Dataset):
         else:
             if attack_type == "backdoor":
                 attack = train_probe_attack
+                aux_data = train_aux_data
             elif "backdoor" in attack_type:
                 attack = '_'.join(attack_type.split('_')[1:])
             else:
@@ -328,8 +328,8 @@ class AttackDataset(torch.utils.data.Dataset):
 
 
 def make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform, random_pattern, warping_grids,
-                        img_size, distributed, num_workers, batch_size, train_probe_attack):
+                        img_size, distributed, num_workers, batch_size, train_probe_attack, train_aux_data):
     attacked_test_set = AttackDataset(IdxDataset(test_set), attack_type, chosen_attack_targets,
-                                      no_transform, random_pattern, warping_grids, img_size, train_probe_attack)
+                                      no_transform, random_pattern, warping_grids, img_size, train_probe_attack, train_aux_data)
     attacked_test_dl = get_loader(attacked_test_set, distributed, num_workers, batch_size=batch_size)
     return attacked_test_dl

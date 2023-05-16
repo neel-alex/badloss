@@ -950,7 +950,7 @@ if defense == "mapd":
         for i, attack_type in enumerate(["clean"] + attack_types):
             attacked_test_dl = make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform,
                                                    random_pattern, warping_grids, img_size, distributed,
-                                                   num_workers, batch_size, train_probe_attack)
+                                                   num_workers, batch_size, train_probe_attack, aux_data)
             correct, total = 0, 0
             model.eval()
             for (data, target), ex_idx in tqdm(attacked_test_dl):
