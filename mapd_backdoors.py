@@ -37,8 +37,8 @@ from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, train, test, test_tensor
 
 
-default_defense = "cifar10"
-default_attack  = "sinusoid"
+default_defense = "mapd"
+default_attack  = "all"
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
@@ -377,7 +377,7 @@ if not os.path.exists(model_file):
                     # Save the model
                     model_file_base, model_file_ext = os.path.splitext(model_file)
                     current_model_file = f"{model_file_base}_ep_{epoch}{model_file_ext}"
-                    torch.save(model.state_dict(), current_model_file)
+                    # torch.save(model.state_dict(), current_model_file)
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -412,7 +412,7 @@ if not os.path.exists(model_file):
                 # Save the model
                 model_file_base, model_file_ext = os.path.splitext(model_file)
                 current_model_file = f"{model_file_base}_ep_{epoch}{model_file_ext}"
-                torch.save(model.state_dict(), current_model_file)
+                # torch.save(model.state_dict(), current_model_file)
 
             # Close all figures
             plt.close('all')
