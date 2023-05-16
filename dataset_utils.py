@@ -106,6 +106,7 @@ def get_settings_for_dataset(dataset):
 
         if dataset == "gtsrb":
             train_set = GTSRB(data_dir, download=True, split="train", transform=transforms.Compose(train_transform))
+            train_set.targets = [label for (img, label) in train_set]
             train_set_wo_aug = GTSRB(data_dir, download=True, split="train", transform=transforms.Compose(no_transform))
             test_set = GTSRB(data_dir, download=True, split="test", transform=transforms.Compose(test_transform))
         else:
