@@ -38,15 +38,15 @@ from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other
 from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, FreqCNN
 
-default_defense = "abl"
-default_attack  = "patch"
+default_attack  = "all"
+default_defense = "mapd"
 default_poisoning_ratio = None
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
 attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
 defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
-poisoning_ratio_choices = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3]
+poisoning_ratio_choices = [0.003, 0.01, 0.03, 0.1, 0.3]
 
 if len(sys.argv) < 2:
     print(f"Usage: {sys.argv[0]} <Dataset: {'/'.join(dataset_choices)}>")
@@ -74,7 +74,7 @@ if len(sys.argv) >= 4:
 else:
     poisoning_ratio = default_poisoning_ratio
 
-print(dataset, attack, defense)
+print(dataset, attack, defense, poisoning_ratio)
 
 if attack == "all":
     train_probe_attack = "reversed_patch"
@@ -95,8 +95,8 @@ num_val_probes = {
     "sinusoid": 0.03,
     "warped": 0.1,
 }
-correct_abl = True  # If true, hard set poisoning ratio for abl to 10% at least.
-if correct_abl:
+correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
+if correct_abl and defense == "abl":
     poisoning_ratio = 0.1
 
 if poisoning_ratio is not None:
