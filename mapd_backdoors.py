@@ -68,7 +68,7 @@ if len(sys.argv) >= 4:
 else:
     defense = default_defense
 
-if len(sys.argv) >= 4:
+if len(sys.argv) >= 5:
     poisoning_ratio = float(sys.argv[4])
     assert poisoning_ratio in poisoning_ratio_choices
 else:
@@ -245,6 +245,7 @@ else:
         assert batch_size % world_size == 0
         batch_size = batch_size // world_size
         print(f"Optimizer batch size: {optimizer_batch_size} / World size: {world_size} / Local batch size: {batch_size}")
+tensor_batch_size = batch_size if dataset == "gtsrb" else None
 lr = 0.1
 momentum = 0.9
 wd = 0.0001
@@ -299,6 +300,7 @@ label_map_dict = {"backdoor": "Backdoor (probe)",
 
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                            rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
+                                           tensor_batch_size,
                                            statistics=None, predictions=None):
     test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                   log_predictions=log_predictions)
@@ -329,11 +331,11 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
                                        probes[f"{attack_type}_labels"],
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
-                                       log_predictions=log_predictions)
+                                       log_predictions=log_predictions, batch_size=tensor_batch_size)
             val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
                                                probes[f"{attack_type}_val_labels"],
                                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
-                                               log_predictions=log_predictions)
+                                               log_predictions=log_predictions, batch_size=tensor_batch_size)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
                 predictions[epoch][attack_type+"_val"] = val_preds
@@ -345,19 +347,19 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
                                        probes[f"{attack_type}_labels"],
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
-                                       log_predictions=log_predictions)
+                                       log_predictions=log_predictions, batch_size=tensor_batch_size)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
 
 
-def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks):
+def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size):
     for attack in val_probe_attacks:
         test_tensor(model, device, criterion, test_probes[f"backdoor_{attack}"],
                     test_probes[f"backdoor_{attack}_labels"],
                     msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
-                    log_predictions=log_predictions)
+                    log_predictions=log_predictions, batch_size=tensor_batch_size)
 
 
 if not os.path.exists(model_file):
@@ -368,7 +370,7 @@ if not os.path.exists(model_file):
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                        distributed,
-                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense)
+                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size)
                 if main_proc:
                     # Save the model
                     model_file_base, model_file_ext = os.path.splitext(model_file)
@@ -398,7 +400,7 @@ if not os.path.exists(model_file):
             # Collect test set statistics
             print("Stats for epoch #", epoch+1)
             log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
-                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
+                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
                                                    statistics=statistics, predictions=predictions)
 
             if lr_scheduler is not None:
@@ -413,7 +415,7 @@ if not os.path.exists(model_file):
             # Close all figures
             plt.close('all')
 
-        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks)
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
 
         if log_predictions:
             statistics["predictions"] = predictions
@@ -440,7 +442,12 @@ else:
 
 print("Final model performance:")
 test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks)
+test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+
+
+if poisoning_ratio is not None:
+    # If doing a poisoning run, don't train any more models -- just the base model will do!
+    quit()
 
 
 if defense == "mapd":
@@ -1127,7 +1134,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader, distributed,
-                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense)  # TODO: Add other args...
+                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size)  # TODO: Add other args...
             if clean_lr_scheduler is not None:
                 clean_lr_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint)
@@ -1138,8 +1145,8 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     # Evaluate accuracy
     print("Retrained model performance:")
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader,
-                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense)
-    test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, val_probe_attacks)
+                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense, tensor_batch_size)
+    test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, val_probe_attacks, tensor_batch_size)
     return clean_model
 
 
@@ -1490,7 +1497,7 @@ if defense == "abl":
             if epoch % 5 == 4:
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                       val_probes, defense)
+                                                       val_probes, defense, tensor_batch_size)
         torch.save(model.state_dict(), output_checkpoint_file)
     else:
         print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
@@ -1562,7 +1569,7 @@ if defense == "abl":
                 if epoch % 5 == 4:
                     log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                            distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, defense)
+                                                           val_probes, defense, tensor_batch_size)
             torch.save(model.state_dict(), output_checkpoint_file)
         else:
             print(f"!! Loading clean finetuned checkpoint file:", output_checkpoint_file)
@@ -1580,7 +1587,7 @@ if defense == "abl":
                 if epoch % 5 == 4:
                     log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                            distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, defense)
+                                                           val_probes, defense, tensor_batch_size)
             torch.save(model.state_dict(), output_checkpoint_file)
         else:
             print(f"!! Loading unlearned checkpoint file:", output_checkpoint_file)
@@ -1588,4 +1595,4 @@ if defense == "abl":
 
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                       log_predictions=log_predictions)
-        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks)
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
