@@ -238,7 +238,7 @@ def make_val_probes(num_classes, train_set, train_set_wo_aug, num_val_probes, va
         indices_to_choose_from = [i for i in indices_to_choose_from if i not in np.concatenate((chosen_indices,
                                                                                                 train_probe_indices))]
 
-        attack_idx = np.random.choice(indices_to_choose_from, size=num, replace=False)
+        attack_idx = np.random.choice(indices_to_choose_from, size=min(num, len(indices_to_choose_from)), replace=False)
         attack_labels = np.array([target for _ in attack_idx])
         probe_transform, aux_data = make_probe_transform(attack, img_size, output_dir, main_proc)
         add_probe_data(val_probes, f"backdoor_{attack}", attack_idx, train_set_wo_aug, device, attack_labels,
