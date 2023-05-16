@@ -81,13 +81,9 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, ou
 def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_dir):
     print("Backdoor examples")
     for attack_type in attack_types:
-        if attack_type == "":
-            prefix = f"backdoor"
-        else:
-            prefix = f"backdoor_{attack_type}"
-        plot(probes[f"{prefix}"], probes[f"{prefix}_labels"], None, class_names=train_set.classes,
+        plot(probes[f"{attack_type}"], probes[f"{attack_type}_labels"], None, class_names=train_set.classes,
              output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_{rank}.png")
-        plot(probes[f"{prefix}_diff"], probes[f"{prefix}_labels"], None, class_names=train_set.classes,
+        plot(probes[f"{attack_type}_diff"], probes[f"{attack_type}_labels"], None, class_names=train_set.classes,
              output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_diff_{rank}.png", diff_image=True)
     # In[ ]:
 
@@ -515,7 +511,7 @@ def visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_ident
     plt.close('all')
 
 
-def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, num_example_probes,
+def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, num_train_probes,
                                      output_dir, normalize=False, title=None, cmap=plt.cm.Blues,
                                      fontsize=15):
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
@@ -559,7 +555,7 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, n
 
     plt.tight_layout()
     output_file = os.path.join(output_dir,
-                               f"probe_confusion_matrix_trajectories_val_probes{'_all' if include_all_val else ''}_{num_example_probes}{'_norm' if normalize else ''}.png")
+                               f"probe_confusion_matrix_trajectories_val_probes{'_all' if include_all_val else ''}_{num_train_probes}{'_norm' if normalize else ''}.png")
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
 
@@ -650,7 +646,7 @@ def plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, ou
 
     keys = natsort.natsorted(list(output_dict.keys()))
     accuracies = [output_dict[k]['accuracy'] for k in keys]
-    keys = [label_map_dict[f"backdoor_{k}_val" if k not in ref_probe_classes else k].replace(" [Val]", "") for k in
+    keys = [label_map_dict[f"{k}_val" if k not in ref_probe_classes else k].replace(" [Val]", "") for k in
             keys]
     plt.bar(keys, accuracies)
 

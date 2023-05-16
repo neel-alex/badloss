@@ -28,23 +28,65 @@ import sklearn.metrics
 
 
 import dist_utils
-from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, combine_dataset, \
-    make_attack_dataset
+from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, make_attack_dataset
 from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other_plot, make_normalizers, \
     yet_another_plot, one_more_plot, plot_loss_dynamics_and_violin, visualize_loss_trajectories, \
     plot_confusion_matrix_from_preds, plot_attack_success_stats
 from plot_utils import num_queue_plots
-from backdoors import make_probes, make_test_probes
+from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, train, test, test_tensor
 
 
-# Defenses: mapd, nc (neural cleanse), ac (activation clustering), abl (anti-backdoor learning),
-#           ss (spectral signatures), freq (frequency analysis)
-defense = "nc"
-defenses_that_want_only_one_attack = {'abl'}
+default_defense = "mapd"
+default_attack  = "sinusoid"
 
-# Attacks: all, patch, single_pix, (blended) random, fixed, sinusoid, warped
-attack = "all"
+
+dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
+defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
+attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
+
+if len(sys.argv) < 2:
+    print(f"Usage: {sys.argv[0]} <Dataset: {'/'.join(dataset_choices)}>")
+    exit()
+
+dataset = sys.argv[1]
+assert dataset in dataset_choices
+
+if len(sys.argv) >= 3:
+    attack = sys.argv[2]
+    assert attack in attack_choices
+else:
+    attack = default_attack
+
+
+if len(sys.argv) >= 4:
+    defense = sys.argv[3]
+    assert defense in defense_choices
+else:
+    defense = default_defense
+
+
+if attack == "all":
+    train_probe_attack = "reversed_patch"
+    val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
+elif attack in {"patch", "single_pix", "fixed", "sinusoid"}:
+    train_probe_attack = "reversed_" + attack
+    val_probe_attacks = [attack]
+else:
+    train_probe_attack = attack
+    val_probe_attacks = [attack]
+num_train_probes = 250  # Fixed number -- 4x this many probes will be made
+# Fraction in terms of overall dataset size!! Not in terms of per-class size.
+num_val_probes = {
+    "patch": 0.01,
+    "single_pix": 0.01,
+    "random": 0.01,
+    "fixed": 0.01,
+    "sinusoid": 0.03,
+    "warped": 0.1,
+}
+num_test_probes = 10000
+
 
 # Set random seed
 seed = 3
@@ -58,29 +100,11 @@ include_plot_title = False
 font_size = 16
 
 
-dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
-
-if len(sys.argv) != 2:
-    print(f"Usage: {sys.argv[0]} <Dataset: {'/'.join(dataset_choices)}>")
-    exit()
-
-dataset = sys.argv[1]
-assert dataset in dataset_choices
-
-
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-num_train_probes = 250
-num_val_probes = 250
-if attack != "all":
-    num_train_probes = 2500
-    num_val_probes = 2500
-num_test_probes = 10000
-use_val_probes_for_training = True
-num_example_probes = num_train_probes + num_val_probes
-random_backdoor_alpha = 0.1
-experiment_output_dir = f"./backdoor_exp06_{dataset}_alpha_{random_backdoor_alpha}_{defense}_{attack}"
+experiment_output_dir = f"./backdoor_exp06_{dataset}_{defense}_{attack}"
+model_collection_dir = f"./backdoor_exp09_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}"
 num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
@@ -136,6 +160,8 @@ warnings.filterwarnings("ignore", "Warning: Leaking Caffe2 thread-pool after for
 
 recompute_results = False
 if main_proc:
+    if not os.path.exists(model_collection_dir):
+        os.makedirs(model_collection_dir)
     if recompute_results:
         if os.path.exists(experiment_output_dir):
             shutil.rmtree(experiment_output_dir)
@@ -143,7 +169,6 @@ if main_proc:
     else:
         if not os.path.exists(experiment_output_dir):
             os.makedirs(experiment_output_dir)
-
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -170,22 +195,37 @@ else:
     assert num_classes == 1000
 print(dataset, num_classes)
 
-if attack == "all":
-    attack_types = ["", "reversed", "single_pix", "reversed_single_pix", "random", "fixed", "sinusoid", "warped"]
-    default_attack = "patch"
+
+# Standardizing nomenclature...
+if defense == "mapd":
+    attack_types = ["backdoor"] + [f"backdoor_{attack}" for attack in val_probe_attacks]
 else:
-    attack_types = [""]
-    default_attack = attack
-probes, chosen_attack_targets, random_pattern = make_probes(num_classes, train_set, train_set_wo_aug,
-                                                            num_example_probes, attack_types, default_attack,
-                                                            random_backdoor_alpha, experiment_output_dir, main_proc,
-                                                            img_size, device)
+    attack_types = [f"backdoor_{attack}" for attack in val_probe_attacks]
 
-test_probes = make_test_probes(num_classes, test_set, num_test_probes, attack_types, default_attack,
-                               chosen_attack_targets, random_pattern, random_backdoor_alpha,
-                               experiment_output_dir, main_proc, img_size, device)
+train_probe, attack_target, aux_data = make_train_probes(num_classes, train_set, train_set_wo_aug,
+                                                        num_train_probes, train_probe_attack,
+                                                        experiment_output_dir, main_proc, img_size, device)
 
-plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
+val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, train_set, train_set_wo_aug,
+                                                                            num_val_probes, val_probe_attacks,
+                                                                            experiment_output_dir, main_proc, img_size,
+                                                                            device,
+                                                                            train_probe_indices=train_probe["all_backdoor_idx"])
+
+test_probes = make_test_probes(test_set, num_test_probes, val_probe_attacks, attack_targets,
+                               random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
+
+
+unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
+# Merge probe dicts
+if defense == "mapd":
+    probes = train_probe | val_probes
+    probes['all_backdoor_idx'] = unified_backdoor_idx
+    chosen_attack_targets = {'backdoor': attack_target} | attack_targets
+    plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
+else:
+    probes = val_probes
+
 
 
 # Hyperparameters
@@ -193,7 +233,7 @@ if dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
-    num_epochs = 150
+    num_epochs = 2
     batch_size = 128
 else:
     assert dataset == "imagenet" or dataset == "gtsrb"
@@ -209,10 +249,9 @@ momentum = 0.9
 wd = 0.0001
 
 
-(probe_dataset_standard, val_probe_dataset_standard, val_probes,
- train_indices, probe_identity, val_probe_identity, discarded_idx) = \
-    make_probe_dataset(probes, train_set, test_set, dataset, batch_size, num_example_probes, num_train_probes,
-                       num_val_probes, attack_types, distributed, num_workers, experiment_output_dir, device)
+comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
+    make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
+                       num_val_probes, val_probe_attacks, experiment_output_dir, device)
 
 
 model = get_model(dataset, num_classes, device, local_rank, verbose=True)
@@ -223,24 +262,19 @@ lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_e
 scaler = torch.cuda.amp.GradScaler()
 
 
-comb_train_set, comb_train_indices, dataset_probe_identity = \
-    combine_dataset(train_set, train_indices, probe_dataset_standard, val_probe_dataset_standard,
-                    probe_identity, val_probe_identity, use_val_probes_for_training)
-
 new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
     make_index_dataset(comb_train_set, comb_train_indices, test_set,
                        no_transform, batch_size, distributed, num_workers)
 
-
-model_file = os.path.join(experiment_output_dir, f"models_{dataset}", f"model_{dataset}_dynamics.pth")
-data_file = os.path.join(experiment_output_dir, f"stats_{dataset}_dynamics.pkl")
-data_statistics_file = os.path.join(experiment_output_dir, f"stats_{dataset}_data_statistics.pkl")
+model_dir = os.path.join(model_collection_dir, f"models_{dataset}")
+model_file = os.path.join(model_dir, f"model_{dataset}_dynamics.pth")
+data_file = os.path.join(model_collection_dir, f"stats_{dataset}_dynamics.pkl")
+data_statistics_file = os.path.join(model_collection_dir, f"stats_{dataset}_data_statistics.pkl")
 
 
 # In[ ]:
 
 
-model_dir = os.path.split(model_file)[0]
 if main_proc and not os.path.exists(model_dir):
     os.mkdir(model_dir)
 
@@ -249,21 +283,26 @@ if main_proc and not os.path.exists(model_dir):
 
 
 ref_probe_classes = ["backdoor", "clean"]
-label_map_dict = {"backdoor": "Backdoor", "backdoor_val": "Backdoor [Val]",
-                  "backdoor_random_val": "Backdoor (random) [Val]",
-                  "backdoor_fixed_val": "Backdoor (fixed) [Val]",
-                  "backdoor_sinusoid_val": "Backdoor (sinusoid) [Val]",
-                  "backdoor_reversed_val": "Backdoor (reversed) [Val]",
-                  "backdoor_single_pix_val": "Backdoor (single pixel) [Val]",
-                  "backdoor_reversed_single_pix_val": "Backdoor (reversed single pixel) [Val]",
-                  "backdoor_warped": "Backdoor (warped)", "backdoor_warped_val": "Backdoor (warped) [Val]",
-                  "clean": "Clean", "clean_val": "Clean [Val]", "train": "Train", "test": "Test"}
+label_map_dict = {"backdoor": "Backdoor (probe)",
+                  "backdoor_val": "Backdoor (probe) [Val]",
+                  "clean": "Clean",
+                  "clean_val": "Clean [Val]",
+                  "backdoor_patch_val": "Backdoor (Patch)",
+                  "backdoor_single_pix_val": "Backdoor (Single pixel patch)",
+                  "backdoor_reversed_val": "Backdoor (Reversed)",
+                  "backdoor_reversed_single_pix_val": "Backdoor (Reversed single pixel)",
+                  "backdoor_random_val": "Backdoor (Blend-R)",
+                  "backdoor_fixed_val": "Backdoor (Blend-P)",
+                  "backdoor_sinusoid_val": "Backdoor (Sinusoid)",
+                  "backdoor_warped_val": "Backdoor (Warped)",
+                  "train": "Train",
+                  "test": "Test"}
 
 
 # In[ ]:
 
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
-                                           rank, new_idx_loader_wo_aug, attack_types, probes, val_probes,
+                                           rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
                                            statistics=None, predictions=None):
     test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                   log_predictions=log_predictions)
@@ -284,7 +323,10 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             predictions[epoch]["test"] = test_preds
 
     # Collect probe statistics
-    atks = ["backdoor_" + atk if atk else "backdoor" for atk in attack_types] + ["clean"]
+    if defense == "mapd":
+        atks = attack_types + ["clean"]
+    else:
+        atks = attack_types
 
     for attack_type in atks:
         if attack_type in {'clean', 'backdoor'}:
@@ -292,35 +334,61 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                        probes[f"{attack_type}_labels"],
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
                                        log_predictions=log_predictions)
+            val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
+                                               probes[f"{attack_type}_val_labels"],
+                                               msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
+                                               log_predictions=log_predictions)
+            if predictions is not None:
+                predictions[epoch][attack_type] = preds
+                predictions[epoch][attack_type+"_val"] = val_preds
+            if statistics is not None:
+                statistics[attack_type].append(stats)
+                statistics[attack_type+"_val"].append(val_stats)
+        else:
+            suffix = ' (val)'
+            stats, preds = test_tensor(model, device, criterion, probes[attack_type],
+                                       probes[f"{attack_type}_labels"],
+                                       msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
+                                       log_predictions=log_predictions)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
 
-        val_stats, val_preds = test_tensor(model, device, criterion, val_probes[attack_type],
-                                           val_probes[f"{attack_type}_labels"],
-                                           msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
-                                           log_predictions=log_predictions)
-        if predictions is not None:
-            predictions[epoch][attack_type + "_val"] = val_preds
-        if statistics is not None:
-            statistics[attack_type + "_val"].append(val_stats)
 
-
-def test_unseen_probes(log_predictions, model, device, criterion, test_probes, attack_types):
-    atks = ["backdoor_" + atk if atk else "backdoor" for atk in attack_types]
-    for attack_type in atks:
-        test_tensor(model, device, criterion, test_probes[attack_type], test_probes[f"{attack_type}_labels"],
-                    msg=f"{attack_type.capitalize().replace('_', ' ')} probe (test; unseen)",
+def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks):
+    for attack in val_probe_attacks:
+        test_tensor(model, device, criterion, test_probes[f"backdoor_{attack}"],
+                    test_probes[f"backdoor_{attack}_labels"],
+                    msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
                     log_predictions=log_predictions)
 
-
 if not os.path.exists(model_file):
-    if defense in {"mapd", "nc", "ac", "ss", "freq"}:
+    if defense in {"nc", "ac", "ss", "freq"}:
+        for epoch in range(num_epochs):
+            train(model, device, new_idx_loader, optimizer, criterion, scaler)
+            if (epoch + 1) % 5 == 0:
+                print(f"Stats for epoch {epoch + 1}")
+                log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
+                                                       distributed,
+                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense)
+                if main_proc:
+                    # Save the model
+                    model_file_base, model_file_ext = os.path.splitext(model_file)
+                    current_model_file = f"{model_file_base}_ep_{epoch}{model_file_ext}"
+                    torch.save(model.state_dict(), current_model_file)
+
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+
+        if main_proc:
+            # Save the model
+            torch.save(model.state_dict(), model_file)
+
+    elif defense == "mapd":
         statistics = {"train": [], "test": []}
-        statistics.update({k: [] for k in ref_probe_classes})
-        statistics.update({f"{k}_val": [] for k in ref_probe_classes})  # Add keys for validation probes
-        statistics.update({f"backdoor_{k}_val": [] for k in attack_types if k != ""})  # Adding additional validation keys
+        statistics.update({k: [] for k in attack_types + ['clean']})
+        statistics.update({k+"_val": [] for k in ref_probe_classes})
         inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
 
         surface_epoch = 5
@@ -333,7 +401,7 @@ if not os.path.exists(model_file):
             # Collect test set statistics
             print("Stats for epoch #", epoch+1)
             log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
-                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes,
+                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
                                                    statistics=statistics, predictions=predictions)
 
             if lr_scheduler is not None:
@@ -348,7 +416,7 @@ if not os.path.exists(model_file):
             # Close all figures
             plt.close('all')
 
-        test_unseen_probes(log_predictions, model, device, criterion, test_probes, attack_types)
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks)
 
         if log_predictions:
             statistics["predictions"] = predictions
@@ -383,13 +451,9 @@ if not os.path.exists(model_file):
 
         losses = output_dict["all_losses"]
         sorted_losses, loss_idx = losses.sort()
-        loss_idx = loss_idx[num_example_probes*2:]
+        loss_idx = loss_idx[losses.nonzero()]
         indices_to_maximize = loss_idx[:int(len(train_set) * selection_threshold)]
         # +num_example_probes*2 would be maximizing on all the backdoor probes
-        indices_to_maximize = torch.tensor(range(len(train_set) - 27500, len(train_set) + int(num_example_probes)))
-        print((indices_to_maximize > 60000).sum())
-        print(indices_to_maximize.shape)
-        print(indices_to_maximize)
         max_losses = []
 
         for epoch in range(later_epochs):
@@ -408,22 +472,37 @@ if not os.path.exists(model_file):
         plt.show()
 
         log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
-                                               rank, new_idx_loader_wo_aug, attack_types, probes, val_probes)
-        test_unseen_probes(log_predictions, model, device, criterion, test_probes, attack_types)
+                                               rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,)
 
     else:
         raise NotImplementedError
 else:
-    assert os.path.exists(data_file)
+    assert os.path.exists(model_file)
     print("Data files already found. Loading data from saved checkpoints...")
 
     model.load_state_dict(torch.load(model_file, map_location=device))
-    with open(data_file, "rb") as f:
-        statistics = pickle.load(f)
+    if defense == "mapd":
+        assert os.path.exists(data_file)
+        with open(data_file, "rb") as f:
+            statistics = pickle.load(f)
+
+print("Final model performance:")
+test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
+test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks)
+
 
 if defense == "mapd":
     print("Final train accuracy:", statistics["train"][-1])
     print("Final test accuracy:", statistics["test"][-1])
+    print("Keys in statistics file:", natsort.natsorted(list(statistics.keys())))
+
+    # Just pretend they're all named _val for convenience sakes...
+    for key in list(statistics.keys()):
+        if "backdoor" in key and key != "backdoor" and "_val" not in key:
+            new_key = key + "_val"
+            statistics[new_key] = statistics[key]
+            del statistics[key]
+
     print("Keys in statistics file:", natsort.natsorted(list(statistics.keys())))
 
     some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
@@ -634,7 +713,7 @@ if defense == "mapd":
     class_names = natsort.natsorted(list(traj_dataset.keys()))
     print("Class names:", class_names)
 
-    main_classes = [x for x in class_names if not x.endswith("_val") and x != "train"]
+    main_classes = ['backdoor', 'clean']
     print(main_classes)
 
     class2idx = {k: i for i, k in enumerate(main_classes)}
@@ -652,7 +731,7 @@ if defense == "mapd":
     print("Train set:", probe_train_x.shape, probe_train_y.shape)
 
     # Fix the validation set to include the new attacks -- will collapse them to the same class right now
-    additional_val_classes = [f"backdoor_{attack_type}" for attack_type in attack_types if attack_type != ""]
+    additional_val_classes = [attack for attack in attack_types if attack != "backdoor"]  # New backdoor style
     main_classes_val = main_classes + additional_val_classes
     print("Main validation classes:", main_classes_val)
     class2idx_val = copy.deepcopy(class2idx)
@@ -683,6 +762,8 @@ if defense == "mapd":
 
 
     print("Evaluating the trajectory classifier...")
+    # TODO!!! Because there's no explicit clean_val or backdoor_val, there's nothing here that's assigned to
+    #   clean_val or backdoor_val, so the mask ends up all False. Currently breaks here!
     for include_all_val in [False, True]:
         if include_all_val:
             current_probe_val_x, current_probe_val_y, plot_classes = probe_val_x, probe_val_y, main_classes_val
@@ -702,7 +783,7 @@ if defense == "mapd":
             test_acc = (prediction == current_probe_val_y).astype(np.float32).mean()
             print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
             plot_confusion_matrix_from_preds(current_probe_val_y, prediction, plot_classes, include_all_val,
-                                             num_example_probes, experiment_output_dir, normalize=normalize)
+                                             num_train_probes, experiment_output_dir, normalize=normalize)
 
 
     # In[ ]:
@@ -867,8 +948,8 @@ if defense == "mapd":
         output_dict = {}
         for i, attack_type in enumerate(["clean"] + attack_types):
             attacked_test_dl = make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform,
-                                                   random_pattern, random_backdoor_alpha, img_size, distributed,
-                                                   num_workers,batch_size)
+                                                   random_pattern, warping_grids, img_size, distributed,
+                                                   num_workers, batch_size, train_probe_attack)
             correct, total = 0, 0
             model.eval()
             for (data, target), ex_idx in tqdm(attacked_test_dl):
@@ -1004,9 +1085,8 @@ def get_last_layer_activations(model, loader, masking_op=None):
         return hook
 
     # TODO: Check that this is correct for non-MNIST
-    if dataset != 'mnist':
-        raise NotImplementedError("Remember, this isn't guaranteed to work for non-MNIST yet.")
-    handle = model.fc1_act.register_forward_hook(get_activation('fc1_act'))
+    name, layer = list(model.named_children())[-2]
+    handle = layer.register_forward_hook(get_activation(name))
 
     all_acts, example_indices, classes, class_preds = [], [], [], []
 
@@ -1019,60 +1099,54 @@ def get_last_layer_activations(model, loader, masking_op=None):
             output = model(data)
             predictions = torch.argmax(output, 1)
 
-        all_acts.append(activations['fc1_act'])
+        all_acts.append(activations[name].squeeze())  # Remove size 1 dimensions
         example_indices.append(ex_idx)
         classes.append(target)
         class_preds.append(predictions)
 
     handle.remove()
 
+    # TODO: SHAPE ISSUES!!!
     return (torch.vstack(all_acts), torch.hstack(example_indices),
             torch.hstack(classes), torch.hstack(class_preds))
 
 
-def get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes):
+def get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx):
     """
         identified_indices: np array of indices considered to be poisonous by a detector.
     """
-    false_pos = np.intersect1d(identified_indices, torch.tensor(range(len(train_set))))
+    valid_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
+    false_pos = np.intersect1d(identified_indices, torch.tensor(range(len(valid_indices))))
     true_pos = np.array([])
-    import itertools
-    results = {k: 0 for k in itertools.chain(set(probe_identity), set(val_probe_identity))}
-    for i, id in enumerate(probe_identity):
-        if len(train_set) + i in identified_indices:
+    counter = {k: 0 for k in set(dataset_probe_identity) - {'train'}}
+    results = {k: 0 for k in set(dataset_probe_identity) - {'train'}}
+
+    for i, id in enumerate(dataset_probe_identity):
+        if id == 'train':
+            continue
+        if i in identified_indices:
             results[id] += 1
-            if id == 'clean':
+            if id == 'clean' or id == "clean_val":
                 false_pos = np.append(false_pos, i)
             else:
                 true_pos = np.append(true_pos, i)
+        counter[id] += 1
 
-    for i, id in enumerate(val_probe_identity):
-        if len(train_set) + len(probe_identity) + i in identified_indices:
-            results[id] += 1
-            if id == 'clean_val':
-                false_pos = np.append(false_pos, i)
-            else:
-                true_pos = np.append(true_pos, i)
-
-    num_attacks = len(attack_types * 2 * num_train_probes)
-    clean_train = len(train_set) - num_attacks
+    num_attacks = sum(v for (k, v) in counter.items() if 'clean' not in k)
+    num_clean = len(valid_indices) + sum(v for (k, v) in counter.items() if 'clean' in k)
 
     false_positive = len(false_pos)
     true_positive = len(true_pos)
-    true_negative = clean_train - false_positive
+    true_negative = num_clean - false_positive
     false_negative = num_attacks - true_positive
 
     per_class = {
-        'clean': (num_train_probes - results['clean']) / num_train_probes,
-        'backdoor': results['backdoor'] / num_train_probes,
-        'clean_val': (num_train_probes - results['clean_val']) / num_train_probes,
-        'backdoor_val': results['backdoor_val'] / num_train_probes,
+        'clean': (num_train_probes * 2 - sum(v for (k, v) in counter.items() if 'clean' in k)) / 2 * num_train_probes,
     }
 
-    for attack in attack_types:
-        if not attack:
-            continue
-        per_class[attack] = results['backdoor_' + attack + '_val'] / (num_train_probes * 2)
+    for attack in set(dataset_probe_identity) - {'train'}:
+        if 'clean' not in attack:
+            per_class[attack] = results[attack] / counter[attack]
 
     print(f"FPR: {false_positive / (false_positive + true_negative)}")
     print(f"FNR: {false_negative / (false_negative + true_positive)}")
@@ -1083,7 +1157,7 @@ def get_confusion_stats(identified_indices, train_set, probe_identity, val_probe
 
 def retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                  detection_thresh, criterion, probes, log_predictions, test_probes):
+                  detection_thresh, criterion, probes, log_predictions, test_probes, defense):
     print(f"Retraining with {identified_indices.shape[0]} elements removed.")
     retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
     from dataset_utils import get_loader
@@ -1104,8 +1178,13 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     print("Selected output checkpoint:", output_checkpoint)
     if not os.path.exists(output_checkpoint):  # Train the model
         print("!! Output checkpoint not found. Training model from scratch...")
-        for _ in range(num_epochs):
+        for epoch in range(num_epochs):
             train(clean_model, device, retrain_set_dl, clean_optimizer, criterion, clean_scaler)
+            if (epoch + 1) % 5 == 0:
+                print(f"Stats for epoch {epoch + 1}")
+                log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
+                                                       distributed,
+                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense)  # TODO: Add other args...
             if clean_lr_scheduler is not None:
                 clean_lr_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint)
@@ -1115,16 +1194,12 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
 
     # Evaluate accuracy
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
-                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes)
-    test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, attack_types)
+                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense)
+    test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, val_probe_attacks)
     return clean_model
 
 
 if defense == "nc":
-    print("Final train accuracy:", statistics["train"][-1])
-    print("Final test accuracy:", statistics["test"][-1])
-
-
     def apply_mask_and_trigger(batch, mask, trigger):
         return batch * (1 - mask) + mask * trigger
 
@@ -1208,6 +1283,8 @@ if defense == "nc":
     attacked_classes = attacked_classes[(norms[attacked_classes] <= median).nonzero()[:, 0]]
     fpr_thresh = 0.05 / len(attacked_classes)
 
+    clean_indices = None
+
     for atk_class in attacked_classes:
         # Get all activations
         mask, trigger = masks[atk_class], triggers[atk_class]
@@ -1233,9 +1310,8 @@ if defense == "nc":
         #    if this is high, then the image itself likely carries the poison.
         acts_of_poisoned = clean_activations[:, poisoned_neurons].mean(axis=1)
 
-        clean_probe_indices = len(train_set) + \
-                              torch.tensor([i for i, out in enumerate([p == 'clean' for p in probe_identity]) if out])
-        indices_to_check = torch.isin(clean_indices, clean_probe_indices).nonzero()[:, 0]
+        clean_probe_indices = np.concatenate([train_probe['clean_idx'], train_probe['clean_val_idx']])
+        indices_to_check = torch.isin(clean_indices, torch.tensor(clean_probe_indices)).nonzero()[:, 0]
         upper_limit = 1 + int(len(clean_probe_indices) * fpr_thresh)
 
         # Set a threshold that rejects no more than fpr_thresh of clean probe examples.
@@ -1244,13 +1320,13 @@ if defense == "nc":
         rejected_indices.append((acts_of_poisoned > reject_thresh).nonzero()[:, 0])
 
     rejected_indices = torch.hstack(rejected_indices).unique()
-    identified_indices = clean_indices[rejected_indices.cpu()].numpy()
+    identified_indices = clean_indices[rejected_indices.cpu()].numpy() if clean_indices is not None else np.array([], dtype=int)
 
     # Print confusion stats...
-    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
+    get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                experiment_output_dir, fpr_thresh, criterion, probes, log_predictions, test_probes)
+                                experiment_output_dir, fpr_thresh, criterion, probes, log_predictions, test_probes, defense)
     # fpr_thresh is only misnamed parameter...
     print("Done with nc")
     # TODO: retrain, repeat...
@@ -1312,10 +1388,10 @@ if defense == "ac":
         identified_indices.append(dataset_indices)
 
     identified_indices = torch.hstack(identified_indices)
-    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
+    get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                experiment_output_dir, detect_thresh, criterion, probes, log_predictions, test_probes) # detect_thresh...
+                                experiment_output_dir, detect_thresh, criterion, probes, log_predictions, test_probes, defense) # detect_thresh...
 
 
 
@@ -1351,10 +1427,10 @@ if defense == "ss":
     identified_indices = indices[rejected_indices.cpu()].numpy()
 
     # Print confusion stats...
-    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
+    get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                experiment_output_dir, epsilon_thresh, criterion, probes, log_predictions, test_probes)
+                                experiment_output_dir, epsilon_thresh, criterion, probes, log_predictions, test_probes, defense)
     print("Done with ss")
     # TODO: retrain, repeat...
 
@@ -1371,8 +1447,8 @@ if defense == "freq":
     #   bona fide clean and inserted backdoor probe examples, the same way mapd is trained on bona fide clean and
     #   backdoor probes examples.
     freq_probes = {
-        'clean': probes['clean'].cpu().numpy(),
-        'backdoor': probes['backdoor'].cpu().numpy(),
+        'clean': train_probe['clean'].cpu().numpy(),
+        'backdoor': train_probe['backdoor'].cpu().numpy(),
     }
     from scipy.fftpack import dct
 
@@ -1447,9 +1523,9 @@ if defense == "freq":
 
     identified_indices = torch.hstack(identified_indices)
 
-    get_confusion_stats(identified_indices, train_set, probe_identity, val_probe_identity, num_train_probes)
+    get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
 
     # Remove and retrain...
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                  detection_thresh, criterion, probes, log_predictions, test_probes)
+                  detection_thresh, criterion, probes, log_predictions, test_probes, defense)

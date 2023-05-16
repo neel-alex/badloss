@@ -2,6 +2,7 @@ import os
 import urllib
 import natsort
 import copy
+import itertools
 
 import numpy as np
 import torch
@@ -173,98 +174,77 @@ def get_loader(dataset, distributed, num_workers, indices=None, batch_size=16, s
     return loader
 
 
-def make_probe_dataset(probes, train_set, test_set, dataset, batch_size, num_example_probes, num_train_probes,
-                       num_val_probes, attack_types, distributed, num_workers, output_dir, device):
-    discarded_idx = list(probes["all_backdoor_idx"]) + list(probes["clean_idx"])
+def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
+                       num_val_probes, val_probe_attacks, output_dir, device):
+    discarded_idx = list(probes['all_backdoor_idx'])
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
-    train_loader = get_loader(train_set, distributed, num_workers, indices=train_indices, batch_size=batch_size)
-    test_loader = get_loader(test_set, distributed, num_workers, batch_size=batch_size)
 
-    # In[ ]:
+    if defense == "mapd":
+        probes_to_be_used = ["backdoor", "clean", "backdoor_val", "clean_val"]
+        print("Selected probes to be used:", probes_to_be_used)
 
-    probes_to_be_used = ["backdoor", "clean"]
-    print("Selected probes to be used:", probes_to_be_used)
-    val_idx = np.random.choice(range(num_example_probes), size=num_val_probes, replace=False)
+        # Filter the train indexes
+        probe_identity = list(itertools.chain(*([identity] * num_train_probes
+                                                for identity in probes_to_be_used)))
 
-    # Filter the train indexes
-    val_probes = {}
-    probe_identity = []
-    val_probe_identity = []
-    for primary_k in probes_to_be_used:
-        for suffix in ["", "_labels"]:
-            k = f"{primary_k}{suffix}"
-            print("Current key:", k)
-            assert len(probes[k]) == num_example_probes
-            shape_len = len(probes[k].shape)
+        probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
+        probe_labels = torch.cat([probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
+        assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
 
-            val_probes[k] = torch.cat([probes[k][i:i + 1] for i in range(len(probes[k])) if i in val_idx],
-                                      dim=0)  # Transfer val indices from train
-            probes[k] = torch.cat([probes[k][i:i + 1] for i in range(len(probes[k])) if i not in val_idx],
-                                  dim=0)  # Discard val index from train
+        # Shuffle
+        shuffle = False
+        if shuffle:
+            perm = np.random.choice(range(len(probe_images)), size=len(probe_images), replace=False)
+            probe_images = torch.stack([probe_images[i] for i in perm], dim=0).to(device)
+            probe_labels = torch.stack([probe_labels[i] for i in perm], dim=0).to(device)
+            probe_identity = [probe_identity[i] for i in perm]
+        else:
+            print("Skipping shuffling training probes.")  # Since dataloader shuffles...
 
-            assert len(val_probes[k].shape) == shape_len
-            assert len(probes[k].shape) == shape_len
+        print(f"Probe | Images: {probe_images.shape} | Labels: {probe_labels.shape}")
 
-            assert len(val_probes[k]) == num_val_probes
-            assert len(probes[k]) == num_train_probes
+        probe_dataset = torch.utils.data.TensorDataset(probe_images, probe_labels)
+        probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"),
+                                                     [int(x) for x in probe_labels.to("cpu").numpy().tolist()])
+        print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape,
+              probe_dataset_standard[0][1])
+        print("Curated probe dataset")
+        plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0),
+             class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png", output_dir=output_dir)
 
-        probe_identity += [primary_k for _ in range(len(probes[primary_k]))]
-        val_probe_identity += [f"{primary_k}_val" for _ in range(len(val_probes[primary_k]))]
-
-    # Add additional probes here
-    probes_to_be_used_val = [x for x in probes_to_be_used]  # Deep copy
-    for attack_type in attack_types:
-        if attack_type == "":  # Already included in the main probes
-            continue
-        key = f"backdoor_{attack_type}"
-        val_probes[key] = probes[key]
-        val_probes[f"{key}_labels"] = probes[f"{key}_labels"]
-        val_probe_identity += [f"{key}_val" for _ in range(len(val_probes[key]))]
-        probes_to_be_used_val += [key]
-
-    probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
-    probe_labels = torch.cat([probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
-    assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
-
-    # Shuffle
-    perm = np.random.choice(range(len(probe_images)), size=len(probe_images), replace=False)
-    probe_images = torch.stack([probe_images[i] for i in perm], dim=0).to(device)
-    probe_labels = torch.stack([probe_labels[i] for i in perm], dim=0).to(device)
-    probe_identity = [probe_identity[i] for i in perm]
-    print(f"Probe | Images: {probe_images.shape} | Labels: {probe_labels.shape}")
-
-    probe_dataset = torch.utils.data.TensorDataset(probe_images, probe_labels)
-    probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"),
-                                                 [int(x) for x in probe_labels.to("cpu").numpy().tolist()])
-    print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape,
-          probe_dataset_standard[0][1])
+    attack_numbers = {attack: int(len(train_set) * num_val_probes[attack]) for attack in val_probe_attacks}
+    # TODO: Note how this adds "val".... hopefully this just solves problems and doesn't cause any lol
+    val_probe_identity = list(itertools.chain(*([f"backdoor_{identity}_val"] * attack_numbers[identity]
+                                                for identity in val_probe_attacks)))
 
     # Create the validation set for probes
-    val_probe_images = torch.cat([val_probes[k] for k in probes_to_be_used_val], dim=0)
-    val_probe_labels = torch.cat([val_probes[f"{k}_labels"] for k in probes_to_be_used_val], dim=0)
+    val_probe_images = torch.cat([probes[f"backdoor_{attack}"] for attack in val_probe_attacks], dim=0)
+    val_probe_labels = torch.cat([probes[f"backdoor_{attack}_labels"] for attack in val_probe_attacks], dim=0)
     val_probe_dataset_standard = CustomTensorDataset(val_probe_images.to("cpu"),
                                                      [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()])
     print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape,
           val_probe_dataset_standard[0][1])
 
-    # In[ ]:
+    if defense == "mapd":
+        comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard, val_probe_dataset_standard])
+        comb_train_indices = train_indices + [(len(train_set) + x) for x in
+                                              range(len(probe_dataset_standard) + len(val_probe_dataset_standard))]
+        dataset_probe_identity = ["train" for i in range(len(train_set))] + probe_identity + val_probe_identity
+    else:
+        comb_train_set = torch.utils.data.ConcatDataset([train_set, val_probe_dataset_standard])
+        comb_train_indices = train_indices + [(len(train_set) + x) for x in
+                                              range(len(val_probe_dataset_standard))]
+        dataset_probe_identity = ["train" for i in range(len(train_set))] + val_probe_identity
 
-    # Setup the probe validation set
-    val_probe_dataset = ProbeDataset(val_probe_dataset_standard, val_probe_identity)
-    val_probe_indices = [i for i in range(len(val_probe_dataset_standard))]
-    val_probe_loader = get_loader(val_probe_dataset, distributed, num_workers,
-                                  indices=val_probe_indices, batch_size=batch_size)
+    print("Indices in combined dataset:", len(comb_train_indices))
+    assert len(np.unique(comb_train_indices)) == len(comb_train_indices)
+    print("Size of combined dataset:", len(comb_train_set))
 
-    # In[ ]:
+    assert len(dataset_probe_identity) == len(comb_train_set), f"{len(dataset_probe_identity)} != {len(comb_train_set)}"
 
-    print("Curated probe dataset")
-    plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0),
-         class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png", output_dir=output_dir)
-
-    return (probe_dataset_standard, val_probe_dataset_standard, val_probes,
-            train_indices, probe_identity, val_probe_identity, discarded_idx)
+    return comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx
 
 
 class IdxDataset(torch.utils.data.Dataset):
@@ -296,73 +276,38 @@ def make_index_dataset(comb_train_set, comb_train_indices, test_set,
     return new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
 
 
-def combine_dataset(train_set, train_indices, probe_dataset_standard, val_probe_dataset_standard,
-                    probe_identity, val_probe_identity, use_val_probes_for_training):
-    # Combine the two datasets (probe dataset and normal dataset)
-    if use_val_probes_for_training:
-        print("!! Including validation probes in the training process...")
-        comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard, val_probe_dataset_standard])
-        comb_train_indices = train_indices + [(len(train_set) + x) for x in
-                                              range(len(probe_dataset_standard) + len(val_probe_dataset_standard))]
-    else:
-        comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard])
-        comb_train_indices = train_indices + [(len(train_set) + x) for x in range(len(probe_dataset_standard))]
-    print("Indices in combined dataset:", len(comb_train_indices))
-    assert len(np.unique(comb_train_indices)) == len(comb_train_indices)
-    print("Size of combined dataset:", len(comb_train_set))
-
-    dataset_probe_identity = ["train" for i in range(len(train_set))] + probe_identity
-    if use_val_probes_for_training:
-        dataset_probe_identity += val_probe_identity
-    assert len(dataset_probe_identity) == len(comb_train_set), f"{len(dataset_probe_identity)} != {len(comb_train_set)}"
-
-    return comb_train_set, comb_train_indices, dataset_probe_identity
-
-
 class AttackDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, attack_type, chosen_attack_targets,
-                 no_transform, random_pattern, random_backdoor_alpha, img_size):
+                 no_transform, random_pattern, warping_grids, img_size, train_probe_attack):
         super().__init__()
 
-        fixed_pattern = np.zeros(img_size, dtype=np.float32)
-        fixed_pattern[::2, ::2, :] = 1
-        fixed_pattern = transforms.ToTensor()(fixed_pattern)
+        aux_data = None
+        if "random" in attack_type:
+            aux_data = random_pattern
+        if "warped" in attack_type:
+            aux_data = warping_grids
 
-        sin_pattern = np.zeros(img_size, dtype=np.float32)
-        f = 6
-        for col in range(sin_pattern.shape[1]):
-            sin_pattern[:, col, :] = np.sin(2 * np.pi * col * f / sin_pattern.shape[1])
-        sin_pattern = transforms.ToTensor()(sin_pattern)
 
+        from backdoors import make_probe_transform
+        # It better be random...
         if attack_type == "clean":
-            backdoor_transform = no_transform
+            backdoor_transform = transforms.Compose(no_transform + [ClampRangeTransform()])
             self.attack_target = -1
         else:
-            if attack_type == "":
-                backdoor = BackdoorPatch()
-            elif attack_type == "random":
-                backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
-            elif attack_type == "fixed":
-                backdoor = BackdoorPatch(pattern=fixed_pattern,
-                                     alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
-            elif attack_type == "sinusoid":
-                backdoor = BackdoorPatch(pattern=sin_pattern,
-                                         alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
-            elif attack_type == "reversed":
-                backdoor = BackdoorPatch(reverse_backdoor=True)
-            elif attack_type == "single_pix":
-                backdoor = BackdoorPatch(single_pixel_backdoor=True)
-            elif attack_type == "reversed_single_pix":
-                backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
+            if attack_type == "backdoor":
+                attack = train_probe_attack
+            elif "backdoor" in attack_type:
+                attack = '_'.join(attack_type.split('_')[1:])
             else:
-                assert attack_type == "warped"
-                backdoor = WarpingAttack(img_size[0])
-
-            backdoor_transform = no_transform + [backdoor, ClampRangeTransform()]
-            self.attack_target = chosen_attack_targets[attack_type]
-
+                attack = attack_type
+            backdoor_transform, _ = make_probe_transform(attack, img_size, None, None, aux_data=aux_data)
+            backdoor_transform.transforms.insert(0, no_transform[0])  # To tensor
+            if attack_type == "backdoor":
+                self.attack_target = chosen_attack_targets[attack_type]
+            else:
+                self.attack_target = chosen_attack_targets[attack]
         assert dataset.dataset.transform is not None, dataset.dataset
-        dataset.dataset.transform = transforms.Compose(backdoor_transform)  # Idx dataset
+        dataset.dataset.transform = backdoor_transform  # Already composed!!
 
         self.dataset = dataset
         self.attack_type = attack_type
@@ -382,9 +327,9 @@ class AttackDataset(torch.utils.data.Dataset):
             return (x, self.attack_target), idx
 
 
-def make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform, random_pattern, random_backdoor_alpha,
-                        img_size, distributed, num_workers, batch_size):
+def make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform, random_pattern, warping_grids,
+                        img_size, distributed, num_workers, batch_size, train_probe_attack):
     attacked_test_set = AttackDataset(IdxDataset(test_set), attack_type, chosen_attack_targets,
-                                      no_transform, random_pattern, random_backdoor_alpha, img_size)
+                                      no_transform, random_pattern, warping_grids, img_size, train_probe_attack)
     attacked_test_dl = get_loader(attacked_test_set, distributed, num_workers, batch_size=batch_size)
     return attacked_test_dl
