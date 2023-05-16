@@ -58,13 +58,14 @@ def load_class_mapping(dataset):
 
 
 def get_settings_for_dataset(dataset):
+    # data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
+    data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
     if "mnist" in dataset:
         img_size = (28, 28, 1)
         train_transform = [transforms.ToTensor()]
         test_transform = [transforms.ToTensor()]
         no_transform = test_transform
 
-        data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
         train_set = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
         train_set_wo_aug = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
         test_set = MNIST(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
@@ -79,7 +80,6 @@ def get_settings_for_dataset(dataset):
         DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
         assert DatasetCls is not None
 
-        data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
         train_set = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
         train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
         test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
@@ -105,7 +105,6 @@ def get_settings_for_dataset(dataset):
         no_transform = test_transform
 
         if dataset == "gtsrb":
-            data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
             train_set = GTSRB(data_dir, download=True, split="train", transform=transforms.Compose(train_transform))
             train_set_wo_aug = GTSRB(data_dir, download=True, split="train", transform=transforms.Compose(no_transform))
             test_set = GTSRB(data_dir, download=True, split="test", transform=transforms.Compose(test_transform))
