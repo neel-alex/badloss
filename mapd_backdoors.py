@@ -37,13 +37,13 @@ from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, train, test, test_tensor
 
 
-default_defense = "mapd"
+default_defense = "cifar10"
 default_attack  = "sinusoid"
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
-defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
 attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
+defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
 
 if len(sys.argv) < 2:
     print(f"Usage: {sys.argv[0]} <Dataset: {'/'.join(dataset_choices)}>")
@@ -65,6 +65,7 @@ if len(sys.argv) >= 4:
 else:
     defense = default_defense
 
+print(dataset, attack, defense)
 
 if attack == "all":
     train_probe_attack = "reversed_patch"
@@ -233,7 +234,7 @@ if dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
-    num_epochs = 2
+    num_epochs = 150
     batch_size = 128
 else:
     assert dataset == "imagenet" or dataset == "gtsrb"
@@ -1193,6 +1194,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
         clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
 
     # Evaluate accuracy
+    print("Retrained model performance:")
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
                                            distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense)
     test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, val_probe_attacks)
