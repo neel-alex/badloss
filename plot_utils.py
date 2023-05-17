@@ -561,8 +561,7 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, n
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
 
-def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_auc=False, title=None):
-    assert isinstance(labels, dict), labels
+def plot_auc(labels, predictions, key_list, output_file, log_plot=True, adapt_auc=True, title=None):
     assert isinstance(predictions, dict), predictions
     assert isinstance(key_list, list), key_list
 
@@ -590,7 +589,7 @@ def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_a
         tpr_dict = {}
         for k in key_list:
             fpr_dict[k], tpr_dict[k], _ = roc_curve(labels[k], predictions[k])
-
+            print(auc(fpr_dict[k], tpr_dict[k]))
         # If log_plot is True, transform fpr and tpr values to the log scale
         eps = 1e-10
         if log_plot:
