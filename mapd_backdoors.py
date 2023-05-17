@@ -953,7 +953,7 @@ if defense == "mapd":
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.1]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
