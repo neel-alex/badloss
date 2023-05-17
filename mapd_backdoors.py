@@ -16,6 +16,7 @@ import sys
 import warnings
 import random
 from tqdm import tqdm
+from collections import Counter
 
 import numpy as np
 import cv2
@@ -216,13 +217,13 @@ val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_
 test_probes = make_test_probes(test_set, num_test_probes, val_probe_attacks, attack_targets,
                                random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
 
-
 unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
+
 # Merge probe dicts
 if defense == "mapd":
-    probes = train_probe | val_probes
+    probes = {**train_probe, **val_probes}
     probes['all_backdoor_idx'] = unified_backdoor_idx
-    chosen_attack_targets = {'backdoor': attack_target} | attack_targets
+    chosen_attack_targets = {**{'backdoor': attack_target}, **attack_targets}
     plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
 else:
     probes = val_probes
@@ -945,6 +946,7 @@ if defense == "mapd":
     print("!! Collecting clean training indices...")
     losses_np = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
     missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
+    missing_vals_idx = np.where(missing_vals)[0]
     available_ex = np.logical_not(missing_vals)
     num_missing_vals = np.sum(missing_vals)
     print(f"!! Total loss traj len: {len(losses_np)} / Missing vals in loss trajs: {num_missing_vals}")
@@ -982,8 +984,12 @@ if defense == "mapd":
                 clean_indices = np.where(is_clean)[0]
 
                 if train_type == "cleaned":  # Remove examples marked as backdoors
-                    print(
-                        f"!! [Dataset cleansing] Total examples: {len(is_clean)} / # clean indices: {len(clean_indices)}")
+                    print(f"!! [Dataset cleansing] Total examples: {len(is_clean)} / # clean indices: {len(clean_indices)}")
+                    discarded_indices = [i for i in range(len(all_ex_probs)) if i not in clean_indices and
+                                         i not in missing_vals_idx]
+                    probe_identity_discarded_samples = [dataset_probe_identity[i] for i in discarded_indices]
+                    print("!! Discarded example identities:", Counter(probe_identity_discarded_samples))
+                    
                     new_train_set_dl = get_loader(idx_dataset, indices=clean_indices, distributed=distributed,
                                                   num_workers=num_workers, batch_size=batch_size)
                     selected_indices = clean_indices
