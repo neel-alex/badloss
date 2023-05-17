@@ -9,8 +9,8 @@ import dist_utils
 
 
 RANDOM_BACKDOOR_ALPHA = 0.1
-FIXED_BACKDOOR_ALPHA = 0.1
-SINUSOID_BACKDOOR_ALPHA = 0.05
+FIXED_BACKDOOR_ALPHA = 0.025
+SINUSOID_BACKDOOR_ALPHA = 0.01
 SINUSOID_BACKDOOR_FREQ = 6
 
 CLEAN_LABEL_ATTACKS = {'sinusoid'}
@@ -157,7 +157,7 @@ def make_probe_transform(attack_name, img_size, output_dir, main_proc, aux_data=
         aux_data = pattern
     elif attack_name in {"fixed", "reversed_fixed"}:
         backdoor = BackdoorPatch(pattern=pattern,
-                                 alpha=RANDOM_BACKDOOR_ALPHA)
+                                 alpha=FIXED_BACKDOOR_ALPHA)
     elif attack_name in {"sinusoid", "reversed_sinusoid"}:
         backdoor = BackdoorPatch(pattern=pattern,
                                  alpha=SINUSOID_BACKDOOR_ALPHA)
