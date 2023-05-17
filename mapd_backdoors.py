@@ -998,7 +998,7 @@ if defense == "mapd":
                                               num_workers=num_workers, batch_size=batch_size)
 
             clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
-            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd,
+            criterion, optimizer, lr_scheduler, scaler = get_optimizer(clean_model, device, lr, momentum, wd,
                                                                        num_epochs)
             postfix = ""
             if threshold is not None:

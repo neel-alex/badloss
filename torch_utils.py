@@ -38,7 +38,7 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False):
     return model
 
 
-def get_optimizer(model, device, lr, momentum, wd, num_epochs, optimizer_name='sgd'):
+def get_optimizer(model, device, lr, momentum, wd, num_epochs, optimizer_name='adamw'):
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
     if optimizer_name == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
