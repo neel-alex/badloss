@@ -35,7 +35,8 @@ from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_ind
     make_attack_dataset, get_loader, IdxDataset
 from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other_plot, make_normalizers, \
     yet_another_plot, one_more_plot, plot_loss_dynamics_and_violin, visualize_loss_trajectories, \
-    plot_confusion_matrix_from_preds, plot_attack_success_stats, num_queue_plots, plot_auc
+    visualize_loss_trajectories_specific, plot_confusion_matrix_from_preds, plot_attack_success_stats, \
+    num_queue_plots, plot_auc, generate_embeddings_from_trajectories
 from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, FreqCNN
 
@@ -634,7 +635,12 @@ if defense == "mapd":
             visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_identity,
                                         sorted_losses_all, experiment_output_dir, main_proc, dataset,
                                         val_included=val_included, clf=None, output_file=None)
-
+        visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_probe_identity,
+                                             sorted_losses_all, experiment_output_dir, main_proc,
+                                             dataset, output_file=None)
+        generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
+                                              sorted_losses_all, experiment_output_dir, main_proc,
+                                              dataset, output_file=None, embedding_type='tsne')
 
     # Convert the data into a complete trajectory dataset
     print("Converting trajectories to dataset...")

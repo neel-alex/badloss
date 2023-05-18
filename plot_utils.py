@@ -8,6 +8,10 @@ import matplotlib.patches as mpatches
 
 from sklearn.metrics import confusion_matrix, RocCurveDisplay, roc_curve, auc
 
+from sklearn.manifold import TSNE, MDS
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
 
 font_size = 16
 
@@ -87,7 +91,6 @@ def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_d
              output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_{rank}.png")
         plot(probes[f"{attack_type}_diff"], probes[f"{attack_type}_labels"], None, class_names=train_set.classes,
              output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_diff_{rank}.png", diff_image=True)
-    # In[ ]:
 
     print("Clean examples")
     plot(probes["clean"], probes["clean_labels"], None, class_names=train_set.classes,
@@ -513,6 +516,151 @@ def visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_ident
     plt.close('all')
 
 
+def visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_probe_identity,
+                                         sorted_losses_all, output_dir, main_proc, dataset, output_file=None):
+    current_class_names = [x for x in class_names if x not in ["train", "train_noisy", "train_non_noisy"]]
+    current_class_names = [x for x in current_class_names if "_val" not in x or x.replace("_val", "") not in class_names]
+    print("Selected class names:", current_class_names)
+    
+    num_colors = len(current_class_names)
+    if num_colors > 9:
+        cm = plt.get_cmap('hsv')
+        color_list = [cm(1.*i/len(current_class_names)) for i in range(len(current_class_names))]
+    elif num_colors > 4:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
+    else:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange"]
+    assert num_colors <= len(color_list), f"{num_colors} <= {len(color_list)}"
+    num_trajectories = 250
+    font_size = 18
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+
+    handles = []
+    legend_label = []
+
+    iterator = 0
+    traj_list = []
+    num_checkpoints_to_consider = 20
+    for i, cls in enumerate(current_class_names):
+        color = color_list[iterator]
+        patch = mpatches.Patch(color=color)
+        handles.append(patch)
+        label = label_map_dict[cls].replace(" [Val]", "")
+        legend_label.append(label)
+        
+        relevant_idx = [i for i in range(len(dataset_probe_identity)) if dataset_probe_identity[i] == cls]
+        print(f"Class: {cls} / # relevant idx: {len(relevant_idx)}")
+
+        x_axis = list(range(1, len(sorted_losses_all)+1))
+        x_axis = x_axis[:num_checkpoints_to_consider]  # Subsample
+        all_trajs = []
+        for j in range(num_trajectories):
+            trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
+            trajectory = trajectory[:num_checkpoints_to_consider]  # Subsample
+            plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.02)
+            all_trajs.append(trajectory)
+        traj_list += all_trajs
+        
+        # Plot the trajectory mean
+        mean_traj = np.array(all_trajs).mean(axis=0)
+        plt.plot(x_axis, mean_traj, color=color_list[iterator], alpha=0.9, linewidth=5.)
+        iterator += 1
+    
+    ax.legend(handles, legend_label, prop={'size': font_size-2})
+    plt.ylabel("Loss values", fontsize=font_size)
+    plt.xlabel("Epochs", fontsize=font_size)
+    max_val = np.percentile(traj_list, 99)
+    plt.ylim(0., max_val)
+    plt.xlim(1, len(x_axis)-1)
+    plt.xticks(fontsize=font_size)
+    plt.yticks(fontsize=font_size)
+
+    plt.tight_layout()
+    if output_file is None:
+        output_file = os.path.join(output_dir, f"loss_trajectories_{dataset}_specific.pdf")
+    if main_proc and output_file is not None:
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.close('all')
+
+
+def generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
+                                          sorted_losses_all, output_dir, main_proc, dataset,
+                                          output_file=None, embedding_type='tsne'):
+    assert embedding_type in ["tsne", "pca", "mds"]
+    
+    current_class_names = [x for x in class_names if x not in ["train", "train_noisy", "train_non_noisy"]]
+    current_class_names = [x for x in current_class_names if "_val" not in x or x.replace("_val", "") not in class_names]
+    print("Selected class names:", current_class_names)
+    
+    num_colors = len(current_class_names)
+    if num_colors > 9:
+        cm = plt.get_cmap('hsv')
+        color_list = [cm(1.*i/len(current_class_names)) for i in range(len(current_class_names))]
+    elif num_colors > 4:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
+    else:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange"]
+    assert num_colors <= len(color_list), f"{num_colors} <= {len(color_list)}"
+    num_trajectories = 250
+    font_size = 18
+    
+    losses_np = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
+    missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
+    available_ex = np.logical_not(missing_vals)
+    losses_np = losses_np[available_ex]  # Remove empty trajectories
+    current_dataset_probe_identity = np.array(dataset_probe_identity)[available_ex]
+    
+    print("All trajectories shape before PCA:", losses_np.shape)
+    scale_transformer = StandardScaler()
+    all_trajectories_scaled = scale_transformer.fit_transform(losses_np)  # Perform data scaling
+    
+    num_components = 2
+    
+    if embedding_type == "tsne":
+        print(f"Selected number of tSNE components: {num_components}")
+        embedding_func = TSNE(n_components=num_components, learning_rate='auto', init='random', perplexity=3)
+    elif embedding_type == "pca":
+        print(f"Selected number of PCA components: {num_components}")
+        embedding_func = PCA(n_components=num_components)
+    elif embedding_type == "mds":
+        print(f"Selected number of MDS components: {num_components}")
+        embedding_func = MDS(n_components=num_components, max_iter=300, n_init=4, random_state=0)
+    else:
+        raise RuntimeError(f"Unknown embedding type: {embedding_type}")
+
+    embedded_trajectories = embedding_func.fit_transform(all_trajectories_scaled)
+    print(f"{embedding_type.upper()} transform output shape: {embedded_trajectories.shape}")
+    
+    fig, ax = plt.subplots(figsize=(6, 6))
+    rng = np.random.default_rng(20)
+
+    # Project the probe trajectories using the computed tSNE transform
+    legend_elements = []
+    for i, k in enumerate(current_class_names):
+        identifier = current_dataset_probe_identity == k
+        selected_trajs = embedded_trajectories[identifier]
+        print(f"k: {k} / all trajs: {len(embedded_trajectories)} / seletected trajs: {np.sum(identifier)} (shape: {selected_trajs.shape})")
+        
+        # Select and plot a small number of points
+        selected_points = rng.choice(len(selected_trajs), size=250, replace=False)
+        alpha = 0.2
+        label = label_map_dict[k].replace(" [Val]", "")
+        plt.scatter(selected_trajs[selected_points, 0], selected_trajs[selected_points, 1], alpha=alpha, color=color_list[i], label=label)
+        legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', label=label, markerfacecolor=color_list[i], alpha=1, markersize=10))
+
+    ax.legend(handles=legend_elements, loc='best', prop={'size': 14})
+    plt.xticks([])
+    plt.yticks([])
+
+    plt.tight_layout()
+    if output_file is None:
+        output_file = os.path.join(output_dir, f"{dataset}_{embedding_type}_trajs.pdf")
+    if main_proc and output_file is not None:
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.close('all')
+
+
 def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, num_train_probes,
                                      output_dir, normalize=False, title=None, cmap=plt.cm.Blues,
                                      fontsize=15):
@@ -561,7 +709,7 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, n
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
 
-def plot_auc(labels, predictions, key_list, output_file, log_plot=True, adapt_auc=True, title=None):
+def plot_auc(labels, predictions, key_list, output_file, log_plot=True, adapt_auc=False, title=None):
     assert isinstance(predictions, dict), predictions
     assert isinstance(key_list, list), key_list
 
