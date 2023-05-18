@@ -709,7 +709,7 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, n
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
 
-def plot_auc(labels, predictions, key_list, output_file, log_plot=True, adapt_auc=False, title=None):
+def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_auc=False, title=None):
     assert isinstance(predictions, dict), predictions
     assert isinstance(key_list, list), key_list
 
@@ -803,6 +803,7 @@ def plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, ou
     plt.ylabel("Accuracy (%)", fontsize=fontsize)
     plt.xticks(fontsize=fontsize, rotation=45, ha="right")
     plt.yticks(fontsize=fontsize)
+    plt.ylim(0, 100)
 
     if title is not None:
         plt.title(title, fontsize=fontsize - 4)
