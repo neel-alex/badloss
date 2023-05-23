@@ -274,7 +274,11 @@ def make_test_probes(test_set, num_test_probes, val_probe_attacks, attack_target
             aux_data = warping_grids
         probe_transform, _ = make_probe_transform(attack, img_size, output_dir, main_proc, aux_data=aux_data)
 
-        test_indices = np.random.choice(all_test_indices, size=num_test_probes, replace=False)
+        # Don't use any clean indices -- this way, the attack success rate should start at 0.
+        #   (though practically there will be some randomly classified training images with low test acc.)
+        non_clean_test_indices = np.where(test_set.targets != target)[0]
+        test_indices = np.random.choice(non_clean_test_indices, size=min(len(non_clean_test_indices), num_test_probes),
+                                        replace=False)
         test_labels = np.array([target for _ in test_indices])
 
         add_probe_data(test_probes, f"backdoor_{attack}", test_indices, test_set, device, test_labels,
@@ -283,112 +287,33 @@ def make_test_probes(test_set, num_test_probes, val_probe_attacks, attack_target
     return test_probes
 
 
-def make_probes(num_classes, train_set, train_set_wo_aug, num_example_probes, attack_types,
-                default_attack, random_backdoor_alpha, output_dir, main_proc, img_size, device):
-    probes = {"backdoor": [], "clean": []}
+def add_sleeper_probes(probe_dict, dataset, split, train_set, target_cls, chosen_indices, train_probe_indices, device,
+                       num_idx, track_idx=True, compute_diffs=False):
+    indices_to_choose_from = []
+    class_name = train_set.classes[target_cls]
+    data_dir = f"./data/sleeper_{dataset}/{split}/{class_name}"  # TODO: import data dir from dataset_utils?
+    for _, _, files in os.walk(data_dir):
+        for file in files:
+            if file.endswith('.png'):
+                indices_to_choose_from.append(int(file.split('.')[0]))
+    indices_to_choose_from = [i for i in indices_to_choose_from if i not in np.concatenate((chosen_indices,
+                                                                                            train_probe_indices))]
+    attack_idx = np.random.choice(indices_to_choose_from, size=min(num_idx, len(indices_to_choose_from)),
+                                  replace=False)
 
-    chosen_attack_targets = {k: np.random.choice(np.arange(num_classes)) for k in attack_types}
-    print("Chosen attack targets:", chosen_attack_targets)
-    remaining_indices = list(range(len(train_set)))  # [i for i in range(len(train_set)) if i not in probes["backdoor_idx"]]
-    new_indices = np.random.choice(remaining_indices, size=num_example_probes * len(attack_types), replace=False)
-    probes.update({"all_backdoor_idx": new_indices})
+    sleeper_imgs = []
+    for idx in attack_idx:
+        sleeper_img_file = data_dir + f'/{str(idx)}.png'
+        sleeper_img = transforms.ToTensor()(cv2.imread(sleeper_img_file))
+        sleeper_imgs.append(sleeper_img)
 
-    # Create a main random pattern
-    pattern_file = os.path.join(output_dir, "random_pattern.png")
-    if main_proc:
-        random_pattern = np.clip(np.random.rand(*img_size) * 255, 0, 255)
-        print("Random pattern shape:", random_pattern.shape)
-        cv2.imwrite(pattern_file, random_pattern)
-    dist_utils.wait_for_other_procs()  # Distributed barrier
+    sleeper_imgs = torch.stack(sleeper_imgs)
+    attack_labels = np.array([target_cls for _ in attack_idx])
 
-    # Load the pattern to ensure the same pattern is loaded by all processes
-    random_pattern_img = cv2.imread(pattern_file, cv2.IMREAD_UNCHANGED)
-    random_pattern = transforms.ToTensor()(random_pattern_img)
-    print(f"Random Pattern / Loaded shape: {random_pattern_img.shape} / Tensor shape: {random_pattern.shape} / Min: {random_pattern.min()} / Max: {random_pattern.max()}")
-
-    fixed_pattern = np.zeros(img_size, dtype=np.float32)
-    fixed_pattern[::2, ::2, :] = 1
-    fixed_pattern = transforms.ToTensor()(fixed_pattern)
-
-    sin_pattern = np.zeros(img_size, dtype=np.float32)
-    f = 6
-    for col in range(sin_pattern.shape[1]):
-        sin_pattern[:, col, :] = np.sin(2 * np.pi * col * f / sin_pattern.shape[1])
-    sin_pattern = transforms.ToTensor()(sin_pattern)
-
-    for i, attack_type in enumerate(attack_types):
-        print(attack_type)
-        if attack_type == "":
-            if default_attack == "patch":
-                backdoor = BackdoorPatch()
-            elif default_attack == "random":
-                backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
-            elif default_attack == "fixed":
-                backdoor = BackdoorPatch(pattern=fixed_pattern, alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
-            elif default_attack == "sinusoid":
-                backdoor = BackdoorPatch(pattern=sin_pattern, alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
-            elif default_attack == "single_pix":
-                backdoor = BackdoorPatch(single_pixel_backdoor=True)
-            elif default_attack == "warped":
-                backdoor = WarpingAttack(img_size[0])
-            else:
-                raise NotImplementedError(f"Cannot parse default attack {default_attack}")
-        elif attack_type == "random":
-            backdoor = BackdoorPatch(pattern=random_pattern, alpha=random_backdoor_alpha)
-        elif attack_type == "fixed":
-            backdoor = BackdoorPatch(pattern=fixed_pattern, alpha=random_backdoor_alpha)  # TODO: set this backdoor alpha better?
-        elif attack_type == "sinusoid":
-            backdoor = BackdoorPatch(pattern=sin_pattern, alpha=0.3)  # TODO: Sinusoid attack needs a higher backdoor alpha!
-        elif attack_type == "reversed":
-            backdoor = BackdoorPatch(reverse_backdoor=True)
-        elif attack_type == "single_pix":
-            backdoor = BackdoorPatch(single_pixel_backdoor=True)
-        elif attack_type == "reversed_single_pix":
-            backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
-        else:
-            assert attack_type == "warped"
-            backdoor = WarpingAttack(img_size[0])
-        backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
-
-        fake_backdoor_label = chosen_attack_targets[attack_type]
-        print(f"!! Random class picked for {attack_type.replace('_', ' ')} backdoor: {fake_backdoor_label}")
-
-        current_idx = probes["all_backdoor_idx"][i * num_example_probes:(i + 1) * num_example_probes]
-        if attack_type == "":
-            prefix = f"backdoor"
-        else:
-            prefix = f"backdoor_{attack_type}"
-
-        if attack_type == "sinusoid":
-            # Choose clean label indices
-            clean_indices = np.where(train_set.targets == fake_backdoor_label)[0]
-            num_in_class = len(clean_indices)
-            # Just remove all already chosen indices to avoid conflicts.
-            clean_indices = [idx.item() for idx in clean_indices if idx.item() not in new_indices]
-            # TODO: Sinusoid backdoor needs a very high poisoning ratio, like 30%.
-            #  Sets this manually, but do this better in the future!??
-            current_idx = np.random.choice(clean_indices, size=int(0.3 * num_in_class), replace=False)
-
-            new_indices = np.concatenate((new_indices[:i * num_example_probes],
-                                          current_idx,
-                                          new_indices[(i + 1) * num_example_probes:]))
-            probes.update({"all_backdoor_idx": new_indices})
-
-
-        probes[f"{prefix}_idx"] = current_idx
-        probes[f"{prefix}_original"] = torch.stack([train_set_wo_aug[i][0] for i in current_idx], dim=0).to(device)
-        probes[f"{prefix}"] = torch.stack([backdoor_transform(train_set_wo_aug[i][0]) for i in current_idx], dim=0).to(
-            device)
-        probes[f"{prefix}_diff"] = probes[f"{prefix}_original"] - probes[f"{prefix}"]
-        probes[f"{prefix}_labels"] = torch.from_numpy(np.array([fake_backdoor_label for i in current_idx])).to(device)
-        print(f"Backdoor ({attack_type}) probe shape:", probes["backdoor"].shape)
-
-    remaining_indices = [i for i in range(len(train_set)) if i not in probes["all_backdoor_idx"]]
-    new_indices = np.random.choice(remaining_indices, size=num_example_probes, replace=False)
-    probes.update({"clean_idx": new_indices})
-    probes["clean"] = torch.stack([train_set[i][0] for i in probes["clean_idx"]], dim=0).to(device)
-    probes["clean_labels"] = torch.from_numpy(np.array([train_set_wo_aug[i][1] for i in probes["clean_idx"]])).to(
-        device)
-    print("Clean probe shape:", probes["clean"].shape)
-    # In[ ]:
-    return probes, chosen_attack_targets, random_pattern
+    if track_idx:
+        probe_dict[f"backdoor_sleeper_idx"] = attack_idx
+        probe_dict[f"backdoor_sleeper_original"] = torch.stack([dataset[i][0] for i in attack_idx], dim=0).to(device)
+    probe_dict[f"backdoor_sleeper"] = sleeper_imgs.to(device)
+    probe_dict[f"backdoor_sleeper_labels"] = torch.from_numpy(attack_labels).to(device)
+    if compute_diffs and track_idx:
+        probe_dict[f"backdoor_sleeper_diff"] = probe_dict[f"backdoor_sleeper_original"] - probe_dict[f"backdoor_sleeper"]

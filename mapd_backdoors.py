@@ -40,14 +40,14 @@ from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other
 from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, FreqCNN
 
-default_attack  = "patch"
-default_defense = "getaucl"
+default_attack  = "all"
+default_defense = "ss"
 default_poisoning_ratio = None
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
 attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
-defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl", "getaucl"]
+defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl", "getauc"]
 poisoning_ratio_choices = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05]
 
 if len(sys.argv) < 2:
@@ -373,6 +373,8 @@ if not os.path.exists(model_file):
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                        distributed,
                                                        rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size)
+                test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
+                                   tensor_batch_size)
                 if main_proc:
                     # Save the model
                     model_file_base, model_file_ext = os.path.splitext(model_file)
@@ -405,6 +407,9 @@ if not os.path.exists(model_file):
                                                    rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
                                                    statistics=statistics, predictions=predictions)
 
+            if epoch % 5 == 4:
+                test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
+                                   tensor_batch_size)
             if lr_scheduler is not None:
                 lr_scheduler.step()
 
@@ -1634,7 +1639,7 @@ if defense == "freq" or defense == "getauc":
             except ValueError:
                 print("Cannot compute Freq AUC")
 
-if defense == "abl" or defense == "getaucl":
+if defense == "abl" or defense == "getauc":
     num_pretrain_epochs = 10
     flooding_threshold = 0.5
 
@@ -1671,7 +1676,7 @@ if defense == "abl" or defense == "getaucl":
 
     loss_idx = np.argsort(losses)  # Ascending sort
 
-    if poisoning_ratio is None and defense != "getaucl":
+    if poisoning_ratio is None and defense != "getauc":
         num_ex_unlearning = int(len(train_set) * selection_threshold)
         indices_to_maximize = loss_idx[:num_ex_unlearning]
         indices_to_maximize = [int(ex_idx[i]) for i in indices_to_maximize]
