@@ -14,6 +14,8 @@ FIXED_BACKDOOR_ALPHA = 0.025
 SINUSOID_BACKDOOR_ALPHA = 0.075
 SINUSOID_BACKDOOR_FREQ = 6
 
+BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid'}
+BOOSTING_RATIO = 4
 CLEAN_LABEL_ATTACKS = {'sinusoid'}
 
 
@@ -142,7 +144,7 @@ def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
     return pattern
 
 
-def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, aux_data=None):
+def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, aux_data=None, alpha_boost=1):
     if "random" in attack_name and aux_data is not None:
         pattern = aux_data
     else:
@@ -158,14 +160,14 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
     elif attack_name == "random":
         backdoor = BackdoorPatch(pattern=pattern,
-                                 alpha=RANDOM_BACKDOOR_ALPHA)
+                                 alpha=RANDOM_BACKDOOR_ALPHA*alpha_boost)
         aux_data = pattern
     elif attack_name in {"fixed", "reversed_fixed"}:
         backdoor = BackdoorPatch(pattern=pattern,
-                                 alpha=FIXED_BACKDOOR_ALPHA)
+                                 alpha=FIXED_BACKDOOR_ALPHA*alpha_boost)
     elif attack_name in {"sinusoid", "reversed_sinusoid"}:
         backdoor = BackdoorPatch(pattern=pattern,
-                                 alpha=SINUSOID_BACKDOOR_ALPHA)
+                                 alpha=SINUSOID_BACKDOOR_ALPHA*alpha_boost)
     elif attack_name == "warped":
         id_grid, noise_grid = None, None
         if aux_data:
@@ -308,6 +310,11 @@ def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, atta
 
         add_probe_data(test_probes, f"backdoor_{attack}", test_indices, test_set, device, test_labels,
                        transform=probe_transform, track_idx=False)
+        if attack in BLENDING_ATTACKS:
+            boosted_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc,
+                                                        aux_data=aux_data, alpha_boost=BOOSTING_RATIO)
+            add_probe_data(test_probes, f"backdoor_{attack}_boosted", test_indices, test_set, device, test_labels,
+                           transform=boosted_transform, track_idx=False)
 
     return test_probes
 
