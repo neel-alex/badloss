@@ -96,7 +96,7 @@ num_val_probes = {
     "single_pix": 0.01,
     "random": 0.01,
     "fixed": 0.01,
-    "sinusoid": 0.03,
+    "sinusoid": 0.3,  # Clean label attacks are expressed as a fraction of the target class!
     "warped": 0.1,
     "sleeper": 0.01,  # TODO: Is this right? Checks out for CIFAR-10 I think...
 }

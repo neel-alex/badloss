@@ -227,7 +227,7 @@ def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_p
         attack_targets['sleeper'] = sleeper_classes[dataset]['train']
     print("Chosen val attack targets:", attack_targets)
     attack_numbers = {attack: int(len(train_set_wo_aug) * num_val_probes[attack]) for attack in val_probe_attacks}
-    print("Making attack image quantities:", attack_numbers)
+    print("Making attack image quantities:", attack_numbers, "(clean label attacks may be incorrect)")
     train_indices = list(range(len(train_set_wo_aug)))
     random_pattern = None
     warping_grids = None
@@ -246,8 +246,12 @@ def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_p
         num = attack_numbers[attack]
 
         # For clean attacks, get clean indices to choose from.
-        indices_to_choose_from = train_indices if attack not in CLEAN_LABEL_ATTACKS else \
-            np.where(train_set_wo_aug.targets == target)[0]
+        indices_to_choose_from = train_indices
+        if attack in CLEAN_LABEL_ATTACKS:
+            indices_to_choose_from = np.where(train_set_wo_aug.targets == target)[0]
+            # Clean label attacks are expressed as a fraction of the target class! Adjust attack number appropriately.
+            num = int(num_val_probes[attack] * len(indices_to_choose_from))
+
 
         # don't let multiple attacks hit the same image, including train probe images.
         indices_to_choose_from = [i for i in indices_to_choose_from if i not in np.concatenate((chosen_indices,
