@@ -32,7 +32,7 @@ from scipy.fftpack import dct
 
 import dist_utils
 from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, \
-    make_attack_dataset, get_loader, IdxDataset
+    get_loader, IdxDataset
 from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other_plot, make_normalizers, \
     yet_another_plot, one_more_plot, plot_loss_dynamics_and_violin, visualize_loss_trajectories, \
     visualize_loss_trajectories_specific, plot_confusion_matrix_from_preds, plot_attack_success_stats, \
@@ -41,7 +41,7 @@ from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, FreqCNN
 
 default_attack  = "all"
-default_defense = "ss"
+default_defense = "mapd"
 default_poisoning_ratio = None
 
 
@@ -361,11 +361,18 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
 
 
 def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size):
-    for attack in val_probe_attacks:
-        test_tensor(model, device, criterion, test_probes[f"backdoor_{attack}"],
-                    test_probes[f"backdoor_{attack}_labels"],
-                    msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
-                    log_predictions=log_predictions, batch_size=tensor_batch_size)
+    output_dict = {}
+    attacks = [x for x in test_probes.keys() if not x.endswith("_labels")]
+    for attack in attacks:
+        stats, _ = test_tensor(model, device, criterion, test_probes[attack],
+                               test_probes[f"{attack}_labels"],
+                               msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
+                               log_predictions=log_predictions, batch_size=tensor_batch_size)
+        output_dict[attack] = {}
+        output_dict[attack]['accuracy'] = stats['acc']
+        output_dict[attack]['total'] = stats['total']
+        output_dict[attack]['correct'] = stats['correct']
+    return output_dict
 
 
 if not os.path.exists(model_file):
@@ -916,31 +923,6 @@ if defense == "mapd":
             assign_probe_classes_knn(clf, new_idx_loader, sorted_losses_all, idx2class, output_path, class_to_surface, probe_class_to_surface=["backdoor"])
         print("All files saved. Execution completed!")
 
-    # TODO
-
-    def evaluate_attack_success(model, device):
-        # Iterate over all possible attack types
-        output_dict = {}
-        for i, attack_type in enumerate(["clean"] + attack_types):
-            attacked_test_dl = make_attack_dataset(test_set, attack_type, chosen_attack_targets, no_transform,
-                                                   random_pattern, warping_grids, img_size, distributed,
-                                                   num_workers, batch_size, train_probe_attack, aux_data)
-            correct, total = 0, 0
-            model.eval()
-            for (data, target), ex_idx in tqdm(attacked_test_dl):
-                data, target = data.to(device), target.to(device)
-                with torch.no_grad():
-                    pred = model(data).argmax(dim=1)
-                    correct_preds = (pred == target).sum()
-                    correct += int(correct_preds)
-                    total += len(data)
-            acc = 100. * float(correct) / total
-            if attack_type == "":
-                attack_type = "backdoor"
-            print(f"[!! STATS] Attack type: {attack_type} / Correct: {correct} / Total: {total} / Acc: {acc:.2f}%")
-            output_dict[attack_type] = {"correct": correct, "total": total, "accuracy": acc}
-        return output_dict
-
 
     def train_model(clean_model, loader, optimizer, criterion, scaler, lr_scheduler, output_checkpoint):
         for _ in range(num_epochs):
@@ -953,7 +935,8 @@ if defense == "mapd":
 
     # In[ ]:
     # Evaluate the attack success rate
-    output_dict = evaluate_attack_success(model, device)
+    output_dict = test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
+                                     tensor_batch_size)
     output_file = os.path.join(experiment_output_dir, f"attack_success_initial.png")
     print(output_dict)
     plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model")
@@ -1037,7 +1020,8 @@ if defense == "mapd":
                 clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
 
             # Evaluate the attack success rate for the model trained on clean data
-            output_dict = evaluate_attack_success(clean_model, device)
+            output_dict = test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes,
+                                             val_probe_attacks, tensor_batch_size)
 
             output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
             plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title)
