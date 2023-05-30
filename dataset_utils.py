@@ -307,7 +307,7 @@ class AttackDataset(torch.utils.data.Dataset):
                 attack = '_'.join(attack_type.split('_')[1:])
             else:
                 attack = attack_type
-            backdoor_transform, _ = make_probe_transform(attack, img_size, None, None, aux_data=aux_data)
+            backdoor_transform, _ = make_probe_transform(attack, img_size, dataset, None, None, aux_data=aux_data)
             backdoor_transform.transforms.insert(0, no_transform[0])  # To tensor
             if attack_type == "backdoor":
                 self.attack_target = chosen_attack_targets[attack_type]

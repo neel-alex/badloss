@@ -103,7 +103,7 @@ class WarpingAttack(object):
         return warped_x
 
 
-def get_pattern(attack_name, img_size, output_dir, main_proc):
+def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
     pattern = None
     if "random" in attack_name:
         pattern_file = os.path.join(output_dir, "random_pattern.png")
@@ -126,23 +126,27 @@ def get_pattern(attack_name, img_size, output_dir, main_proc):
             pattern[::2, ::2, :] = 1
         pattern = transforms.ToTensor()(pattern)
     if "sinusoid" in attack_name:
+        if dataset == "mnist":
+            freq = 1/4
+        else:
+            freq = SINUSOID_BACKDOOR_FREQ
         pattern = np.zeros(img_size, dtype=np.float32)
         if "reversed" in attack_name:
             for row in range(pattern.shape[0]):
-                pattern[row, :, :] = np.sin(2 * np.pi * row * SINUSOID_BACKDOOR_FREQ / pattern.shape[0])
+                pattern[row, :, :] = 1 - np.cos(2 * np.pi * row * freq / pattern.shape[0])
         else:
             for col in range(pattern.shape[1]):
-                pattern[:, col, :] = np.sin(2 * np.pi * col * SINUSOID_BACKDOOR_FREQ / pattern.shape[1])
+                pattern[:, col, :] = 1 - np.cos(2 * np.pi * col * freq / pattern.shape[1])
         pattern = transforms.ToTensor()(pattern)
 
     return pattern
 
 
-def make_probe_transform(attack_name, img_size, output_dir, main_proc, aux_data=None):
+def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, aux_data=None):
     if "random" in attack_name and aux_data is not None:
         pattern = aux_data
     else:
-        pattern = get_pattern(attack_name, img_size, output_dir, main_proc)
+        pattern = get_pattern(attack_name, img_size, dataset, output_dir, main_proc)
 
     if attack_name == "patch":
         backdoor = BackdoorPatch()
@@ -189,7 +193,7 @@ def add_probe_data(probe_dict, key, indices, dataset, device, labels, transform=
         probe_dict[f"{key}_diff"] = probe_dict[f"{key}_original"] - probe_dict[f"{key}"]
 
 
-def make_train_probes(num_classes, train_set, train_set_wo_aug, num_train_probes,
+def make_train_probes(num_classes, train_set, dataset, train_set_wo_aug, num_train_probes,
                       train_probe_attack, output_dir, main_proc, img_size, device):
     probes = {"backdoor": [], "clean": [], "backdoor_val": [], "clean_val": []}
     attack_target = np.random.choice(np.arange(num_classes))
@@ -201,7 +205,7 @@ def make_train_probes(num_classes, train_set, train_set_wo_aug, num_train_probes
     base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:]
     # TODO: Add sleeper probe option...
     for suffix, indices in zip(('', '_val'), (base_idx, val_idx)):
-        probe_transform, aux_data = make_probe_transform(train_probe_attack, img_size, output_dir, main_proc)
+        probe_transform, aux_data = make_probe_transform(train_probe_attack, img_size, dataset, output_dir, main_proc)
         backdoor_idx = indices[:num_train_probes]
         attack_labels = np.array([attack_target for i in backdoor_idx])
         add_probe_data(probes, "backdoor"+suffix, backdoor_idx, train_set_wo_aug, device, attack_labels,
@@ -251,7 +255,7 @@ def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_p
 
         attack_idx = np.random.choice(indices_to_choose_from, size=min(num, len(indices_to_choose_from)), replace=False)
         attack_labels = np.array([target for _ in attack_idx])
-        probe_transform, aux_data = make_probe_transform(attack, img_size, output_dir, main_proc)
+        probe_transform, aux_data = make_probe_transform(attack, img_size, dataset, output_dir, main_proc)
         add_probe_data(val_probes, f"backdoor_{attack}", attack_idx, train_set_wo_aug, device, attack_labels,
                        transform=probe_transform, compute_diffs=True)
 
@@ -289,7 +293,7 @@ def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, atta
             aux_data = random_pattern
         if attack == "warped":
             aux_data = warping_grids
-        probe_transform, _ = make_probe_transform(attack, img_size, output_dir, main_proc, aux_data=aux_data)
+        probe_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc, aux_data=aux_data)
 
         # Don't use any clean indices -- this way, the attack success rate should start at 0.
         #   (though practically there will be some randomly classified training images with low test acc.)
@@ -338,7 +342,7 @@ def add_sleeper_probes(probe_dict, dataset, split, train_set, chosen_indices, tr
 
     # TODO: probe?
     data_dir = DATA_ROOT + f"sleeper_{dataset}/{split}/{class_name}/"  # TODO: import data dir from dataset_utils?
-    image_size = train_set.data[0].shape[0]
+    image_size = train_set.data[0].shape[0]  # TODO: THIS IS A BUG!!! FIX THIS FOR ALL DATASETS!!!
 
     indices_to_remove = []  # TODO: delete non-diff images to save time?
     sleeper_images = []
