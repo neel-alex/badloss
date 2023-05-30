@@ -221,11 +221,11 @@ val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
                                random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
 
-unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
 
 # Merge probe dicts
 if defense == "mapd":
     probes = {**train_probe, **val_probes}
+    unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
     probes['all_backdoor_idx'] = unified_backdoor_idx
     chosen_attack_targets = {**{'backdoor': attack_target}, **attack_targets}
     plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
