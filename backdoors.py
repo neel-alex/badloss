@@ -11,7 +11,7 @@ import dist_utils
 
 RANDOM_BACKDOOR_ALPHA = 0.1
 FIXED_BACKDOOR_ALPHA = 0.025
-SINUSOID_BACKDOOR_ALPHA = 0.025
+SINUSOID_BACKDOOR_ALPHA = 0.075
 SINUSOID_BACKDOOR_FREQ = 6
 
 CLEAN_LABEL_ATTACKS = {'sinusoid'}
@@ -219,6 +219,8 @@ def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_p
                     main_proc, img_size, device, train_probe_indices):
     val_probes = {}
     attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in val_probe_attacks}
+    if 'sleeper' in val_probe_attacks:
+        attack_targets['sleeper'] = sleeper_classes[dataset]['train']
     print("Chosen val attack targets:", attack_targets)
     attack_numbers = {attack: int(len(train_set) * num_val_probes[attack]) for attack in val_probe_attacks}
     print("Making attack image quantities:", attack_numbers)
@@ -231,6 +233,7 @@ def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_p
         attack_idx = add_sleeper_probes(val_probes, dataset, 'train', train_set, chosen_indices,
                                         train_probe_indices, device, attack_numbers['sleeper'])
         chosen_indices = np.concatenate((chosen_indices, attack_idx))
+        print(f"Backdoor (sleeper) probe shape:", val_probes[f"backdoor_sleeper"].shape)
 
     for attack in val_probe_attacks:
         if attack == 'sleeper':

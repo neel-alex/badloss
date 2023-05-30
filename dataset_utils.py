@@ -129,11 +129,14 @@ def get_settings_for_dataset(dataset):
 
 
 class CustomTensorDataset(torch.utils.data.Dataset):
-    def __init__(self, x: torch.Tensor, y: list) -> None:
+    def __init__(self, x: torch.Tensor, y: list, transform=None) -> None:
         self.x = x
         self.y = y
+        self.transform = transform
 
     def __getitem__(self, index):
+        if self.transform:
+            return self.transform(self.x[index]), self.y[index]
         return self.x[index], self.y[index]
 
     def __len__(self):
@@ -177,8 +180,8 @@ def get_loader(dataset, distributed, num_workers, indices=None, batch_size=16, s
 
 
 def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
-                       num_val_probes, val_probe_attacks, output_dir, device):
-    discarded_idx = list(probes['all_backdoor_idx'])
+                       train_transform, val_probe_attacks, output_dir, device):
+    discarded_idx = set(probes['all_backdoor_idx'])
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
@@ -209,7 +212,8 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
 
         probe_dataset = torch.utils.data.TensorDataset(probe_images, probe_labels)
         probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"),
-                                                     [int(x) for x in probe_labels.to("cpu").numpy().tolist()])
+                                                     [int(x) for x in probe_labels.to("cpu").numpy().tolist()],
+                                                     transform=transforms.Compose(train_transform[:-1]))  # Cut off ToTensor transform
         print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape,
               probe_dataset_standard[0][1])
         print("Curated probe dataset")
@@ -224,7 +228,8 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
     val_probe_images = torch.cat([probes[f"backdoor_{attack}"] for attack in val_probe_attacks], dim=0)
     val_probe_labels = torch.cat([probes[f"backdoor_{attack}_labels"] for attack in val_probe_attacks], dim=0)
     val_probe_dataset_standard = CustomTensorDataset(val_probe_images.to("cpu"),
-                                                     [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()])
+                                                     [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()],
+                                                     transform=transforms.Compose(train_transform[:-1]))
     print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape,
           val_probe_dataset_standard[0][1])
 

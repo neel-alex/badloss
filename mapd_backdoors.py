@@ -46,7 +46,7 @@ default_poisoning_ratio = None
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
-attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
+attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]  # TODO: Add sleeper...
 defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
 poisoning_ratio_choices = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05]
 
@@ -81,6 +81,8 @@ print(dataset, attack, defense, poisoning_ratio)
 if attack == "all":
     train_probe_attack = "reversed_patch"
     val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
+    if dataset == "cifar10":  # TODO: Add sleeper fully...
+        val_probe_attacks.append("sleeper")
 elif attack in {"patch", "single_pix", "fixed", "sinusoid"}:
     train_probe_attack = "reversed_" + attack
     val_probe_attacks = [attack]
@@ -96,6 +98,7 @@ num_val_probes = {
     "fixed": 0.01,
     "sinusoid": 0.03,
     "warped": 0.1,
+    "sleeper": 0.01,  # TODO: Is this right? Checks out for CIFAR-10 I think...
 }
 correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
 if correct_abl and defense == "abl":
@@ -255,9 +258,8 @@ wd = 0.0001
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
     make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
-                       num_val_probes, val_probe_attacks, experiment_output_dir, device)
-discards = set(discarded_idx)
-valid_idx = [i for i in range(len(train_set)) if i not in discards]
+                       train_transform, val_probe_attacks, experiment_output_dir, device)
+valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
 
 
 model = get_model(dataset, num_classes, device, local_rank, verbose=True)
