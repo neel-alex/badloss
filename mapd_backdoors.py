@@ -47,7 +47,7 @@ default_poisoning_ratio = None
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
 attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
-defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl", "getauc"]
+defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
 poisoning_ratio_choices = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05]
 
 if len(sys.argv) < 2:
@@ -209,13 +209,13 @@ train_probe, attack_target, aux_data = make_train_probes(num_classes, train_set,
                                                         num_train_probes, train_probe_attack,
                                                         experiment_output_dir, main_proc, img_size, device)
 
-val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, train_set, train_set_wo_aug,
+val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, dataset, train_set, train_set_wo_aug,
                                                                             num_val_probes, val_probe_attacks,
                                                                             experiment_output_dir, main_proc, img_size,
                                                                             device,
                                                                             train_probe_indices=train_probe["all_backdoor_idx"])
 
-test_probes = make_test_probes(test_set, num_test_probes, val_probe_attacks, attack_targets,
+test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
                                random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
 
 unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
@@ -256,6 +256,8 @@ wd = 0.0001
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
     make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
                        num_val_probes, val_probe_attacks, experiment_output_dir, device)
+discards = set(discarded_idx)
+valid_idx = [i for i in range(len(train_set)) if i not in discards]
 
 
 model = get_model(dataset, num_classes, device, local_rank, verbose=True)
@@ -1083,13 +1085,12 @@ def get_last_layer_activations(model, loader, masking_op=None):
             torch.hstack(classes), torch.hstack(class_preds))
 
 
-def get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx,
+def get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes,
                         verbose=True):
     """
         identified_indices: np array of indices considered to be poisonous by a detector.
     """
-    valid_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
-    false_pos = np.intersect1d(identified_indices, torch.tensor(range(len(valid_indices))))
+    false_pos = np.intersect1d(identified_indices, valid_idx)
     true_pos = np.array([])
     counter = {k: 0 for k in set(dataset_probe_identity) - {'train'}}
     results = {k: 0 for k in set(dataset_probe_identity) - {'train'}}
@@ -1106,7 +1107,7 @@ def get_confusion_stats(identified_indices, train_set, dataset_probe_identity, n
         counter[id] += 1
 
     num_attacks = sum(v for (k, v) in counter.items() if 'clean' not in k)
-    num_clean = len(valid_indices) + sum(v for (k, v) in counter.items() if 'clean' in k)
+    num_clean = len(valid_idx) + sum(v for (k, v) in counter.items() if 'clean' in k)
 
     false_positive = len(false_pos)
     true_positive = len(true_pos)
@@ -1133,9 +1134,22 @@ def get_confusion_stats(identified_indices, train_set, dataset_probe_identity, n
     return false_positive_rate, true_positive_rate
 
 
+def get_auc(idx_list, valid_idx, dataset_probe_identity, num_train_probes):
+    fprs, tprs = [], []
+
+    for identified_indices in idx_list:
+        fpr, tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                       num_train_probes, verbose=False)
+        fprs.append(fpr)
+        tprs.append(tpr)
+
+    fprs, tprs = zip(*sorted(zip(fprs, tprs)))
+    return sklearn.metrics.auc(fprs, tprs)
+
+
 def retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                  detection_thresh, criterion, probes, log_predictions, test_probes, defense):
+                  detection_thresh, probes, log_predictions, test_probes, defense):
     print(f"Retraining with {identified_indices.shape[0]} elements removed.")
     retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
 
@@ -1175,7 +1189,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     return clean_model
 
 
-if defense == "nc" or defense == "getauc":
+if defense == "nc":
     def apply_mask_and_trigger(batch, mask, trigger):
         return batch * (1 - mask) + mask * trigger
 
@@ -1220,6 +1234,19 @@ if defense == "nc" or defense == "getauc":
             l1_penalty *= 2
 
         return l1_penalty
+
+
+    def get_indices_for_thresh(fpr_thresh, clean_probe_indices, attacked_classes, poison_acts_by_class,
+                               indices_to_check, clean_indices):
+        upper_limit = 1 + int(len(clean_probe_indices) * fpr_thresh)
+        rejected_indices = []
+        for i, atk_class in enumerate(attacked_classes):
+            poison_acts = poison_acts_by_class[i]
+            # Set a threshold that rejects no more than fpr_thresh of clean probe examples.
+            reject_thresh = poison_acts[indices_to_check].sort()[0][-upper_limit]
+            rejected_indices.append((poison_acts > reject_thresh).nonzero()[:, 0])
+        rejected_indices = torch.hstack(rejected_indices).unique()
+        return clean_indices[rejected_indices.cpu()].numpy() if clean_indices is not None else np.array([], dtype=int)
 
     cleanse_epochs = 20
 
@@ -1288,52 +1315,25 @@ if defense == "nc" or defense == "getauc":
         acts_of_poisoned = clean_activations[:, poisoned_neurons].mean(axis=1)
         poison_acts_by_class.append(acts_of_poisoned)
 
-    if poisoning_ratio is None and defense != "getauc":
-        fpr_thresh = 0.05 / max(len(attacked_classes), 1)
-        upper_limit = 1 + int(len(clean_probe_indices) * fpr_thresh)
+    fpr_thresh = 0.05 / max(len(attacked_classes), 1)
+    # Calculate AUC
+    auc_fpr_threshes = np.geomspace(fpr_thresh / 20, 0.8, num=50)
 
-        rejected_indices = []
+    auc_idx = []
+    for auc_fpr_threshes in auc_fpr_threshes:
+        auc_idx.append(get_indices_for_thresh(auc_fpr_threshes, clean_probe_indices, attacked_classes,
+                                              poison_acts_by_class, indices_to_check, clean_indices))
+    print("NC AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, num_train_probes))
 
-        for i, atk_class in enumerate(attacked_classes):
-            poison_acts = poison_acts_by_class[i]
-            # Set a threshold that rejects no more than fpr_thresh of clean probe examples.
-            reject_thresh = poison_acts[indices_to_check].sort()[0][-upper_limit]
-            rejected_indices.append((poison_acts > reject_thresh).nonzero()[:, 0])
+    # Retrain model using default threshold
+    identified_indices = get_indices_for_thresh(fpr_thresh, clean_probe_indices, attacked_classes,
+                                                poison_acts_by_class, indices_to_check, clean_indices)
 
-        rejected_indices = torch.hstack(rejected_indices).unique()
-        identified_indices = clean_indices[rejected_indices.cpu()].numpy() if clean_indices is not None else np.array([], dtype=int)
-
-        # Print confusion stats...
-        get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
-        clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
-                                    batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                    experiment_output_dir, fpr_thresh, criterion, probes, log_predictions, test_probes, defense)
-    else:
-        core_fpr_thresh = 0.05 / max(len(attacked_classes), 1)
-        fpr_threshes = np.geomspace(core_fpr_thresh / 20, 0.8, num=50)
-
-        fprs = []
-        tprs = []
-        for fpr_thresh in fpr_threshes:
-            upper_limit = 1 + int(len(clean_probe_indices) * fpr_thresh)
-
-            rejected_indices = []
-            for i, atk_class in enumerate(attacked_classes):
-                poison_acts = poison_acts_by_class[i]
-                # Set a threshold that rejects no more than fpr_thresh of clean probe examples.
-                reject_thresh = poison_acts[indices_to_check].sort()[0][-upper_limit]
-                rejected_indices.append((poison_acts > reject_thresh).nonzero()[:, 0])
-
-            rejected_indices = torch.hstack(rejected_indices).unique()
-            identified_indices = clean_indices[
-                rejected_indices.cpu()].numpy() if clean_indices is not None else np.array([], dtype=int)
-
-            # Print confusion stats...
-            fpr, tpr = get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes,
-                                           discarded_idx, verbose=False)
-            fprs.append(fpr)
-            tprs.append(tpr)
-        print("NC AUC", sklearn.metrics.auc(fprs, tprs))
+    # Print confusion stats...
+    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes)
+    clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
+                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                experiment_output_dir, fpr_thresh, probes, log_predictions, test_probes, defense)
 
     # fpr_thresh is only misnamed parameter...
     print("Done with nc")
@@ -1343,7 +1343,22 @@ if defense == "nc" or defense == "getauc":
     # Solution... somehow check the difference between high and lows?? This is a substantial extension...
 
 
-if defense == "ac" or defense == "getauc":
+if defense == "ac":
+    def get_indices_for_class_clusters(detected_classes, clusterings, activation_by_predicted_class):
+        identified_indices = []
+
+        for cls in detected_classes:
+            clustering = clusterings[cls]
+            # If more 1s than 0s, get indices of 0s
+            if sum(clustering) * 2 > len(clustering):
+                selected_indices = np.where(clustering == 0)
+            else:
+                selected_indices = np.where(clustering == 1)
+            dataset_indices = activation_by_predicted_class[cls][1][selected_indices]
+            identified_indices.append(dataset_indices)
+
+        return torch.hstack(identified_indices) if identified_indices else np.array([], dtype=int)
+
     activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader)
     activation_by_predicted_class = {}
     for i in range(num_classes):
@@ -1374,76 +1389,44 @@ if defense == "ac" or defense == "getauc":
 
     # TODO: Use ExRe? Seems like there's too much of a cost in terms of computation...
     # Use this to select which score to reclassify with.
-    if poisoning_ratio is None and defense != "getauc":
-        mode = "sil"
-        if mode == "sil":
-            detect_thresh = 0.15  # Less aggressive -- 0.1 would be more aggressive.
-            detected_classes = [i for i in range(num_classes) if sil_scores[i] > detect_thresh]
-        elif mode == "rsc":
-            detect_thresh = 0.3  # Worst case from AC
-            detected_classes = [i for i in range(num_classes) if rsc_scores[i] < detect_thresh]
-        else:
-            raise NotImplementedError
+    mode = "sil"
+    if mode == "sil":
+        detect_thresh = 0.15  # Less aggressive -- 0.1 would be more aggressive.
+        detected_classes = [i for i in range(num_classes) if sil_scores[i] > detect_thresh]
 
-        identified_indices = []
-        for cls in detected_classes:
-            clustering = clusterings[cls]
-            # If more 1s than 0s, get indices of 0s
-            if sum(clustering)*2 > len(clustering):
-                selected_indices = np.where(clustering == 0)
-            else:
-                selected_indices = np.where(clustering == 1)
-            dataset_indices = activation_by_predicted_class[cls][1][selected_indices]
-            identified_indices.append(dataset_indices)
-
-        identified_indices = torch.hstack(identified_indices)
-        get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
-        clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
-                                    batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                    experiment_output_dir, detect_thresh, criterion, probes, log_predictions, test_probes, defense) # detect_thresh...
+        auc_detect_threshes = np.geomspace(0.01, 0.5, num=50)
+    elif mode == "rsc":
+        detect_thresh = 0.3  # Worst case from AC
+        detected_classes = [i for i in range(num_classes) if rsc_scores[i] < detect_thresh]
+        auc_detect_threshes = np.geomspace(0.01, 0.4, num=50)
     else:
-        mode = "sil"
+        raise NotImplementedError
+
+    # Calculate AUC
+    auc_idx = []
+    for detect_thresh in auc_detect_threshes:
         if mode == "sil":
-            detect_threshes = np.geomspace(0.01, 0.5, num=50)
+            auc_detected_classes = [i for i in range(num_classes) if sil_scores[i] > detect_thresh]
         elif mode == "rsc":
-            detect_threshes = np.geomspace(0.01, 0.4, num=50)
-        else:
-            raise NotImplementedError
+            auc_detected_classes = [i for i in range(num_classes) if rsc_scores[i] < detect_thresh]
+        auc_idx.append(get_indices_for_class_clusters(auc_detected_classes, clusterings, activation_by_predicted_class))
 
-        fprs = []
-        tprs = []
-        for detect_thresh in detect_threshes:
-            if mode == "sil":
-                detected_classes = [i for i in range(num_classes) if sil_scores[i] > detect_thresh]
-            elif mode == "rsc":
-                detected_classes = [i for i in range(num_classes) if rsc_scores[i] < detect_thresh]
-            else:
-                raise NotImplementedError
+    print("AC AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, num_train_probes))
 
-            identified_indices = []
-            for cls in detected_classes:
-                clustering = clusterings[cls]
-                # If more 1s than 0s, get indices of 0s
-                if sum(clustering) * 2 > len(clustering):
-                    selected_indices = np.where(clustering == 0)
-                else:
-                    selected_indices = np.where(clustering == 1)
-                dataset_indices = activation_by_predicted_class[cls][1][selected_indices]
-                identified_indices.append(dataset_indices)
-
-            identified_indices = torch.hstack(identified_indices) if identified_indices else torch.tensor([])
-            fpr, tpr = get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes,
-                                           discarded_idx, verbose=False)
-            fprs.append(fpr)
-            tprs.append(tpr)
-        print("AC AUC", sklearn.metrics.auc(fprs, tprs))
+    # Retrain model using default threshold
+    identified_indices = get_indices_for_class_clusters(detected_classes, clusterings, activation_by_predicted_class)
+    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes)
+    clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
+                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                experiment_output_dir, detect_thresh, probes, log_predictions, test_probes,
+                                defense)  # detect_thresh...
 
     # Use probes to get expected clean silhouette scores per class
     # Get silhouette score -- if it's far from clean, then mark the smaller cluster as dirty. Repeat through all classes.
     # Ex-Re? It seems too difficult to do Ex-Re 20x training runs for each of 10 classes,
     #   then do AC all over again on the retrained model to find the second backdoor...
 
-if defense == "ss" or defense == "getauc":
+if defense == "ss":
     # For every class:
     #   n = # training examples labeled y
     #   R_hat = average d-dim representation (at last layer) of train examples
@@ -1452,6 +1435,17 @@ if defense == "ss" or defense == "getauc":
     #   tau = ([R(x_i) - R_hat] * v)^2 for all i (n dimensional)
     #   Remove the top 1.5*epsilon (thresholding value) from dataset.
     # Retrain
+    def get_indices_for_eps(eps_thresh, num_classes, taus, cls_idx, indices):
+        rejected_indices = []
+        for cls in range(num_classes):
+            tau = taus[cls]
+            cls_indices = cls_idx[cls]
+            num_to_remove = int(len(tau) * eps_thresh * 1.5)
+            rejected_indices.append(cls_indices[tau.argsort()[-num_to_remove:].cpu()])
+
+        rejected_indices = torch.hstack(rejected_indices).unique()
+        return indices[rejected_indices.cpu()].numpy()
+
     activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader)
     taus, cls_idx = [], []
     for cls in range(num_classes):
@@ -1465,54 +1459,30 @@ if defense == "ss" or defense == "getauc":
         taus.append(tau)
         cls_idx.append(cls_indices)
 
+    epsilon_thresh = 0.1  # From paper, assuming 10% poisoning max
 
-    if poisoning_ratio is None and defense != "getauc":
-        epsilon_thresh = 0.1  # From paper, assuming 10% poisoning max
+    # Calculate AUC
+    auc_eps_threshes = np.geomspace(0.01, 0.5, num=50)
+    auc_idx = []
+    for auc_eps_thresh in auc_eps_threshes:
+        auc_idx.append(get_indices_for_eps(auc_eps_thresh, num_classes, taus, cls_idx, indices))
 
-        rejected_indices = []
-        for cls in range(num_classes):
-            tau = taus[cls]
-            cls_indices = cls_idx[cls]
-            num_to_remove = int(len(tau) * epsilon_thresh * 1.5)
-            rejected_indices.append(cls_indices[tau.argsort()[-num_to_remove:].cpu()])
+    print("SS AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, num_train_probes))
 
-        rejected_indices = torch.hstack(rejected_indices).unique()
-        identified_indices = indices[rejected_indices.cpu()].numpy()
+    # Retrain model using default threshold
+    identified_indices = get_indices_for_eps(epsilon_thresh, num_classes, taus, cls_idx, indices)
 
-        # Print confusion stats...
-        get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
-        clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
-                                    batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
-                                    experiment_output_dir, epsilon_thresh, criterion, probes, log_predictions, test_probes,
-                                    defense)
-
-    else:
-        eps_thresh_list = np.geomspace(0.01, 0.4, num=50)
-        fprs = []
-        tprs = []
-        for eps_thresh in eps_thresh_list:
-            rejected_indices = []
-            for cls in range(num_classes):
-                tau = taus[cls]
-                cls_indices = cls_idx[cls]
-                num_to_remove = int(len(tau) * eps_thresh * 1.5)
-                rejected_indices.append(cls_indices[tau.argsort()[-num_to_remove:].cpu()])
-
-            rejected_indices = torch.hstack(rejected_indices).unique()
-            identified_indices = indices[rejected_indices.cpu()].numpy()
-
-            # Print confusion stats...
-            fpr, tpr = get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx, verbose=False)
-            fprs.append(fpr)
-            tprs.append(tpr)
-        print("SS AUC", sklearn.metrics.auc(fprs, tprs))
-
+    # Print confusion stats...
+    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes)
+    clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
+                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                experiment_output_dir, epsilon_thresh, probes, log_predictions, test_probes, defense)
 
     print("Done with ss")
     # TODO: retrain, repeat...
 
 
-if defense == "freq" or defense == "getauc":
+if defense == "freq":
     # They use a series of transformations similar to backdoor images to train their detector.
     # We could do that to reproduce their results exactly:
     #   * White square
@@ -1532,6 +1502,29 @@ if defense == "freq" or defense == "getauc":
         # Copied from:
         #   https://github.com/YiZeng623/frequency-backdoor/blob/main/Sec4_Frequency_Detection/Train_Detection.ipynb
         return dct(dct(block.T, norm='ortho').T, norm='ortho')
+
+
+    def get_indices_for_thresh_from_loader(thresh, new_idx_loader_wo_aug, freq_model):
+        freq_model.eval()
+        identified_indices = []
+        for (image, label), indices in tqdm(new_idx_loader_wo_aug):
+            image = image.cpu().numpy()
+            num_images = image.shape[0]
+            channels = image.shape[1]  # NCHW required
+            for n in range(num_images):
+                for c in range(channels):
+                    image[n, c, :, :] = dct2(image[n, c, :, :])
+
+            image = torch.tensor(image, device=device)
+            outputs = freq_model(image)
+            outputs = torch.nn.functional.softmax(outputs, dim=1)
+
+            probs = outputs[:, 1]
+
+            identified_indices.append(indices[(probs.cpu() >= thresh).nonzero()[:, 0]])
+
+        return torch.hstack(identified_indices)
+
 
     for key in freq_probes:
         num_images = freq_probes[key].shape[0]
@@ -1574,72 +1567,31 @@ if defense == "freq" or defense == "getauc":
             epoch_correct += correct.item()
         print(f"Epoch {epoch+1} loss: {epoch_loss/len(freq_dataset):.6f}, acc: {epoch_correct/len(freq_dataset):.6f}")
 
-    # Filter the dataset:
-    model.eval()
-    if poisoning_ratio is not None and defense != "getauc":
-        detection_thresh = 0.5
-        identified_indices = []
-        for (image, label), indices in new_idx_loader_wo_aug:
-            image = image.cpu().numpy()
-            num_images = image.shape[0]
-            channels = image.shape[1]  # NCHW required
-            for n in range(num_images):
-                for c in range(channels):
-                    image[n, c, :, :] = dct2(image[n, c, :, :])
+    detection_thresh = 0.5
 
-            image = torch.tensor(image, device=device)
-            outputs = freq_model(image)
-            outputs = torch.nn.functional.softmax(outputs, dim=1)
+    # Calculate AUC
+    auc_detect_threshes = np.linspace(0.1, 0.9, num=9)
+    auc_idx = []
+    for auc_detect_thresh in auc_detect_threshes:
+        auc_idx.append(get_indices_for_thresh_from_loader(auc_detect_thresh, new_idx_loader_wo_aug, freq_model))
 
-            probs = outputs[:, 1]
+    print("Freq AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, num_train_probes))
 
-            identified_indices.append(indices[(probs.cpu() >= detection_thresh).nonzero()[:, 0]])
+    # Retrain model using default threshold
+    identified_indices = get_indices_for_thresh_from_loader(detection_thresh, new_idx_loader_wo_aug, freq_model)
+    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes)
+    retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
+                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  detection_thresh, probes, log_predictions, test_probes, defense)
 
-        identified_indices = torch.hstack(identified_indices)
+if defense == "abl":
+    def get_indices_from_losses(thresh, train_set, loss_idx, ex_idx):
+        num_ex_unlearning = int(len(train_set) * thresh)
+        identified_indices = loss_idx[:num_ex_unlearning]
+        identified_indices = [int(ex_idx[i]) for i in identified_indices]
+        return np.array(identified_indices)
 
-        get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
-        retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
-                      num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                      detection_thresh, criterion, probes, log_predictions, test_probes, defense)
-    else:
-        detection_threshes = np.linspace(0.1, 0.9, num=9)
-        fprs = []
-        tprs = []
-        for detection_thresh in detection_threshes:
-            identified_indices = []
-            for (image, label), indices in new_idx_loader_wo_aug:
-                image = image.cpu().numpy()
-                num_images = image.shape[0]
-                channels = image.shape[1]  # NCHW required
-                for n in range(num_images):
-                    for c in range(channels):
-                        image[n, c, :, :] = dct2(image[n, c, :, :])
 
-                image = torch.tensor(image, device=device)
-                outputs = freq_model(image)
-                outputs = torch.nn.functional.softmax(outputs, dim=1)
-
-                probs = outputs[:, 1]
-
-                identified_indices.append(indices[(probs.cpu() >= detection_thresh).nonzero()[:, 0]])
-
-            identified_indices = torch.hstack(identified_indices)
-
-            fpr, tpr = get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes,
-                                           discarded_idx, verbose=False)
-            fprs.append(fpr)
-            tprs.append(tpr)
-        try:
-            print("Freq AUC", sklearn.metrics.auc(fprs, tprs))
-        except ValueError:
-            tprs = [x for _, x in sorted(zip(fprs, tprs))]
-            fprs = sorted(fprs)
-            try:
-                print("Freq AUC", sklearn.metrics.auc(fprs, tprs))
-            except ValueError:
-                print("Cannot compute Freq AUC")
-
-if defense == "abl" or defense == "getauc":
     num_pretrain_epochs = 10
     flooding_threshold = 0.5
 
@@ -1676,103 +1628,94 @@ if defense == "abl" or defense == "getauc":
 
     loss_idx = np.argsort(losses)  # Ascending sort
 
-    if poisoning_ratio is None and defense != "getauc":
-        num_ex_unlearning = int(len(train_set) * selection_threshold)
-        indices_to_maximize = loss_idx[:num_ex_unlearning]
-        indices_to_maximize = [int(ex_idx[i]) for i in indices_to_maximize]
+    # Calculate AUC
+    auc_threshes = np.geomspace(0.001, 0.5, num=50)
+    auc_idx = []
+    for auc_thresh in auc_threshes:
+        auc_idx.append(get_indices_from_losses(auc_thresh, train_set, loss_idx, ex_idx))
+    print("ABL AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, num_train_probes))
 
-        # Identify the maximum indices
-        total_ex = len(new_idx_loader.dataset)
-        missing_vals = [x for x in range(total_ex) if x not in ex_idx]
+    # Retrain model using default threshold
+    indices_to_maximize = get_indices_from_losses(selection_threshold, train_set, loss_idx, ex_idx)
+
+    # Identify the maximum indices
+    total_ex = len(new_idx_loader.dataset)
+    missing_vals = [x for x in range(total_ex) if x not in ex_idx]
+    print(
+        f"Ex idx stats / # vals: {total_ex} / Total: {len(ex_idx)} / Unique vals: {len(np.unique(ex_idx))} / Missing vals: {len(missing_vals)} / max idx: {np.max(ex_idx)}")
+    print(f"Indices to maximize / Len: {len(indices_to_maximize)} / Indices: {indices_to_maximize}")
+
+    ground_truth_probes = [i for i in range(len(ex_idx), total_ex)]
+    backdoor_probe_idx = [i for i in ground_truth_probes if "clean" not in dataset_probe_identity[i]]
+
+    backdoor_probes_detected = [i for i in indices_to_maximize if i in backdoor_probe_idx]
+    print(f"Backdoor probe examples flagged: {len(backdoor_probes_detected)} / {backdoor_probes_detected}")
+    print(f"Ground truth probes: {len(ground_truth_probes)} / {ground_truth_probes}")
+
+    if not finetune_and_unlearn:
+        identified_indices = np.array(indices_to_maximize)
+        # Retrain with selected indices like normal
+        get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes)
+        retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
+                      num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                      selection_threshold, probes, log_predictions, test_probes, defense)
+
+    else:  # Finetune and unlearn
+        clean_finetuning_epochs = 60
+        unlearning_epochs = 5
+        use_gt_backdoors = True  # Note: this is important to set.
+
+        if use_gt_backdoors:
+            print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
+            indices_to_maximize = backdoor_probe_idx[:int(len(train_set) * selection_threshold)]
+            print(f"Total probe idx: {len(ground_truth_probes)} / Backdoor idx: {len(backdoor_probe_idx)}")
+        remaining_indices = [i for i in range(total_ex) if i not in indices_to_maximize and i not in missing_vals]
         print(
-            f"Ex idx stats / # vals: {total_ex} / Total: {len(ex_idx)} / Unique vals: {len(np.unique(ex_idx))} / Missing vals: {len(missing_vals)} / max idx: {np.max(ex_idx)}")
-        print(f"Indices to maximize / Len: {len(indices_to_maximize)} / Indices: {indices_to_maximize}")
+            f"Selected indices / Clean indices: {len(remaining_indices)} / Backdoored indices: {len(indices_to_maximize)}")
 
-        ground_truth_probes = [i for i in range(len(ex_idx), total_ex)]
-        backdoor_probe_idx = [i for i in ground_truth_probes if "clean" not in dataset_probe_identity[i]]
+        # Step # 03: generate dataloaders based on the clean and backdoor indices
+        clean_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=remaining_indices,
+                              num_workers=num_workers, batch_size=batch_size)
+        detected_backdoors_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=indices_to_maximize,
+                                           num_workers=num_workers, batch_size=batch_size)
 
-        backdoor_probes_detected = [i for i in indices_to_maximize if i in backdoor_probe_idx]
-        print(f"Backdoor probe examples flagged: {len(backdoor_probes_detected)} / {backdoor_probes_detected}")
-        print(f"Ground truth probes: {len(ground_truth_probes)} / {ground_truth_probes}")
+        # Step # 04: finetune the model only on clean data
+        print("!! Starting finetuning phase on the clean examples...")
+        model_postfix = "_gt_backdoors" if use_gt_backdoors else ""
+        output_checkpoint_file = os.path.join(experiment_output_dir, f"model_clean_ft{model_postfix}.pth")
+        if not os.path.exists(output_checkpoint_file):
+            lr = 0.1
+            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd,
+                                                                       clean_finetuning_epochs)
+            for epoch in tqdm(range(clean_finetuning_epochs)):
+                output_dict = train(model, device, clean_dl, optimizer, criterion, scaler)
+                if epoch % 5 == 4:
+                    log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
+                                                           distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                           val_probes, defense, tensor_batch_size)
+            torch.save(model.state_dict(), output_checkpoint_file)
+        else:
+            print(f"!! Loading clean finetuned checkpoint file:", output_checkpoint_file)
+            model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
 
-        if not finetune_and_unlearn:
-            identified_indices = np.array(indices_to_maximize)
-            # Retrain with selected indices like normal
-            get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes, discarded_idx)
-            retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
-                          num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                          selection_threshold, criterion, probes, log_predictions, test_probes, defense)
+        # Step # 05: perform unlearning step on the identified backdoored examples
+        print("!! Starting unlearning phase on the identified backdoor examples...")
+        output_checkpoint_file = os.path.join(experiment_output_dir, f"model_unlearned{model_postfix}.pth")
+        if not os.path.exists(output_checkpoint_file):
+            lr = 5e-4
+            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, unlearning_epochs)
+            for epoch in tqdm(range(unlearning_epochs)):
+                output_dict = train(model, device, detected_backdoors_dl, optimizer, criterion, scaler,
+                                    gradient_ascent=True)
+                if epoch % 5 == 4:
+                    log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
+                                                           distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                           val_probes, defense, tensor_batch_size)
+            torch.save(model.state_dict(), output_checkpoint_file)
+        else:
+            print(f"!! Loading unlearned checkpoint file:", output_checkpoint_file)
+            model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
 
-        else:  # Finetune and unlearn
-            clean_finetuning_epochs = 60
-            unlearning_epochs = 5
-            use_gt_backdoors = True  # Note: this is important to set.
-
-            if use_gt_backdoors:
-                print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
-                indices_to_maximize = backdoor_probe_idx[:num_ex_unlearning]
-                print(f"Total probe idx: {len(ground_truth_probes)} / Backdoor idx: {len(backdoor_probe_idx)}")
-            remaining_indices = [i for i in range(total_ex) if i not in indices_to_maximize and i not in missing_vals]
-            print(
-                f"Selected indices / Clean indices: {len(remaining_indices)} / Backdoored indices: {len(indices_to_maximize)}")
-
-            # Step # 03: generate dataloaders based on the clean and backdoor indices
-            clean_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=remaining_indices,
-                                  num_workers=num_workers, batch_size=batch_size)
-            detected_backdoors_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=indices_to_maximize,
-                                               num_workers=num_workers, batch_size=batch_size)
-
-            # Step # 04: finetune the model only on clean data
-            print("!! Starting finetuning phase on the clean examples...")
-            model_postfix = "_gt_backdoors" if use_gt_backdoors else ""
-            output_checkpoint_file = os.path.join(experiment_output_dir, f"model_clean_ft{model_postfix}.pth")
-            if not os.path.exists(output_checkpoint_file):
-                lr = 0.1
-                criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd,
-                                                                           clean_finetuning_epochs)
-                for epoch in tqdm(range(clean_finetuning_epochs)):
-                    output_dict = train(model, device, clean_dl, optimizer, criterion, scaler)
-                    if epoch % 5 == 4:
-                        log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
-                                                               distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                               val_probes, defense, tensor_batch_size)
-                torch.save(model.state_dict(), output_checkpoint_file)
-            else:
-                print(f"!! Loading clean finetuned checkpoint file:", output_checkpoint_file)
-                model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
-
-            # Step # 05: perform unlearning step on the identified backdoored examples
-            print("!! Starting unlearning phase on the identified backdoor examples...")
-            output_checkpoint_file = os.path.join(experiment_output_dir, f"model_unlearned{model_postfix}.pth")
-            if not os.path.exists(output_checkpoint_file):
-                lr = 5e-4
-                criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, unlearning_epochs)
-                for epoch in tqdm(range(unlearning_epochs)):
-                    output_dict = train(model, device, detected_backdoors_dl, optimizer, criterion, scaler,
-                                        gradient_ascent=True)
-                    if epoch % 5 == 4:
-                        log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
-                                                               distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                               val_probes, defense, tensor_batch_size)
-                torch.save(model.state_dict(), output_checkpoint_file)
-            else:
-                print(f"!! Loading unlearned checkpoint file:", output_checkpoint_file)
-                model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
-
-            test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
-                                          log_predictions=log_predictions)
-            test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
-    else:
-        selection_threshes = np.geomspace(0.001, 0.5, num=50)
-        fprs = []
-        tprs = []
-        for thresh in selection_threshes:
-            num_ex_unlearning = int(len(train_set) * thresh)
-            indices_to_maximize = loss_idx[:num_ex_unlearning]
-            indices_to_maximize = [int(ex_idx[i]) for i in indices_to_maximize]
-            identified_indices = np.array(indices_to_maximize)
-            fpr, tpr = get_confusion_stats(identified_indices, train_set, dataset_probe_identity, num_train_probes,
-                                           discarded_idx, verbose=False)
-            fprs.append(fpr)
-            tprs.append(tpr)
-        print("ABL AUC", sklearn.metrics.auc(fprs, tprs))
+        test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
+                                      log_predictions=log_predictions)
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)

@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torchvision import transforms
 import cv2
+from PIL import Image
 
 import dist_utils
 
@@ -198,7 +199,7 @@ def make_train_probes(num_classes, train_set, train_set_wo_aug, num_train_probes
     probes["all_backdoor_idx"] = probe_indices
 
     base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:]
-
+    # TODO: Add sleeper probe option...
     for suffix, indices in zip(('', '_val'), (base_idx, val_idx)):
         probe_transform, aux_data = make_probe_transform(train_probe_attack, img_size, output_dir, main_proc)
         backdoor_idx = indices[:num_train_probes]
@@ -214,7 +215,7 @@ def make_train_probes(num_classes, train_set, train_set_wo_aug, num_train_probes
     return probes, attack_target, aux_data
 
 
-def make_val_probes(num_classes, train_set, train_set_wo_aug, num_val_probes, val_probe_attacks, output_dir,
+def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_probes, val_probe_attacks, output_dir,
                     main_proc, img_size, device, train_probe_indices):
     val_probes = {}
     attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in val_probe_attacks}
@@ -226,13 +227,20 @@ def make_val_probes(num_classes, train_set, train_set_wo_aug, num_val_probes, va
     warping_grids = None
     chosen_indices = np.array([], dtype=int)
 
+    if 'sleeper' in val_probe_attacks:
+        attack_idx = add_sleeper_probes(val_probes, dataset, 'train', train_set, chosen_indices,
+                                        train_probe_indices, device, attack_numbers['sleeper'])
+        chosen_indices = np.concatenate((chosen_indices, attack_idx))
+
     for attack in val_probe_attacks:
+        if attack == 'sleeper':
+            continue
         target = attack_targets[attack]
         num = attack_numbers[attack]
 
         # For clean attacks, get clean indices to choose from.
         indices_to_choose_from = train_indices if attack not in CLEAN_LABEL_ATTACKS else \
-                                 np.where(train_set.targets == target)[0]
+            np.where(train_set.targets == target)[0]
 
         # don't let multiple attacks hit the same image, including train probe images.
         indices_to_choose_from = [i for i in indices_to_choose_from if i not in np.concatenate((chosen_indices,
@@ -259,12 +267,18 @@ def make_val_probes(num_classes, train_set, train_set_wo_aug, num_val_probes, va
     return val_probes, attack_targets, random_pattern, warping_grids
 
 
-def make_test_probes(test_set, num_test_probes, val_probe_attacks, attack_targets, random_pattern, warping_grids,
+def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets, random_pattern, warping_grids,
                      output_dir, main_proc, img_size, device):
     test_probes = {}
     all_test_indices = list(range(len(test_set)))
 
+    if 'sleeper' in val_probe_attacks:
+        add_sleeper_probes(test_probes, dataset, 'test', test_set, np.array([]),
+                           np.array([]), device, num_test_probes, track_idx=False)
+
     for attack in val_probe_attacks:
+        if attack == 'sleeper':
+            continue
         target = attack_targets[attack]
 
         aux_data = None
@@ -287,33 +301,80 @@ def make_test_probes(test_set, num_test_probes, val_probe_attacks, attack_target
     return test_probes
 
 
-def add_sleeper_probes(probe_dict, dataset, split, train_set, target_cls, chosen_indices, train_probe_indices, device,
+sleeper_classes = {
+    'cifar10': {
+        'train': 5,  # Train images are dogs
+        'test':  8
+    }
+}
+
+DATA_ROOT = "./data/"  # TODO: set this better, somehow resolve circular import risk?
+
+
+def add_sleeper_probes(probe_dict, dataset, split, train_set, chosen_indices, train_probe_indices, device,
                        num_idx, track_idx=True, compute_diffs=False):
+    """
+    probe_dict: dict to add data into
+    dataset: string dataset name
+    split: {'probe', 'train', 'test'}
+    train_set: train set (or test set; this is poorly named)
+    chosen_indices: indices that have already been chosen for other attacks, so avoid these. Should be empty...
+    train_probe_indices: indices for the train probes, avoid these too.
+    device: to load data onto.
+    num_idx: how many images to generate.
+    track_idx: save the indices?
+    compute_diff: compute the diff images?
+    """
     indices_to_choose_from = []
-    class_name = train_set.classes[target_cls]
-    data_dir = f"./data/sleeper_{dataset}/{split}/{class_name}"  # TODO: import data dir from dataset_utils?
+    attack_label = sleeper_classes[dataset]['train']  # Sleeper label is the same always.
+    class_name = train_set.classes[sleeper_classes[dataset][split]].split()[-1]
+
+    patch = Image.open(DATA_ROOT + f"sleeper_{dataset}/trigger_10.png")
+    patch_size = 3
+    patch = transforms.Resize(patch_size)(patch)  # TODO: is the size ever different?
+
+    # TODO: probe?
+    data_dir = DATA_ROOT + f"sleeper_{dataset}/{split}/{class_name}/"  # TODO: import data dir from dataset_utils?
+    image_size = train_set.data[0].shape[0]
+
+    indices_to_remove = []  # TODO: delete non-diff images to save time?
+    sleeper_images = []
+    indices_targeted = []
     for _, _, files in os.walk(data_dir):
         for file in files:
             if file.endswith('.png'):
-                indices_to_choose_from.append(int(file.split('.')[0]))
-    indices_to_choose_from = [i for i in indices_to_choose_from if i not in np.concatenate((chosen_indices,
-                                                                                            train_probe_indices))]
-    attack_idx = np.random.choice(indices_to_choose_from, size=min(num_idx, len(indices_to_choose_from)),
-                                  replace=False)
+                img = Image.open(data_dir + file)
+                image_index = int(file.split('.')[0])
+                if split == 'train':
+                    base_img = train_set.data[image_index]
+                    if (img - base_img).sum() == 0:
+                        indices_to_remove.append(image_index)
+                    elif image_index in np.concatenate((chosen_indices, train_probe_indices)):
+                        continue
+                    else:
+                        sleeper_images.append(img)
+                        indices_targeted.append(image_index)
+                if split == 'test':
+                    loc = np.random.randint(0, image_size - (patch_size - 1), size=(2,))
+                    img.paste(patch, box=tuple(loc))
+                    sleeper_images.append(img)
+                    indices_targeted.append(image_index)
 
-    sleeper_imgs = []
-    for idx in attack_idx:
-        sleeper_img_file = data_dir + f'/{str(idx)}.png'
-        sleeper_img = transforms.ToTensor()(cv2.imread(sleeper_img_file))
-        sleeper_imgs.append(sleeper_img)
+    sleeper_images = torch.stack([transforms.ToTensor()(img) for img in sleeper_images])
+    indices_targeted = np.array(indices_targeted)
+    random_idx = np.random.choice(range(len(sleeper_images)), size=min(num_idx, len(sleeper_images)), replace=False)
 
-    sleeper_imgs = torch.stack(sleeper_imgs)
-    attack_labels = np.array([target_cls for _ in attack_idx])
+    sleeper_images = sleeper_images[random_idx]
+    indices_targeted = indices_targeted[random_idx]
+
+    attack_labels = np.array([attack_label for _ in indices_targeted])
 
     if track_idx:
-        probe_dict[f"backdoor_sleeper_idx"] = attack_idx
-        probe_dict[f"backdoor_sleeper_original"] = torch.stack([dataset[i][0] for i in attack_idx], dim=0).to(device)
-    probe_dict[f"backdoor_sleeper"] = sleeper_imgs.to(device)
+        probe_dict[f"backdoor_sleeper_idx"] = indices_targeted
+        probe_dict[f"backdoor_sleeper_original"] = torch.stack([transforms.ToTensor()(train_set.data[i])
+                                                                for i in indices_targeted], dim=0).to(device)
+    probe_dict[f"backdoor_sleeper"] = sleeper_images.to(device)
     probe_dict[f"backdoor_sleeper_labels"] = torch.from_numpy(attack_labels).to(device)
     if compute_diffs and track_idx:
         probe_dict[f"backdoor_sleeper_diff"] = probe_dict[f"backdoor_sleeper_original"] - probe_dict[f"backdoor_sleeper"]
+    return indices_targeted
