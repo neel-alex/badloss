@@ -52,8 +52,10 @@ def get_optimizer(model, device, lr, momentum, wd, num_epochs, optimizer_name='a
 
 def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, log_predictions=False,
           use_autocast=False, flooding_threshold=None, loss_max_indices=None, gradient_ascent=False,
-          flooding_type='flooding'):
+          flooding_type='flooding', grad_clip=None):
     assert flooding_type in ['lga', 'flooding']
+    assert grad_clip is None or (not use_autocast and isinstance(grad_clip, float))
+    
     model.train()
     optimizer.zero_grad()
 
@@ -98,6 +100,9 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
             scaler.update()
         else:
             loss.backward()
+            if grad_clip is not None:
+                assert isinstance(grad_clip, float), grad_clip
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
         if log_predictions:
