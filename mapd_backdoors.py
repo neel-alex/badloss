@@ -936,10 +936,20 @@ if defense == "mapd":
         print("!! Final checkpoint written to file:", output_checkpoint)
 
 
+    def add_clean_to_output_dict(output_dict, model, device, criterion, test_loader, distributed, rank,
+                                 log_predictions):
+        out, _ = test(model, device, criterion, test_loader, distributed, rank, log_predictions=log_predictions)
+        output_dict['clean'] = {}
+        output_dict['clean']['accuracy'] = out['acc']
+        output_dict['clean']['total'] = out['total']
+        output_dict['clean']['correct'] = out['correct']
+
     # In[ ]:
     # Evaluate the attack success rate
     output_dict = test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
                                      tensor_batch_size)
+    add_clean_to_output_dict(output_dict, model, device, criterion, test_idx_loader, distributed, rank,
+                             log_predictions)
     output_file = os.path.join(experiment_output_dir, f"attack_success_initial.png")
     print(output_dict)
     plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model")
@@ -1026,6 +1036,8 @@ if defense == "mapd":
             output_dict = test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes,
                                              val_probe_attacks, tensor_batch_size)
 
+            add_clean_to_output_dict(output_dict, clean_model, device, criterion, test_idx_loader, distributed, rank,
+                                     log_predictions)
             output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
             plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title)
             print("~" * 100)
