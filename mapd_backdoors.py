@@ -208,15 +208,15 @@ if defense == "mapd":
 else:
     attack_types = [f"backdoor_{attack}" for attack in val_probe_attacks]
 
-train_probe, attack_target, aux_data = make_train_probes(num_classes, train_set, dataset, train_set_wo_aug,
-                                                        num_train_probes, train_probe_attack,
-                                                        experiment_output_dir, main_proc, img_size, device)
-
-val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, dataset, train_set, train_set_wo_aug,
+val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, dataset, train_set_wo_aug,
                                                                             num_val_probes, val_probe_attacks,
                                                                             experiment_output_dir, main_proc, img_size,
-                                                                            device,
-                                                                            train_probe_indices=train_probe["all_backdoor_idx"])
+                                                                            device,)
+
+train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, train_set_wo_aug,
+                                                        num_train_probes, train_probe_attack,
+                                                        experiment_output_dir, main_proc, img_size, device,
+                                                         val_probe_indices=val_probes["all_backdoor_idx"])
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
                                random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)

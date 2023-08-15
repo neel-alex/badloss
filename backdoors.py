@@ -15,7 +15,7 @@ SINUSOID_BACKDOOR_ALPHA = 0.075
 SINUSOID_BACKDOOR_FREQ = 6
 
 BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid'}
-BOOSTING_RATIO = 4
+BOOSTING_RATIO = 2
 CLEAN_LABEL_ATTACKS = {'sinusoid'}
 
 
@@ -195,13 +195,14 @@ def add_probe_data(probe_dict, key, indices, dataset, device, labels, transform=
         probe_dict[f"{key}_diff"] = probe_dict[f"{key}_original"] - probe_dict[f"{key}"]
 
 
-def make_train_probes(num_classes, train_set, dataset, train_set_wo_aug, num_train_probes,
-                      train_probe_attack, output_dir, main_proc, img_size, device):
+def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
+                      train_probe_attack, output_dir, main_proc, img_size, device, val_probe_indices):
     probes = {"backdoor": [], "clean": [], "backdoor_val": [], "clean_val": []}
     attack_target = np.random.choice(np.arange(num_classes))
     print("Chosen train probe target:", attack_target)
     train_indices = list(range(len(train_set_wo_aug)))
-    probe_indices = np.random.choice(train_indices, size=(4 * num_train_probes), replace=False)
+    valid_indices = [i for i in train_indices if i not in val_probe_indices]
+    probe_indices = np.random.choice(valid_indices, size=(4 * num_train_probes), replace=False)
     probes["all_backdoor_idx"] = probe_indices
 
     base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:]
@@ -221,8 +222,8 @@ def make_train_probes(num_classes, train_set, dataset, train_set_wo_aug, num_tra
     return probes, attack_target, aux_data
 
 
-def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_probes, val_probe_attacks, output_dir,
-                    main_proc, img_size, device, train_probe_indices):
+def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_probe_attacks, output_dir,
+                    main_proc, img_size, device):
     val_probes = {}
     attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in val_probe_attacks}
     if 'sleeper' in val_probe_attacks:
@@ -236,8 +237,8 @@ def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_p
     chosen_indices = np.array([], dtype=int)
 
     if 'sleeper' in val_probe_attacks:
-        attack_idx = add_sleeper_probes(val_probes, dataset, 'train', train_set_wo_aug, chosen_indices,
-                                        train_probe_indices, device, attack_numbers['sleeper'])
+        attack_idx = add_sleeper_probes(val_probes, dataset, 'train', train_set_wo_aug, img_size,
+                                        device, attack_numbers['sleeper'])
         chosen_indices = np.concatenate((chosen_indices, attack_idx))
         print(f"Backdoor (sleeper) probe shape:", val_probes[f"backdoor_sleeper"].shape)
 
@@ -256,8 +257,7 @@ def make_val_probes(num_classes, dataset, train_set, train_set_wo_aug, num_val_p
 
 
         # don't let multiple attacks hit the same image, including train probe images.
-        indices_to_choose_from = [i for i in indices_to_choose_from if i not in np.concatenate((chosen_indices,
-                                                                                                train_probe_indices))]
+        indices_to_choose_from = [i for i in indices_to_choose_from if i not in chosen_indices]
 
         attack_idx = np.random.choice(indices_to_choose_from, size=min(num, len(indices_to_choose_from)), replace=False)
         attack_labels = np.array([target for _ in attack_idx])
@@ -286,8 +286,7 @@ def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, atta
     all_test_indices = list(range(len(test_set)))
 
     if 'sleeper' in val_probe_attacks:
-        add_sleeper_probes(test_probes, dataset, 'test', test_set, np.array([]),
-                           np.array([]), device, num_test_probes, track_idx=False)
+        add_sleeper_probes(test_probes, dataset, 'test', test_set, img_size, device, num_test_probes, track_idx=False)
 
     for attack in val_probe_attacks:
         if attack == 'sleeper':
@@ -321,15 +320,15 @@ def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, atta
 
 sleeper_classes = {
     'cifar10': {
-        'train': 5,  # Train images are dogs
-        'test':  8
+        'train': 0,  # Train images are airplanes
+        'test':  7   # Source class is horses
     }
 }
 
 DATA_ROOT = "./data/"  # TODO: set this better, somehow resolve circular import risk?
 
 
-def add_sleeper_probes(probe_dict, dataset, split, train_set_wo_aug, chosen_indices, train_probe_indices, device,
+def add_sleeper_probes(probe_dict, dataset, split, train_set_wo_aug, image_size, device,
                        num_idx, track_idx=True, compute_diffs=False):
     """
     probe_dict: dict to add data into
@@ -348,12 +347,11 @@ def add_sleeper_probes(probe_dict, dataset, split, train_set_wo_aug, chosen_indi
     class_name = train_set_wo_aug.classes[sleeper_classes[dataset][split]].split()[-1]
 
     patch = Image.open(DATA_ROOT + f"sleeper_{dataset}/trigger_10.png")
-    patch_size = 3
+    patch_size = 8
     patch = transforms.Resize(patch_size)(patch)  # TODO: is the size ever different?
 
     # TODO: probe?
     data_dir = DATA_ROOT + f"sleeper_{dataset}/{split}/{class_name}/"  # TODO: import data dir from dataset_utils?
-    image_size = train_set_wo_aug[0][0].shape[0]
 
     indices_to_remove = []  # TODO: delete non-diff images to save time?
     sleeper_images = []
@@ -367,13 +365,11 @@ def add_sleeper_probes(probe_dict, dataset, split, train_set_wo_aug, chosen_indi
                     base_img = train_set_wo_aug[image_index][0]
                     if ImageChops.difference(img, transforms.ToPILImage()(base_img)).getbbox() is None:
                         indices_to_remove.append(image_index)
-                    elif image_index in np.concatenate((chosen_indices, train_probe_indices)):
-                        continue
                     else:
                         sleeper_images.append(img)
                         indices_targeted.append(image_index)
                 if split == 'test':
-                    loc = np.random.randint(0, image_size - (patch_size - 1), size=(2,))
+                    loc = np.random.randint(0, image_size[0] - (patch_size - 1), size=(2,))
                     img.paste(patch, box=tuple(loc))
                     sleeper_images.append(img)
                     indices_targeted.append(image_index)
