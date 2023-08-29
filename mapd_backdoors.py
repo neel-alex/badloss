@@ -408,9 +408,8 @@ if not os.path.exists(model_file):
         statistics.update({k+"_val": [] for k in ref_probe_classes})
         inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
 
-        surface_epoch = 5
-
         predictions = {}
+        save_models = False
 
         for epoch in range(num_epochs):
             output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
@@ -427,11 +426,11 @@ if not os.path.exists(model_file):
             if lr_scheduler is not None:
                 lr_scheduler.step()
 
-            if main_proc:
+            if main_proc and save_models:
                 # Save the model
                 model_file_base, model_file_ext = os.path.splitext(model_file)
                 current_model_file = f"{model_file_base}_ep_{epoch}{model_file_ext}"
-                # torch.save(model.state_dict(), current_model_file)
+                torch.save(model.state_dict(), current_model_file)
 
             # Close all figures
             plt.close('all')
