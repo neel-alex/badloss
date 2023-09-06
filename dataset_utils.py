@@ -190,12 +190,13 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
         probes_to_be_used = ["backdoor", "clean", "backdoor_val", "clean_val"]
         print("Selected probes to be used:", probes_to_be_used)
 
-        # Filter the train indexes
-        probe_identity = list(itertools.chain(*([identity] * num_train_probes
-                                                for identity in probes_to_be_used)))
-
         probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
         probe_labels = torch.cat([probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
+
+        # Filter the train indexes
+        probe_identity = list(itertools.chain(*([identity] * len(probes[identity])
+                                                for identity in probes_to_be_used)))
+
         assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
 
         # Shuffle
