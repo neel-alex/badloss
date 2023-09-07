@@ -81,8 +81,8 @@ print(dataset, attack, defense, poisoning_ratio)
 if attack == "all":
     train_probe_attack = "reversed_patch"
     val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
-    if dataset == "cifar10":  # TODO: Add sleeper fully...
-        val_probe_attacks.append("sleeper")
+    # if dataset == "cifar10":  # TODO: Add sleeper fully...
+    #     val_probe_attacks.append("sleeper")
 elif attack in {"patch", "single_pix", "fixed", "sinusoid"}:
     train_probe_attack = "reversed_" + attack
     val_probe_attacks = [attack]
@@ -125,8 +125,10 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-experiment_output_dir = f"./backdoor_exp06_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
-model_collection_dir = f"./backdoor_exp09_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+project_id = "exp20"
+experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+# model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+model_collection_dir = experiment_output_dir
 num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
@@ -309,8 +311,8 @@ label_map_dict = {"backdoor": "Backdoor (probe)",
 
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                            rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
-                                           tensor_batch_size,
-                                           statistics=None, predictions=None):
+                                           tensor_batch_size, statistics=None, predictions=None, use_eval_mode=True,
+                                           max_loss_val_bound=None):
     test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                   log_predictions=log_predictions)
     if statistics is not None:
@@ -319,7 +321,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
     if log_predictions:
         # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
         train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank,
-                                        set_name="Train", log_predictions=log_predictions)
+                                        set_name="Train", log_predictions=log_predictions, use_eval_mode=use_eval_mode,
+                                        max_loss_val_bound=max_loss_val_bound)
         if statistics is not None:
             statistics["train"].append(train_stats)
 
@@ -340,11 +343,13 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
                                        probes[f"{attack_type}_labels"],
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
-                                       log_predictions=log_predictions, batch_size=tensor_batch_size)
+                                       log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                       use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
                                                probes[f"{attack_type}_val_labels"],
                                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
-                                               log_predictions=log_predictions, batch_size=tensor_batch_size)
+                                               log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                               use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
                 predictions[epoch][attack_type+"_val"] = val_preds
@@ -356,7 +361,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
                                        probes[f"{attack_type}_labels"],
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
-                                       log_predictions=log_predictions, batch_size=tensor_batch_size)
+                                       log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                       use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
             if statistics is not None:
@@ -410,6 +416,10 @@ if not os.path.exists(model_file):
 
         predictions = {}
         save_models = False
+        uniform_dist_perplex = -np.log(1/num_classes)
+        max_loss_val_bound = uniform_dist_perplex  # equal to the entropy of a uniform distribution over classes
+        use_eval_mode = True  # eval mode BN
+        print(f"!! Using max loss bound: {max_loss_val_bound} / Eval mode: {use_eval_mode}")
 
         for epoch in range(num_epochs):
             output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
@@ -418,7 +428,8 @@ if not os.path.exists(model_file):
             print("Stats for epoch #", epoch+1)
             log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                                    rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
-                                                   statistics=statistics, predictions=predictions)
+                                                   statistics=statistics, predictions=predictions, use_eval_mode=use_eval_mode,
+                                                   max_loss_val_bound=max_loss_val_bound)
 
             if epoch % 5 == 4:
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
