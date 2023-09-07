@@ -471,6 +471,8 @@ def visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_ident
         x_axis = list(range(len(sorted_losses_all)))
         all_trajs = []
         for j in range(num_trajectories):
+            if j > len(relevant_idx) - 1:
+                break
             trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
             plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.05)
             all_trajs.append(trajectory)
@@ -556,6 +558,8 @@ def visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_pr
         x_axis = x_axis[:num_checkpoints_to_consider]  # Subsample
         all_trajs = []
         for j in range(num_trajectories):
+            if j > len(relevant_idx) - 1:
+                break
             trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
             trajectory = trajectory[:num_checkpoints_to_consider]  # Subsample
             plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.02)
