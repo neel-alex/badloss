@@ -646,8 +646,12 @@ def generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_p
         selected_trajs = embedded_trajectories[identifier]
         print(f"k: {k} / all trajs: {len(embedded_trajectories)} / seletected trajs: {np.sum(identifier)} (shape: {selected_trajs.shape})")
         
-        # Select and plot a small number of points
-        selected_points = rng.choice(len(selected_trajs), size=250, replace=False)
+        # Select and plot a small number of points#
+        selection_size = 250
+        if len(selected_trajs) > selection_size:
+            selected_points = rng.choice(len(selected_trajs), size=selection_size, replace=False)
+        else:
+            selected_points = np.arange(len(selected_trajs))
         alpha = 0.2
         label = label_map_dict[k].replace(" [Val]", "")
         plt.scatter(selected_trajs[selected_points, 0], selected_trajs[selected_points, 1], alpha=alpha, color=color_list[i], label=label)
