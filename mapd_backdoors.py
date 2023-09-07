@@ -313,7 +313,9 @@ label_map_dict = {"backdoor": "Backdoor (probe)",
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                            rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
                                            tensor_batch_size, statistics=None, predictions=None, use_eval_mode=True,
-                                           max_loss_val_bound=None):
+                                           max_loss_val_bound=None, moving_avg_weight=None):
+    assert moving_avg_weight is None or 0. <= moving_avg_weight <= 1., moving_avg_weight
+
     test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                   log_predictions=log_predictions)
     if statistics is not None:
@@ -332,6 +334,11 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             predictions[epoch] = {}  # Dict of dict
             predictions[epoch]["train"] = train_preds
             predictions[epoch]["test"] = test_preds
+            if moving_avg_weight is not None and len(predictions) > 1:
+                for split in ["train", "test"]:
+                    old_vals = predictions[epoch-1][split]["loss"]
+                    new_vals = predictions[epoch][split]["loss"]
+                    predictions[epoch][split]["loss"] = moving_avg_weight * old_vals + (1. - moving_avg_weight) * new_vals
 
     # Collect probe statistics
     if defense == "mapd":
@@ -354,6 +361,11 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
                 predictions[epoch][attack_type+"_val"] = val_preds
+                if moving_avg_weight is not None and len(predictions) > 1:  # more than one epochs completed
+                    for suffix in ["", "_val"]:
+                        old_vals = predictions[epoch-1][attack_type+suffix]["loss_vals"]
+                        new_vals = predictions[epoch][attack_type+suffix]["loss_vals"]
+                        predictions[epoch][attack_type+suffix]["loss_vals"] = moving_avg_weight * old_vals + (1. - moving_avg_weight) * new_vals
             if statistics is not None:
                 statistics[attack_type].append(stats)
                 statistics[attack_type+"_val"].append(val_stats)
@@ -366,6 +378,10 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                        use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
+                if moving_avg_weight is not None and len(predictions) > 1:
+                    old_vals = predictions[epoch-1][attack_type]["loss_vals"]
+                    new_vals = predictions[epoch][attack_type]["loss_vals"]
+                    predictions[epoch][attack_type]["loss_vals"] = moving_avg_weight * old_vals + (1. - moving_avg_weight) * new_vals
             if statistics is not None:
                 statistics[attack_type].append(stats)
 
@@ -418,9 +434,10 @@ if not os.path.exists(model_file):
         predictions = {}
         save_models = False
         uniform_dist_perplex = -math.log(1/num_classes)
-        max_loss_val_bound = uniform_dist_perplex  # equal to twice the entropy of a uniform distribution over classes
+        max_loss_val_bound = 2 * uniform_dist_perplex  # equal to twice the entropy of a uniform distribution over classes
         use_eval_mode = True  # eval mode BN
         print(f"!! Using max loss bound: {max_loss_val_bound} / Eval mode: {use_eval_mode}")
+        moving_avg_weight = 0.5
 
         for epoch in range(num_epochs):
             output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
@@ -430,7 +447,7 @@ if not os.path.exists(model_file):
             log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                                    rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
                                                    statistics=statistics, predictions=predictions, use_eval_mode=use_eval_mode,
-                                                   max_loss_val_bound=max_loss_val_bound)
+                                                   max_loss_val_bound=max_loss_val_bound, moving_avg_weight=moving_avg_weight)
 
             if epoch % 5 == 4:
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
