@@ -7,14 +7,15 @@
 
 ##
 
-import copy
-import natsort
 import os
+import sys
+import math
+import copy
 import pickle
 import shutil
-import sys
-import warnings
 import random
+import natsort
+import warnings
 from tqdm import tqdm
 from collections import Counter
 
@@ -416,8 +417,8 @@ if not os.path.exists(model_file):
 
         predictions = {}
         save_models = False
-        uniform_dist_perplex = -np.log(1/num_classes)
-        max_loss_val_bound = uniform_dist_perplex  # equal to the entropy of a uniform distribution over classes
+        uniform_dist_perplex = -math.log(1/num_classes)
+        max_loss_val_bound = uniform_dist_perplex  # equal to twice the entropy of a uniform distribution over classes
         use_eval_mode = True  # eval mode BN
         print(f"!! Using max loss bound: {max_loss_val_bound} / Eval mode: {use_eval_mode}")
 

@@ -200,7 +200,7 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
         targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
         if max_loss_val_bound is not None:
-            loss_values = torch.clamp(loss_values, 0, max_loss_val_bound)
+            loss_values = np.clip(loss_values, 0, max_loss_val_bound)
         pred_output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
     return output_dict, pred_output_dict
 
@@ -208,7 +208,7 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
 # In[ ]:
 
 
-def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False,
+def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False, batch_size=None,
                 use_eval_mode=True, max_loss_val_bound=None):
     assert torch.is_tensor(data) and torch.is_tensor(target)
     if use_eval_mode:
@@ -260,7 +260,7 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
         pred_dict = {}
         pred_dict["ex_idx"] = np.arange(len(loss_vals))
         if max_loss_val_bound is not None:
-            loss_vals = torch.clamp(loss_vals, 0, max_loss_val_bound)
+            loss_vals = np.clip(loss_vals, 0, max_loss_val_bound)
         pred_dict["loss_vals"] = loss_vals
         pred_dict["preds"] = pred.detach().cpu().numpy()
         pred_dict["targets"] = target.detach().cpu().numpy()
