@@ -257,6 +257,7 @@ tensor_batch_size = batch_size if dataset == "gtsrb" else None
 lr = 0.1
 momentum = 0.9
 wd = 0.0001
+moving_avg_weight = None
 
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
@@ -313,9 +314,7 @@ label_map_dict = {"backdoor": "Backdoor (probe)",
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                            rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
                                            tensor_batch_size, epoch, statistics=None, predictions=None, use_eval_mode=True,
-                                           max_loss_val_bound=None, moving_avg_weight=None):
-    assert moving_avg_weight is None or 0. <= moving_avg_weight <= 1., moving_avg_weight
-
+                                           max_loss_val_bound=None):
     test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                   log_predictions=log_predictions)
     if statistics is not None:
@@ -334,11 +333,6 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             predictions[epoch] = {}  # Dict of dict
             predictions[epoch]["train"] = train_preds
             predictions[epoch]["test"] = test_preds
-            if moving_avg_weight is not None and len(predictions) > 1:
-                for split in ["train", "test"]:
-                    old_vals = predictions[epoch-1][split]["loss"]
-                    new_vals = predictions[epoch][split]["loss"]
-                    predictions[epoch][split]["loss"] = moving_avg_weight * old_vals + (1. - moving_avg_weight) * new_vals
 
     # Collect probe statistics
     if defense == "mapd":
@@ -361,11 +355,6 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
                 predictions[epoch][attack_type+"_val"] = val_preds
-                if moving_avg_weight is not None and len(predictions) > 1:  # more than one epochs completed
-                    for suffix in ["", "_val"]:
-                        old_vals = predictions[epoch-1][attack_type+suffix]["loss_vals"]
-                        new_vals = predictions[epoch][attack_type+suffix]["loss_vals"]
-                        predictions[epoch][attack_type+suffix]["loss_vals"] = moving_avg_weight * old_vals + (1. - moving_avg_weight) * new_vals
             if statistics is not None:
                 statistics[attack_type].append(stats)
                 statistics[attack_type+"_val"].append(val_stats)
@@ -378,10 +367,6 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                        use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
-                if moving_avg_weight is not None and len(predictions) > 1:
-                    old_vals = predictions[epoch-1][attack_type]["loss_vals"]
-                    new_vals = predictions[epoch][attack_type]["loss_vals"]
-                    predictions[epoch][attack_type]["loss_vals"] = moving_avg_weight * old_vals + (1. - moving_avg_weight) * new_vals
             if statistics is not None:
                 statistics[attack_type].append(stats)
 
@@ -447,8 +432,7 @@ if not os.path.exists(model_file):
             log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                                    rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
                                                    tensor_batch_size, epoch, statistics=statistics, predictions=predictions,
-                                                   use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound,
-                                                   moving_avg_weight=moving_avg_weight)
+                                                   use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
 
             if epoch % 5 == 4:
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
@@ -663,6 +647,11 @@ if defense == "mapd":
         current_sorted_loss_vals = [None for _ in range(len(dataset_probe_identity))]  # Includes both the training set as well as the probes i.e. len(comb_train_set)
         for j, k in enumerate(current_ex_idx):
             current_sorted_loss_vals[k] = current_loss_vals[j]
+        if moving_avg_weight is not None and i > 0:
+            old_vals = np.array(sorted_losses_all[-1])
+            new_vals = np.array(current_sorted_loss_vals)
+            new_vals[new_vals != None] = moving_avg_weight * old_vals[old_vals != None] + (1. - moving_avg_weight) * new_vals[new_vals != None]
+            current_sorted_loss_vals = new_vals.tolist()
         sorted_losses_all.append(current_sorted_loss_vals)
 
 
