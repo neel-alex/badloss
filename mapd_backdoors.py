@@ -312,7 +312,7 @@ label_map_dict = {"backdoor": "Backdoor (probe)",
 
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                            rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
-                                           tensor_batch_size, statistics=None, predictions=None, use_eval_mode=True,
+                                           tensor_batch_size, epoch, statistics=None, predictions=None, use_eval_mode=True,
                                            max_loss_val_bound=None, moving_avg_weight=None):
     assert moving_avg_weight is None or 0. <= moving_avg_weight <= 1., moving_avg_weight
 
@@ -408,8 +408,8 @@ if not os.path.exists(model_file):
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
-                                                       distributed,
-                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size)
+                                                       distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                       val_probes, defense, tensor_batch_size, epoch)
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
                                    tensor_batch_size)
                 if main_proc:
@@ -445,9 +445,10 @@ if not os.path.exists(model_file):
             # Collect test set statistics
             print("Stats for epoch #", epoch+1)
             log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
-                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
-                                                   statistics=statistics, predictions=predictions, use_eval_mode=use_eval_mode,
-                                                   max_loss_val_bound=max_loss_val_bound, moving_avg_weight=moving_avg_weight)
+                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
+                                                   tensor_batch_size, epoch, statistics=statistics, predictions=predictions,
+                                                   use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound,
+                                                   moving_avg_weight=moving_avg_weight)
 
             if epoch % 5 == 4:
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
@@ -1202,7 +1203,8 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader, distributed,
-                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size)  # TODO: Add other args...
+                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
+                                                       epoch)  # TODO: Add other args...
             if clean_lr_scheduler is not None:
                 clean_lr_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint)
@@ -1213,7 +1215,8 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     # Evaluate accuracy
     print("Retrained model performance:")
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader,
-                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense, tensor_batch_size)
+                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense,
+                                           tensor_batch_size, num_epochs+1)
     test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, val_probe_attacks, tensor_batch_size)
     return clean_model
 
@@ -1642,7 +1645,7 @@ if defense == "abl":
             if epoch % 5 == 4:
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                       val_probes, defense, tensor_batch_size)
+                                                       val_probes, defense, tensor_batch_size, epoch)
         torch.save(model.state_dict(), output_checkpoint_file)
     else:
         print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
@@ -1721,7 +1724,7 @@ if defense == "abl":
                 if epoch % 5 == 4:
                     log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                            distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, defense, tensor_batch_size)
+                                                           val_probes, defense, tensor_batch_size, epoch)
             torch.save(model.state_dict(), output_checkpoint_file)
         else:
             print(f"!! Loading clean finetuned checkpoint file:", output_checkpoint_file)
@@ -1739,7 +1742,7 @@ if defense == "abl":
                 if epoch % 5 == 4:
                     log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                            distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, defense, tensor_batch_size)
+                                                           val_probes, defense, tensor_batch_size, epoch)
             torch.save(model.state_dict(), output_checkpoint_file)
         else:
             print(f"!! Loading unlearned checkpoint file:", output_checkpoint_file)
