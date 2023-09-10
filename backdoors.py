@@ -218,8 +218,11 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
     train_indices = list(range(len(train_set_wo_aug)))
     valid_indices = [i for i in train_indices if i not in val_probe_indices]
     base_splits = 4
-    num_splits = base_splits + (1 if include_harder_backdoor_probes else 0)
-    probe_indices = np.random.choice(valid_indices, size=(num_splits * num_train_probes), replace=False)
+    num_examples = (base_splits * num_train_probes)
+    if include_harder_backdoor_probes:
+        hard_probe_size = num_train_probes
+        num_examples += hard_probe_size
+    probe_indices = np.random.choice(valid_indices, size=num_examples, replace=False)
     probes["all_backdoor_idx"] = probe_indices
 
     base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:4*num_train_probes]
@@ -237,9 +240,11 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
         add_probe_data(probes, "clean"+suffix, clean_idx, train_set_wo_aug, device, clean_labels)
 
     if include_harder_backdoor_probes:
-        print("!! Adding harder backdoor examples with mislabeled probe...")
         mislabeled_probe_idx = probe_indices[4*num_train_probes:]
-        probe_labels = np.array([np.random.choice(np.arange(num_classes)) for _ in mislabeled_probe_idx])
+        print(f"!! Adding {len(mislabeled_probe_idx)} harder backdoor examples with mislabeled probe...")
+        orig_labels = np.array([train_set_wo_aug[i][1] for i in mislabeled_probe_idx])
+        all_classes = np.arange(num_classes)
+        probe_labels = np.array([np.random.choice(all_classes[orig_label != all_classes]) for orig_label in orig_labels])
         add_probe_data(probes, "backdoor", mislabeled_probe_idx, train_set_wo_aug, device, probe_labels,
                        override_dict_key=False)
 

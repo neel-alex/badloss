@@ -242,7 +242,7 @@ if dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
-    num_epochs = 150
+    num_epochs = 10
     batch_size = 128
 else:
     assert dataset == "imagenet" or dataset == "gtsrb"
@@ -419,10 +419,10 @@ if not os.path.exists(model_file):
         predictions = {}
         save_models = False
         uniform_dist_perplex = -math.log(1/num_classes)
-        max_loss_val_bound = 2 * uniform_dist_perplex  # equal to twice the entropy of a uniform distribution over classes
+        max_loss_val_bound = None # 2 * uniform_dist_perplex  # equal to twice the entropy of a uniform distribution over classes
         use_eval_mode = True  # eval mode BN
         print(f"!! Using max loss bound: {max_loss_val_bound} / Eval mode: {use_eval_mode}")
-        moving_avg_weight = 0.5
+        moving_avg_weight = None
 
         for epoch in range(num_epochs):
             output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
@@ -750,7 +750,7 @@ if defense == "mapd":
 
 
     print("Training the trajectory classifier...")
-    n_neighbors = 20
+    n_neighbors = 20  # TODO: Change the number of nearest neighbors here
     clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
     clf.fit(probe_train_x, probe_train_y)
 
