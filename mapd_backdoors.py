@@ -90,7 +90,7 @@ elif attack in {"patch", "single_pix", "fixed", "sinusoid"}:
 else:
     train_probe_attack = attack
     val_probe_attacks = [attack]
-num_train_probes = 250  # Fixed number -- 4x this many probes will be made
+num_train_probes = 500  # Fixed number -- 4x this many probes will be made
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,
@@ -132,8 +132,6 @@ experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'
 model_collection_dir = experiment_output_dir
 num_workers = 8
 surface_examples = False
-aux_loss_lambda = 1.0  # Based on the experiments with center loss
-feat_dim = 2048  # Feature dimensions for ResNet-50
 
 print("Dataset:", dataset)
 print("Distributed training:", distributed)
@@ -242,7 +240,7 @@ if dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
-    num_epochs = 10
+    num_epochs = 100
     batch_size = 128
 else:
     assert dataset == "imagenet" or dataset == "gtsrb"
@@ -675,9 +673,11 @@ if defense == "mapd":
         visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_probe_identity,
                                              sorted_losses_all, experiment_output_dir, main_proc,
                                              dataset, output_file=None)
-        generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
-                                              sorted_losses_all, experiment_output_dir, main_proc,
-                                              dataset, output_file=None, embedding_type='tsne')
+        generate_tsne_plot = False
+        if generate_tsne_plot:
+            generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
+                                                sorted_losses_all, experiment_output_dir, main_proc,
+                                                dataset, output_file=None, embedding_type='tsne')
 
     # Convert the data into a complete trajectory dataset
     print("Converting trajectories to dataset...")

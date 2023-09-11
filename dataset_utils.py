@@ -57,7 +57,7 @@ def load_class_mapping(dataset):
     return label2name, name2label
 
 
-def get_settings_for_dataset(dataset):
+def get_settings_for_dataset(dataset, use_augmentations=False):
     # data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
     data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
     if "mnist" in dataset:
@@ -75,6 +75,8 @@ def get_settings_for_dataset(dataset):
                            transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
                            transforms.ToTensor()]
         test_transform = [transforms.ToTensor()]
+        if not use_augmentations:
+            train_transform = test_transform
         no_transform = test_transform
 
         DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
@@ -87,7 +89,6 @@ def get_settings_for_dataset(dataset):
         assert dataset == "imagenet" or dataset == "gtsrb"
         img_size = (224, 224, 3)
 
-        use_augmentations = True
         if use_augmentations:
             print("Training w/ augmentations...")
             train_transform = [transforms.RandomResizedCrop(224),
