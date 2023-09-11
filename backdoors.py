@@ -63,7 +63,7 @@ class ClampRangeTransform(object):
 
 
 class WarpingAttack(object):
-    def __init__(self, img_size, s=0.5, k=4, grid_rescale=1.0, identity_grid=None, noise_grid=None):
+    def __init__(self, img_size, s=0.75, k=6, grid_rescale=1.0, identity_grid=None, noise_grid=None):
         self.img_size = img_size
         self.s = s
         self.k = k
@@ -320,8 +320,8 @@ def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, atta
 
 sleeper_classes = {
     'cifar10': {
-        'train': 0,  # Train images are airplanes
-        'test':  7   # Source class is horses
+        'train': 6,  # Train images are frogs
+        'test':  4   # Source class is deer
     }
 }
 
