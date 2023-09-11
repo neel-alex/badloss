@@ -126,7 +126,7 @@ font_size = 16
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
 experiment_output_dir = f"./backdoor_exp06_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
-model_collection_dir = f"./backdoor_exp09_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+model_collection_dir = f"./backdoor_exp10_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 num_workers = 8
 surface_examples = False
 aux_loss_lambda = 1.0  # Based on the experiments with center loss
@@ -214,8 +214,8 @@ val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_
                                                                             device,)
 
 train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, train_set_wo_aug,
-                                                        num_train_probes, train_probe_attack,
-                                                        experiment_output_dir, main_proc, img_size, device,
+                                                         num_train_probes, train_probe_attack,
+                                                         experiment_output_dir, main_proc, img_size, device,
                                                          val_probe_indices=val_probes["all_backdoor_idx"])
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
