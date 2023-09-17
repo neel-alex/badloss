@@ -471,6 +471,8 @@ def visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_ident
         x_axis = list(range(len(sorted_losses_all)))
         all_trajs = []
         for j in range(num_trajectories):
+            if j > len(relevant_idx) - 1:
+                break
             trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
             plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.05)
             all_trajs.append(trajectory)
@@ -556,6 +558,8 @@ def visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_pr
         x_axis = x_axis[:num_checkpoints_to_consider]  # Subsample
         all_trajs = []
         for j in range(num_trajectories):
+            if j > len(relevant_idx) - 1:
+                break
             trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
             trajectory = trajectory[:num_checkpoints_to_consider]  # Subsample
             plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.02)
@@ -642,8 +646,12 @@ def generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_p
         selected_trajs = embedded_trajectories[identifier]
         print(f"k: {k} / all trajs: {len(embedded_trajectories)} / seletected trajs: {np.sum(identifier)} (shape: {selected_trajs.shape})")
         
-        # Select and plot a small number of points
-        selected_points = rng.choice(len(selected_trajs), size=250, replace=False)
+        # Select and plot a small number of points#
+        selection_size = 250
+        if len(selected_trajs) > selection_size:
+            selected_points = rng.choice(len(selected_trajs), size=selection_size, replace=False)
+        else:
+            selected_points = np.arange(len(selected_trajs))
         alpha = 0.2
         label = label_map_dict[k].replace(" [Val]", "")
         plt.scatter(selected_trajs[selected_points, 0], selected_trajs[selected_points, 1], alpha=alpha, color=color_list[i], label=label)

@@ -26,8 +26,8 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False):
         ]))
         model = model.to(device)
     else:
-        # Create ResNet-50
-        model = models.resnet50(pretrained=False, num_classes=num_classes)
+        # Create ResNet-18
+        model = models.resnet18(pretrained=False, num_classes=num_classes)
         if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
             model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
@@ -38,15 +38,19 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False):
     return model
 
 
-def get_optimizer(model, device, lr, momentum, wd, num_epochs, optimizer_name='adamw'):
+def get_optimizer(model, device, lr, momentum, wd, num_epochs, optimizer_name='adamw', use_scaler=False):
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
     if optimizer_name == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    elif optimizer_name == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=wd)
     else:
         assert optimizer_name == 'adamw'
         optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=wd)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = None
+    if use_scaler:
+        scaler = torch.cuda.amp.GradScaler()
     return criterion, optimizer, lr_scheduler, scaler
 
 
@@ -130,8 +134,12 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
 # In[ ]:
 
 
-def test(model, device, criterion, test_loader, distributed, rank, set_name="Test", log_predictions=False):
-    model.eval()
+def test(model, device, criterion, test_loader, distributed, rank, set_name="Test", log_predictions=False,
+         use_eval_mode=True, max_loss_val_bound=None):
+    if use_eval_mode:
+        model.eval()
+    else:
+        model.train()
 
     correct = torch.tensor([0]).to(device)
     test_loss = torch.tensor([0.0]).to(device)
@@ -195,6 +203,8 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
         predictions = torch.cat(dist_utils.gather_tensor(torch.cat(predictions, dim=0)), dim=0).detach().cpu().numpy()
         targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
+        if max_loss_val_bound is not None:
+            loss_values = np.clip(loss_values, 0, max_loss_val_bound)
         pred_output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
     return output_dict, pred_output_dict
 
@@ -202,10 +212,14 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
 # In[ ]:
 
 
-def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False, batch_size=None):
+def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False, batch_size=None,
+                use_eval_mode=True, max_loss_val_bound=None):
     assert torch.is_tensor(data) and torch.is_tensor(target)
+    if use_eval_mode:
+        model.eval()
+    else:
+        model.train()
 
-    model.eval()
     with torch.no_grad():
         if batch_size is None:
             output = model(data)
@@ -249,6 +263,8 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
     if log_predictions:
         pred_dict = {}
         pred_dict["ex_idx"] = np.arange(len(loss_vals))
+        if max_loss_val_bound is not None:
+            loss_vals = np.clip(loss_vals, 0, max_loss_val_bound)
         pred_dict["loss_vals"] = loss_vals
         pred_dict["preds"] = pred.detach().cpu().numpy()
         pred_dict["targets"] = target.detach().cpu().numpy()

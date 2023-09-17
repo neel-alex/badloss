@@ -181,31 +181,51 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
 
 
 def add_probe_data(probe_dict, key, indices, dataset, device, labels, transform=None,
-                   track_idx=True, compute_diffs=False):
-    if track_idx:
-        probe_dict[f"{key}_idx"] = indices
-    if transform is not None:
-        if track_idx:
-            probe_dict[f"{key}_original"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
-        probe_dict[f"{key}"] = torch.stack([transform(dataset[i][0]) for i in indices], dim=0).to(device)
+                   track_idx=True, compute_diffs=False, override_dict_key=True):
+    if not override_dict_key:
+        assert key in probe_dict, "key should be in the data dict when concatenation is desired"
+        assert transform is None, "Only supported for mislabeled probe"
+        print(f"!! [WARNING] Key ({key}) already found in the probe dict. Appending new data to it.")
+        if f"{key}_idx" in probe_dict:
+            assert isinstance(probe_dict[f"{key}_idx"], np.ndarray)
+            probe_dict[f"{key}_idx"] = np.concatenate([probe_dict[f"{key}_idx"], indices])
+
+        # Concatenate the new examples with the old examples
+        new_ex = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
+        probe_dict[f"{key}"] = torch.cat([probe_dict[f"{key}"], new_ex], dim=0)
+        new_labels = torch.from_numpy(labels).to(device)
+        probe_dict[f"{key}_labels"] = torch.cat([probe_dict[f"{key}_labels"], new_labels], dim=0)
     else:
-        probe_dict[f"{key}"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
-    probe_dict[f"{key}_labels"] = torch.from_numpy(labels).to(device)
-    if compute_diffs and transform is not None and track_idx:
-        probe_dict[f"{key}_diff"] = probe_dict[f"{key}_original"] - probe_dict[f"{key}"]
+        if track_idx:
+            probe_dict[f"{key}_idx"] = indices
+        if transform is not None:
+            if track_idx:
+                probe_dict[f"{key}_original"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
+            probe_dict[f"{key}"] = torch.stack([transform(dataset[i][0]) for i in indices], dim=0).to(device)
+        else:
+            probe_dict[f"{key}"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
+        probe_dict[f"{key}_labels"] = torch.from_numpy(labels).to(device)
+        if compute_diffs and transform is not None and track_idx:
+            probe_dict[f"{key}_diff"] = probe_dict[f"{key}_original"] - probe_dict[f"{key}"]
 
 
 def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
-                      train_probe_attack, output_dir, main_proc, img_size, device, val_probe_indices):
+                      train_probe_attack, output_dir, main_proc, img_size, device,
+                      val_probe_indices, include_harder_backdoor_probes=True):
     probes = {"backdoor": [], "clean": [], "backdoor_val": [], "clean_val": []}
     attack_target = np.random.choice(np.arange(num_classes))
     print("Chosen train probe target:", attack_target)
     train_indices = list(range(len(train_set_wo_aug)))
     valid_indices = [i for i in train_indices if i not in val_probe_indices]
-    probe_indices = np.random.choice(valid_indices, size=(4 * num_train_probes), replace=False)
+    base_splits = 4
+    num_examples = (base_splits * num_train_probes)
+    if include_harder_backdoor_probes:
+        hard_probe_size = num_train_probes
+        num_examples += hard_probe_size
+    probe_indices = np.random.choice(valid_indices, size=num_examples, replace=False)
     probes["all_backdoor_idx"] = probe_indices
 
-    base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:]
+    base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:4*num_train_probes]
     # TODO: Add sleeper probe option...
     for suffix, indices in zip(('', '_val'), (base_idx, val_idx)):
         probe_transform, aux_data = make_probe_transform(train_probe_attack, img_size, dataset, output_dir, main_proc)
@@ -218,6 +238,15 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
         clean_labels = np.array([train_set_wo_aug[i][1] for i in clean_idx])
 
         add_probe_data(probes, "clean"+suffix, clean_idx, train_set_wo_aug, device, clean_labels)
+
+    if include_harder_backdoor_probes:
+        mislabeled_probe_idx = probe_indices[4*num_train_probes:]
+        print(f"!! Adding {len(mislabeled_probe_idx)} harder backdoor examples with mislabeled probe...")
+        orig_labels = np.array([train_set_wo_aug[i][1] for i in mislabeled_probe_idx])
+        all_classes = np.arange(num_classes)
+        probe_labels = np.array([np.random.choice(all_classes[orig_label != all_classes]) for orig_label in orig_labels])
+        add_probe_data(probes, "backdoor", mislabeled_probe_idx, train_set_wo_aug, device, probe_labels,
+                       override_dict_key=False)
 
     return probes, attack_target, aux_data
 

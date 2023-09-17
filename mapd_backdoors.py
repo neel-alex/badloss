@@ -7,14 +7,15 @@
 
 ##
 
-import copy
-import natsort
 import os
+import sys
+import math
+import copy
 import pickle
 import shutil
-import sys
-import warnings
 import random
+import natsort
+import warnings
 from tqdm import tqdm
 from collections import Counter
 
@@ -81,15 +82,15 @@ print(dataset, attack, defense, poisoning_ratio)
 if attack == "all":
     train_probe_attack = "reversed_patch"
     val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
-    if dataset == "cifar10":  # TODO: Add sleeper fully...
-        val_probe_attacks.append("sleeper")
+    # if dataset == "cifar10":  # TODO: Add sleeper fully...
+    #     val_probe_attacks.append("sleeper")
 elif attack in {"patch", "single_pix", "fixed", "sinusoid"}:
     train_probe_attack = "reversed_" + attack
     val_probe_attacks = [attack]
 else:
     train_probe_attack = attack
     val_probe_attacks = [attack]
-num_train_probes = 250  # Fixed number -- 4x this many probes will be made
+num_train_probes = 500  # Fixed number -- 4x this many probes will be made
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,
@@ -125,12 +126,12 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-experiment_output_dir = f"./backdoor_exp06_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
-model_collection_dir = f"./backdoor_exp10_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+project_id = "exp20"
+experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+# model_collection_dir = experiment_output_dir
 num_workers = 8
 surface_examples = False
-aux_loss_lambda = 1.0  # Based on the experiments with center loss
-feat_dim = 2048  # Feature dimensions for ResNet-50
 
 print("Dataset:", dataset)
 print("Distributed training:", distributed)
@@ -239,7 +240,7 @@ if dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
-    num_epochs = 150
+    num_epochs = 100
     batch_size = 128
 else:
     assert dataset == "imagenet" or dataset == "gtsrb"
@@ -254,6 +255,7 @@ tensor_batch_size = batch_size if dataset == "gtsrb" else None
 lr = 0.1
 momentum = 0.9
 wd = 0.0001
+moving_avg_weight = None
 
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
@@ -309,8 +311,8 @@ label_map_dict = {"backdoor": "Backdoor (probe)",
 
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                            rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
-                                           tensor_batch_size,
-                                           statistics=None, predictions=None):
+                                           tensor_batch_size, epoch, statistics=None, predictions=None, use_eval_mode=True,
+                                           max_loss_val_bound=None):
     test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                   log_predictions=log_predictions)
     if statistics is not None:
@@ -319,7 +321,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
     if log_predictions:
         # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
         train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank,
-                                        set_name="Train", log_predictions=log_predictions)
+                                        set_name="Train", log_predictions=log_predictions, use_eval_mode=use_eval_mode,
+                                        max_loss_val_bound=max_loss_val_bound)
         if statistics is not None:
             statistics["train"].append(train_stats)
 
@@ -340,11 +343,13 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
                                        probes[f"{attack_type}_labels"],
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
-                                       log_predictions=log_predictions, batch_size=tensor_batch_size)
+                                       log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                       use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
                                                probes[f"{attack_type}_val_labels"],
                                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
-                                               log_predictions=log_predictions, batch_size=tensor_batch_size)
+                                               log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                               use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
                 predictions[epoch][attack_type+"_val"] = val_preds
@@ -356,7 +361,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
                                        probes[f"{attack_type}_labels"],
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
-                                       log_predictions=log_predictions, batch_size=tensor_batch_size)
+                                       log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                       use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
             if statistics is not None:
@@ -385,8 +391,8 @@ if not os.path.exists(model_file):
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
-                                                       distributed,
-                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size)
+                                                       distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                       val_probes, defense, tensor_batch_size, epoch)
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
                                    tensor_batch_size)
                 if main_proc:
@@ -410,6 +416,11 @@ if not os.path.exists(model_file):
 
         predictions = {}
         save_models = False
+        uniform_dist_perplex = -math.log(1/num_classes)
+        max_loss_val_bound = None # 2 * uniform_dist_perplex  # equal to twice the entropy of a uniform distribution over classes
+        use_eval_mode = True  # eval mode BN
+        print(f"!! Using max loss bound: {max_loss_val_bound} / Eval mode: {use_eval_mode}")
+        moving_avg_weight = None
 
         for epoch in range(num_epochs):
             output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
@@ -417,8 +428,9 @@ if not os.path.exists(model_file):
             # Collect test set statistics
             print("Stats for epoch #", epoch+1)
             log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
-                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
-                                                   statistics=statistics, predictions=predictions)
+                                                   rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
+                                                   tensor_batch_size, epoch, statistics=statistics, predictions=predictions,
+                                                   use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
 
             if epoch % 5 == 4:
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
@@ -633,6 +645,11 @@ if defense == "mapd":
         current_sorted_loss_vals = [None for _ in range(len(dataset_probe_identity))]  # Includes both the training set as well as the probes i.e. len(comb_train_set)
         for j, k in enumerate(current_ex_idx):
             current_sorted_loss_vals[k] = current_loss_vals[j]
+        if moving_avg_weight is not None and i > 0:
+            old_vals = np.array(sorted_losses_all[-1])
+            new_vals = np.array(current_sorted_loss_vals)
+            new_vals[new_vals != None] = moving_avg_weight * old_vals[old_vals != None] + (1. - moving_avg_weight) * new_vals[new_vals != None]
+            current_sorted_loss_vals = new_vals.tolist()
         sorted_losses_all.append(current_sorted_loss_vals)
 
 
@@ -656,9 +673,11 @@ if defense == "mapd":
         visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_probe_identity,
                                              sorted_losses_all, experiment_output_dir, main_proc,
                                              dataset, output_file=None)
-        generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
-                                              sorted_losses_all, experiment_output_dir, main_proc,
-                                              dataset, output_file=None, embedding_type='tsne')
+        generate_tsne_plot = False
+        if generate_tsne_plot:
+            generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
+                                                sorted_losses_all, experiment_output_dir, main_proc,
+                                                dataset, output_file=None, embedding_type='tsne')
 
     # Convert the data into a complete trajectory dataset
     print("Converting trajectories to dataset...")
@@ -731,7 +750,7 @@ if defense == "mapd":
 
 
     print("Training the trajectory classifier...")
-    n_neighbors = 20
+    n_neighbors = 20  # TODO: Change the number of nearest neighbors here
     clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
     clf.fit(probe_train_x, probe_train_y)
 
@@ -1173,7 +1192,8 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader, distributed,
-                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size)  # TODO: Add other args...
+                                                       rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense, tensor_batch_size,
+                                                       epoch)  # TODO: Add other args...
             if clean_lr_scheduler is not None:
                 clean_lr_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint)
@@ -1184,7 +1204,8 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     # Evaluate accuracy
     print("Retrained model performance:")
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader,
-                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense, tensor_batch_size)
+                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense,
+                                           tensor_batch_size, num_epochs+1)
     test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, val_probe_attacks, tensor_batch_size)
     return clean_model
 
@@ -1613,7 +1634,7 @@ if defense == "abl":
             if epoch % 5 == 4:
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                       val_probes, defense, tensor_batch_size)
+                                                       val_probes, defense, tensor_batch_size, epoch)
         torch.save(model.state_dict(), output_checkpoint_file)
     else:
         print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
@@ -1692,7 +1713,7 @@ if defense == "abl":
                 if epoch % 5 == 4:
                     log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                            distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, defense, tensor_batch_size)
+                                                           val_probes, defense, tensor_batch_size, epoch)
             torch.save(model.state_dict(), output_checkpoint_file)
         else:
             print(f"!! Loading clean finetuned checkpoint file:", output_checkpoint_file)
@@ -1710,7 +1731,7 @@ if defense == "abl":
                 if epoch % 5 == 4:
                     log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                            distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, defense, tensor_batch_size)
+                                                           val_probes, defense, tensor_batch_size, epoch)
             torch.save(model.state_dict(), output_checkpoint_file)
         else:
             print(f"!! Loading unlearned checkpoint file:", output_checkpoint_file)
