@@ -255,6 +255,11 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
                     main_proc, img_size, device):
     val_probes = {}
     attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in val_probe_attacks}
+    if 'sinusoid' in val_probe_attacks and dataset == "gtsrb":
+        import collections
+        class_counts = collections.Counter(train_set_wo_aug.targets)
+        while class_counts[attack_targets['sinusoid']] < 1000:
+            attack_targets['sinusoid'] = np.random.choice(np.arange(num_classes))
     if 'sleeper' in val_probe_attacks:
         attack_targets['sleeper'] = sleeper_classes[dataset]['train']
     print("Chosen val attack targets:", attack_targets)
@@ -283,6 +288,9 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
             indices_to_choose_from = np.where(train_set_wo_aug.targets == target)[0]
             # Clean label attacks are expressed as a fraction of the target class! Adjust attack number appropriately.
             num = int(num_val_probes[attack] * len(indices_to_choose_from))
+            if attack == "gtsrb":
+                # TODO: something more principled...
+                num = max(num, 500)
 
 
         # don't let multiple attacks hit the same image, including train probe images.
