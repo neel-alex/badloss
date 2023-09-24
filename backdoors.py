@@ -288,7 +288,7 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
             indices_to_choose_from = np.where(train_set_wo_aug.targets == target)[0]
             # Clean label attacks are expressed as a fraction of the target class! Adjust attack number appropriately.
             num = int(num_val_probes[attack] * len(indices_to_choose_from))
-            if attack == "gtsrb":
+            if dataset == "gtsrb":
                 # TODO: something more principled...
                 num = max(num, 500)
 

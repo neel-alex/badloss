@@ -98,13 +98,16 @@ if attack == "warped":
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,
-    "single_pix": 0.03,
-    "random": 0.03,
+    "single_pix": 0.01,
+    "random": 0.01,
     "fixed": 0.01,
     "sinusoid": 0.1,  # Clean label attacks are expressed as a fraction of the target class!
     "warped": 0.1,
     "sleeper": 0.01,  # TODO: Is this right? Checks out for CIFAR-10 I think...
 }
+if dataset == "gtsrb":
+    num_val_probes["patch"] = 0.03
+    num_val_probes["single_pix"] = 0.03
 correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
 if correct_abl and defense == "abl":
     poisoning_ratio = 0.1
