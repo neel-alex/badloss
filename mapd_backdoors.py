@@ -91,13 +91,17 @@ else:
     train_probe_attack = attack
     val_probe_attacks = [attack]
 num_train_probes = 500  # Fixed number -- 4x this many probes will be made
+                            # (now 3x this number of backdoor probes -- (num) normal, (num) mislabeled, (num) normal for val;
+                            #  then (2*num) clean examples set aside for comparison.
+if attack == "warped":
+    num_train_probes = 1500  # More probes to more closely imitate learning dynamics of the larger warped attack.
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,
     "single_pix": 0.01,
     "random": 0.01,
     "fixed": 0.01,
-    "sinusoid": 0.3,  # Clean label attacks are expressed as a fraction of the target class!
+    "sinusoid": 0.1,  # Clean label attacks are expressed as a fraction of the target class!
     "warped": 0.1,
     "sleeper": 0.01,  # TODO: Is this right? Checks out for CIFAR-10 I think...
 }
@@ -126,7 +130,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp20"
+project_id = "exp21"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -220,7 +224,7 @@ train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, t
                                                          val_probe_indices=val_probes["all_backdoor_idx"])
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
-                               random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
+                               random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device="cpu")
 
 
 # Merge probe dicts
