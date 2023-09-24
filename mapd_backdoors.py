@@ -98,8 +98,8 @@ if attack == "warped":
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,
-    "single_pix": 0.01,
-    "random": 0.01,
+    "single_pix": 0.03,
+    "random": 0.03,
     "fixed": 0.01,
     "sinusoid": 0.1,  # Clean label attacks are expressed as a fraction of the target class!
     "warped": 0.1,
@@ -224,7 +224,7 @@ train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, t
                                                          val_probe_indices=val_probes["all_backdoor_idx"])
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
-                               random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device="cpu")
+                               random_pattern, warping_grids, experiment_output_dir, main_proc, img_size)
 
 
 # Merge probe dicts
