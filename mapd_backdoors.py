@@ -638,6 +638,7 @@ if defense == "mapd":
     assert len(dataset_probe_identity) == len(comb_train_set)
 
     print("Computing the sorted loss list...")
+    normalize_trajectory = False
     for i in range(len(ex_idx)):  # Iterate over the epochs
         current_ex_idx = ex_idx[i]
         current_loss_vals = loss_values[i]
@@ -645,7 +646,12 @@ if defense == "mapd":
         current_sorted_loss_vals = [None for _ in range(len(dataset_probe_identity))]  # Includes both the training set as well as the probes i.e. len(comb_train_set)
         for j, k in enumerate(current_ex_idx):
             current_sorted_loss_vals[k] = current_loss_vals[j]
-        if moving_avg_weight is not None and i > 0:
+
+        if normalize_trajectory:
+            new_vals = np.array(current_sorted_loss_vals)
+            new_vals[new_vals != None] = (new_vals[new_vals != None] - new_vals[new_vals != None].mean()) / new_vals[new_vals != None].std()
+            current_sorted_loss_vals = new_vals.tolist()
+        elif moving_avg_weight is not None and i > 0:
             old_vals = np.array(sorted_losses_all[-1])
             new_vals = np.array(current_sorted_loss_vals)
             new_vals[new_vals != None] = moving_avg_weight * old_vals[old_vals != None] + (1. - moving_avg_weight) * new_vals[new_vals != None]
