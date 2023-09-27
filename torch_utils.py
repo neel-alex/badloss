@@ -26,8 +26,8 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False):
         ]))
         model = model.to(device)
     else:
-        # Create ResNet-18
-        model = models.resnet18(pretrained=False, num_classes=num_classes)
+        # Create ResNet-50
+        model = models.resnet50(pretrained=False, num_classes=num_classes)
         if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
             model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
@@ -219,7 +219,8 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
         model.eval()
     else:
         model.train()
-
+    data = data.to(device)
+    target = target.to(device)
     with torch.no_grad():
         if batch_size is None:
             output = model(data)

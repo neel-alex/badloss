@@ -172,7 +172,12 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         id_grid, noise_grid = None, None
         if aux_data:
             id_grid, noise_grid = aux_data
-        backdoor = WarpingAttack(img_size[0], identity_grid=id_grid, noise_grid=noise_grid)
+
+        if dataset == "gtsrb":
+            backdoor = WarpingAttack(img_size[0], s=1.0, k=8, identity_grid=id_grid, noise_grid=noise_grid)
+        else:
+            backdoor = WarpingAttack(img_size[0], identity_grid=id_grid, noise_grid=noise_grid)
+
         aux_data = (backdoor.identity_grid, backdoor.noise_grid)
     else:
         raise NameError(f"Attack type {attack_name} is not a valid attack type.")
@@ -191,20 +196,20 @@ def add_probe_data(probe_dict, key, indices, dataset, device, labels, transform=
             probe_dict[f"{key}_idx"] = np.concatenate([probe_dict[f"{key}_idx"], indices])
 
         # Concatenate the new examples with the old examples
-        new_ex = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
+        new_ex = torch.stack([dataset[i][0] for i in indices], dim=0)
         probe_dict[f"{key}"] = torch.cat([probe_dict[f"{key}"], new_ex], dim=0)
-        new_labels = torch.from_numpy(labels).to(device)
+        new_labels = torch.from_numpy(labels)
         probe_dict[f"{key}_labels"] = torch.cat([probe_dict[f"{key}_labels"], new_labels], dim=0)
     else:
         if track_idx:
             probe_dict[f"{key}_idx"] = indices
         if transform is not None:
             if track_idx:
-                probe_dict[f"{key}_original"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
-            probe_dict[f"{key}"] = torch.stack([transform(dataset[i][0]) for i in indices], dim=0).to(device)
+                probe_dict[f"{key}_original"] = torch.stack([dataset[i][0] for i in indices], dim=0)
+            probe_dict[f"{key}"] = torch.stack([transform(dataset[i][0]) for i in indices], dim=0)
         else:
-            probe_dict[f"{key}"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
-        probe_dict[f"{key}_labels"] = torch.from_numpy(labels).to(device)
+            probe_dict[f"{key}"] = torch.stack([dataset[i][0] for i in indices], dim=0)
+        probe_dict[f"{key}_labels"] = torch.from_numpy(labels)
         if compute_diffs and transform is not None and track_idx:
             probe_dict[f"{key}_diff"] = probe_dict[f"{key}_original"] - probe_dict[f"{key}"]
 
