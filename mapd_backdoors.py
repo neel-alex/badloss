@@ -95,6 +95,8 @@ num_train_probes = 500  # Fixed number -- 4x this many probes will be made
                             #  then (2*num) clean examples set aside for comparison.
 if attack == "warped":
     num_train_probes = 1500  # More probes to more closely imitate learning dynamics of the larger warped attack.
+if attack == "sinusoid" and dataset == "gtsrb":
+    num_train_probes = 250  # Need to choose number of train probes carefully since the classes are so small -- this produces 500 poisoned.
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,

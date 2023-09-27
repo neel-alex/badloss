@@ -228,6 +228,20 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
         hard_probe_size = num_train_probes
         num_examples += hard_probe_size
     probe_indices = np.random.choice(valid_indices, size=num_examples, replace=False)
+    if train_probe_attack == "reversed_sinusoid":
+        class_set = np.array(train_set_wo_aug.targets)[np.array(valid_indices)]
+        import collections
+        class_counts = collections.Counter(class_set)
+        while class_counts[attack_target] < 4 * num_train_probes:
+            attack_target = np.random.choice(np.arange(num_classes))
+        clean_indices = np.array(valid_indices)[class_set == attack_target]
+        attack_split = 2
+        clean_split = 3 if include_harder_backdoor_probes else 2
+        chosen_attack_indices = np.random.choice(clean_indices, size=(attack_split * num_train_probes), replace=False)
+        valid_indices = [i for i in valid_indices if i not in chosen_attack_indices]
+        chosen_clean_indices = np.random.choice(valid_indices, size=(clean_split * num_train_probes), replace=False)
+        probe_indices = np.concatenate([chosen_attack_indices[:num_train_probes], chosen_clean_indices[:num_train_probes],
+                                        chosen_attack_indices[num_train_probes:], chosen_clean_indices[num_train_probes:]])
     probes["all_backdoor_idx"] = probe_indices
 
     base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:4*num_train_probes]
