@@ -136,7 +136,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp28"
+project_id = "exp40"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -447,7 +447,8 @@ if not os.path.exists(model_file):
     elif defense == "mapd":
         statistics = {"train": [], "test": []}
         statistics.update({k: [] for k in attack_types + ['clean']})
-        statistics.update({k+"_val": [] for k in ref_probe_classes})
+        if include_val_probe_examples:
+            statistics.update({k+"_val": [] for k in ref_probe_classes})
         inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
 
         predictions = {}
@@ -785,9 +786,9 @@ if defense == "mapd":
     print("Class2idx updated:", class2idx)
     print("Class2idx val:", class2idx_val)
 
-    probe_val_x = np.concatenate([np.array(traj_dataset[f"{k}_val"]) for k in main_classes_val], axis=0)
-    probe_val_binary_y = np.concatenate([np.array([class2idx[k] for _ in range(len(traj_dataset[f"{k}_val"]))]) for k in main_classes_val])
-    probe_val_y = np.concatenate([np.array([class2idx_val[k] for _ in range(len(traj_dataset[f"{k}_val"]))]) for k in main_classes_val])
+    probe_val_x = np.concatenate([np.array(traj_dataset[f"{k}_val"] if f"{k}_val" in traj_dataset else traj_dataset[k]) for k in main_classes_val], axis=0)
+    probe_val_binary_y = np.concatenate([np.array([class2idx[k] for _ in range(len(traj_dataset[f"{k}_val"] if f"{k}_val" in traj_dataset else traj_dataset[k]))]) for k in main_classes_val])
+    probe_val_y = np.concatenate([np.array([class2idx_val[k] for _ in range(len(traj_dataset[f"{k}_val"] if f"{k}_val" in traj_dataset else traj_dataset[k]))]) for k in main_classes_val])
     print("Validation set:", probe_val_x.shape, probe_val_binary_y.shape, probe_val_y.shape)
 
 
