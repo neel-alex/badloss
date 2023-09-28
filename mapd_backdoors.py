@@ -228,6 +228,7 @@ train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, t
                                                          num_train_probes, train_probe_attack,
                                                          experiment_output_dir, main_proc, img_size, device,
                                                          val_probe_indices=val_probes["all_backdoor_idx"])
+train_probes_idx = train_probe["all_backdoor_idx"]
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
                                random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
@@ -1002,7 +1003,9 @@ if defense == "mapd":
     output_file = os.path.join(experiment_output_dir, f"attack_success_initial.png")
     print(output_dict)
     plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model")
+
     # In[ ]:
+
     print("!! Collecting clean training indices...")
     losses_np = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
     missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
@@ -1014,6 +1017,21 @@ if defense == "mapd":
     all_ex_probs = np.zeros((len(losses_np), 2), dtype=avail_ex_probs.dtype)
     all_ex_probs[available_ex] = avail_ex_probs
     all_ex_probs[missing_vals] = 1.1  # Always marked as probes and removed
+
+    evaluate_classifier_on_training_probes = False
+    if not evaluate_classifier_on_training_probes:
+        print("!! Including training probe examples with their clean labels for retraining...")
+        all_probe_original_idx = train_probes_idx
+        train_probe_names = ["backdoor", "clean", "backdoor_val", "clean_val"]
+
+        selected_idx = [(i, x) for i, x in enumerate(dataset_probe_identity) if x in train_probe_names]
+        assert len(selected_idx) == len(all_probe_original_idx), f"{len(selected_idx)} == {len(all_probe_original_idx)}"
+        all_probe_new_idx = [x[0] for x in selected_idx]
+
+        # Include all probe idx -- remove their corrupted conunterparts as part of probe examples
+        all_ex_probs[all_probe_original_idx] = 0.  # Always marked as clean and included
+        all_ex_probs[all_probe_new_idx] = 1.1  # Always marked as probes and removed
+
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
@@ -1042,8 +1060,7 @@ if defense == "mapd":
                 title = "Retraining on the original train set (w/o backdoors)"
             else:
                 assert threshold is not None, threshold
-                is_clean = all_ex_probs[:,
-                           backdoor_idx] <= threshold  # probability of an example being the backdoor is less than thresh
+                is_clean = all_ex_probs[:, backdoor_idx] <= threshold  # probability of an example being the backdoor is less than thresh
                 clean_indices = np.where(is_clean)[0]
 
                 if train_type == "cleaned":  # Remove examples marked as backdoors
