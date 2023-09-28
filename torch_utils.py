@@ -215,6 +215,8 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
 def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False, batch_size=None,
                 use_eval_mode=True, max_loss_val_bound=None):
     assert torch.is_tensor(data) and torch.is_tensor(target)
+    if len(data) == 0:
+        return {}, {}
     if use_eval_mode:
         model.eval()
     else:

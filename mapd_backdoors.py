@@ -224,10 +224,12 @@ val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_
                                                                             experiment_output_dir, main_proc, img_size,
                                                                             device,)
 
+include_val_probe_examples = False
 train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, train_set_wo_aug,
                                                          num_train_probes, train_probe_attack,
                                                          experiment_output_dir, main_proc, img_size, device,
-                                                         val_probe_indices=val_probes["all_backdoor_idx"])
+                                                         val_probe_indices=val_probes["all_backdoor_idx"],
+                                                         include_val_probe_examples=include_val_probe_examples)
 train_probes_idx = train_probe["all_backdoor_idx"]
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
@@ -271,11 +273,12 @@ moving_avg_weight = None
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
     make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
-                       train_transform, val_probe_attacks, experiment_output_dir, device)
+                       train_transform, val_probe_attacks, experiment_output_dir,
+                       device, include_val_probe_examples=include_val_probe_examples)
 valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
 
 
-model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+model = get_model(dataset, num_classes, device, local_rank, verbose=False)
 criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_epochs)
 
 new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
@@ -286,7 +289,10 @@ new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
 # ...could load entire train set onto gpu (15GB tops in GTSRB), but that's a pain, code-wise.
 to_cuda = copy.deepcopy(attack_types)
 if defense == 'mapd':
-    to_cuda += ['backdoor_val', 'clean', 'clean_val']
+    if include_val_probe_examples:
+        to_cuda += ['backdoor_val', 'clean', 'clean_val']
+    else:
+        to_cuda += ['clean']
 
 for key in to_cuda:
     probes[key] = probes[key].to(device)
@@ -371,17 +377,21 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
                                        log_predictions=log_predictions, batch_size=tensor_batch_size,
                                        use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
-            val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
-                                               probes[f"{attack_type}_val_labels"],
-                                               msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
-                                               log_predictions=log_predictions, batch_size=tensor_batch_size,
-                                               use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
+            val_stats, val_preds = None, None
+            if attack_type+"_val" in probes:
+                val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
+                                                probes[f"{attack_type}_val_labels"],
+                                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
+                                                log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                                use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
-                predictions[epoch][attack_type+"_val"] = val_preds
+                if val_preds is not None:
+                    predictions[epoch][attack_type+"_val"] = val_preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
-                statistics[attack_type+"_val"].append(val_stats)
+                if val_stats is not None:
+                    statistics[attack_type+"_val"].append(val_stats)
         else:
             suffix = ' (val)'
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
@@ -1035,7 +1045,7 @@ if defense == "mapd":
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.10]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.1]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
@@ -1085,7 +1095,7 @@ if defense == "mapd":
                 new_train_set_dl = get_loader(idx_dataset, indices=selected_indices, distributed=distributed,
                                               num_workers=num_workers, batch_size=batch_size)
 
-            clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+            clean_model = get_model(dataset, num_classes, device, local_rank, verbose=False)
             criterion, optimizer, lr_scheduler, scaler = get_optimizer(clean_model, device, lr, momentum, wd,
                                                                        num_epochs)
             postfix = ""
@@ -1226,7 +1236,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
                                   indices=retrain_indices, batch_size=batch_size)
 
-    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=False)
     clean_criterion, clean_optimizer, clean_lr_scheduler, clean_scaler = \
         get_optimizer(clean_model, device, lr, momentum, wd, num_epochs)
 
@@ -1667,7 +1677,7 @@ if defense == "abl":
     num_pretrain_epochs = 10
     flooding_threshold = 0.5
 
-    model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+    model = get_model(dataset, num_classes, device, local_rank, verbose=False)
 
     finetune_and_unlearn = False  # If this is true, then normal ABL is done.
     if finetune_and_unlearn:
