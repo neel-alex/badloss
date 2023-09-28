@@ -91,16 +91,26 @@ else:
     train_probe_attack = attack
     val_probe_attacks = [attack]
 num_train_probes = 500  # Fixed number -- 4x this many probes will be made
+                            # (now 3x this number of backdoor probes -- (num) normal, (num) mislabeled, (num) normal for val;
+                            #  then (2*num) clean examples set aside for comparison.
+if attack == "warped":
+    num_train_probes = 1500  # More probes to more closely imitate learning dynamics of the larger warped attack.
+if attack == "sinusoid" and dataset == "gtsrb":
+    num_train_probes = 250  # Need to choose number of train probes carefully since the classes are so small -- this produces 500 poisoned.
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,
     "single_pix": 0.01,
     "random": 0.01,
     "fixed": 0.01,
-    "sinusoid": 0.3,  # Clean label attacks are expressed as a fraction of the target class!
+    "sinusoid": 0.1,  # Clean label attacks are expressed as a fraction of the target class!
     "warped": 0.1,
     "sleeper": 0.01,  # TODO: Is this right? Checks out for CIFAR-10 I think...
 }
+if dataset == "gtsrb":
+    num_val_probes["patch"] = 0.03
+    num_val_probes["single_pix"] = 0.03
+    num_val_probes["warped"] = 0.2
 correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
 if correct_abl and defense == "abl":
     poisoning_ratio = 0.1
@@ -126,10 +136,10 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp20"
+project_id = "exp28"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
-# model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
-model_collection_dir = experiment_output_dir
+model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
+# model_collection_dir = experiment_output_dir
 num_workers = 8
 surface_examples = False
 
@@ -215,8 +225,8 @@ val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_
                                                                             device,)
 
 train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, train_set_wo_aug,
-                                                        num_train_probes, train_probe_attack,
-                                                        experiment_output_dir, main_proc, img_size, device,
+                                                         num_train_probes, train_probe_attack,
+                                                         experiment_output_dir, main_proc, img_size, device,
                                                          val_probe_indices=val_probes["all_backdoor_idx"])
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
@@ -270,6 +280,21 @@ criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, mo
 new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
     make_index_dataset(comb_train_set, comb_train_indices, test_set,
                        no_transform, batch_size, distributed, num_workers)
+
+# Load train probes onto gpu -- inexpensive and saves time.
+# ...could load entire train set onto gpu (15GB tops in GTSRB), but that's a pain, code-wise.
+to_cuda = copy.deepcopy(attack_types)
+if defense == 'mapd':
+    to_cuda += ['backdoor_val', 'clean', 'clean_val']
+
+for key in to_cuda:
+    probes[key] = probes[key].to(device)
+    probes[f'{key}_labels'] = probes[f'{key}_labels'].to(device)
+# Non-GTSRB test probes can stay on the GPU
+if dataset != "gtsrb":
+    for key in test_probes:
+        test_probes[key] = test_probes[key].to(device)
+
 
 model_dir = os.path.join(model_collection_dir, f"models_{dataset}")
 model_file = os.path.join(model_dir, f"model_{dataset}_dynamics.pth")
@@ -992,7 +1017,7 @@ if defense == "mapd":
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.1]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.10]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
@@ -1000,7 +1025,10 @@ if defense == "mapd":
         os.makedirs(output_checkpoint_dir)
         print("!! Checkpoint output directory created:", output_checkpoint_dir)
 
-    for train_type in ["original", "cleaned", "random"]:
+    # train_types = ["original", "cleaned", "random"]
+    train_types = ["cleaned"]
+
+    for train_type in train_types:
         print("=" * 100)
         print(f"!! Using {train_type} training set....")
 
@@ -1045,7 +1073,7 @@ if defense == "mapd":
                                                                        num_epochs)
             postfix = ""
             if threshold is not None:
-                postfix = f"_thresh_{threshold:.1f}"
+                postfix = f"_thresh_{threshold:.2f}"
             output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_{train_type}{postfix}.pth")
             print("Selected output checkpoint:", output_checkpoint)
             if not os.path.exists(output_checkpoint):  # Train the model

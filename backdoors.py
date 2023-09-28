@@ -9,7 +9,7 @@ from PIL import Image, ImageChops
 import dist_utils
 
 
-RANDOM_BACKDOOR_ALPHA = 0.05
+RANDOM_BACKDOOR_ALPHA = 0.075
 FIXED_BACKDOOR_ALPHA = 0.025
 SINUSOID_BACKDOOR_ALPHA = 0.075
 SINUSOID_BACKDOOR_FREQ = 6
@@ -63,7 +63,7 @@ class ClampRangeTransform(object):
 
 
 class WarpingAttack(object):
-    def __init__(self, img_size, s=0.5, k=4, grid_rescale=1.0, identity_grid=None, noise_grid=None):
+    def __init__(self, img_size, s=0.75, k=6, grid_rescale=1.0, identity_grid=None, noise_grid=None):
         self.img_size = img_size
         self.s = s
         self.k = k
@@ -172,7 +172,12 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         id_grid, noise_grid = None, None
         if aux_data:
             id_grid, noise_grid = aux_data
-        backdoor = WarpingAttack(img_size[0], identity_grid=id_grid, noise_grid=noise_grid)
+
+        if dataset == "gtsrb":
+            backdoor = WarpingAttack(img_size[0], s=1.0, k=8, identity_grid=id_grid, noise_grid=noise_grid)
+        else:
+            backdoor = WarpingAttack(img_size[0], identity_grid=id_grid, noise_grid=noise_grid)
+
         aux_data = (backdoor.identity_grid, backdoor.noise_grid)
     else:
         raise NameError(f"Attack type {attack_name} is not a valid attack type.")
@@ -191,20 +196,20 @@ def add_probe_data(probe_dict, key, indices, dataset, device, labels, transform=
             probe_dict[f"{key}_idx"] = np.concatenate([probe_dict[f"{key}_idx"], indices])
 
         # Concatenate the new examples with the old examples
-        new_ex = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
+        new_ex = torch.stack([dataset[i][0] for i in indices], dim=0)
         probe_dict[f"{key}"] = torch.cat([probe_dict[f"{key}"], new_ex], dim=0)
-        new_labels = torch.from_numpy(labels).to(device)
+        new_labels = torch.from_numpy(labels)
         probe_dict[f"{key}_labels"] = torch.cat([probe_dict[f"{key}_labels"], new_labels], dim=0)
     else:
         if track_idx:
             probe_dict[f"{key}_idx"] = indices
         if transform is not None:
             if track_idx:
-                probe_dict[f"{key}_original"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
-            probe_dict[f"{key}"] = torch.stack([transform(dataset[i][0]) for i in indices], dim=0).to(device)
+                probe_dict[f"{key}_original"] = torch.stack([dataset[i][0] for i in indices], dim=0)
+            probe_dict[f"{key}"] = torch.stack([transform(dataset[i][0]) for i in indices], dim=0)
         else:
-            probe_dict[f"{key}"] = torch.stack([dataset[i][0] for i in indices], dim=0).to(device)
-        probe_dict[f"{key}_labels"] = torch.from_numpy(labels).to(device)
+            probe_dict[f"{key}"] = torch.stack([dataset[i][0] for i in indices], dim=0)
+        probe_dict[f"{key}_labels"] = torch.from_numpy(labels)
         if compute_diffs and transform is not None and track_idx:
             probe_dict[f"{key}_diff"] = probe_dict[f"{key}_original"] - probe_dict[f"{key}"]
 
@@ -223,6 +228,20 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
         hard_probe_size = num_train_probes
         num_examples += hard_probe_size
     probe_indices = np.random.choice(valid_indices, size=num_examples, replace=False)
+    if train_probe_attack == "reversed_sinusoid":
+        class_set = np.array(train_set_wo_aug.targets)[np.array(valid_indices)]
+        import collections
+        class_counts = collections.Counter(class_set)
+        while class_counts[attack_target] < 4 * num_train_probes:
+            attack_target = np.random.choice(np.arange(num_classes))
+        clean_indices = np.array(valid_indices)[class_set == attack_target]
+        attack_split = 2
+        clean_split = 3 if include_harder_backdoor_probes else 2
+        chosen_attack_indices = np.random.choice(clean_indices, size=(attack_split * num_train_probes), replace=False)
+        valid_indices = [i for i in valid_indices if i not in chosen_attack_indices]
+        chosen_clean_indices = np.random.choice(valid_indices, size=(clean_split * num_train_probes), replace=False)
+        probe_indices = np.concatenate([chosen_attack_indices[:num_train_probes], chosen_clean_indices[:num_train_probes],
+                                        chosen_attack_indices[num_train_probes:], chosen_clean_indices[num_train_probes:]])
     probes["all_backdoor_idx"] = probe_indices
 
     base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:4*num_train_probes]
@@ -255,6 +274,11 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
                     main_proc, img_size, device):
     val_probes = {}
     attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in val_probe_attacks}
+    if 'sinusoid' in val_probe_attacks and dataset == "gtsrb":
+        import collections
+        class_counts = collections.Counter(train_set_wo_aug.targets)
+        while class_counts[attack_targets['sinusoid']] < 1000:
+            attack_targets['sinusoid'] = np.random.choice(np.arange(num_classes))
     if 'sleeper' in val_probe_attacks:
         attack_targets['sleeper'] = sleeper_classes[dataset]['train']
     print("Chosen val attack targets:", attack_targets)
@@ -283,6 +307,9 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
             indices_to_choose_from = np.where(train_set_wo_aug.targets == target)[0]
             # Clean label attacks are expressed as a fraction of the target class! Adjust attack number appropriately.
             num = int(num_val_probes[attack] * len(indices_to_choose_from))
+            if dataset == "gtsrb":
+                # TODO: something more principled...
+                num = max(num, 500)
 
 
         # don't let multiple attacks hit the same image, including train probe images.
@@ -349,8 +376,8 @@ def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, atta
 
 sleeper_classes = {
     'cifar10': {
-        'train': 0,  # Train images are airplanes
-        'test':  7   # Source class is horses
+        'train': 6,  # Train images are frogs
+        'test':  4   # Source class is deer
     }
 }
 

@@ -766,6 +766,10 @@ def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_a
     else:
         # Plot the ROC curve
         for i, k in enumerate(key_list):
+            fpr_dict = {}
+            tpr_dict = {}
+            fpr_dict[k], tpr_dict[k], _ = roc_curve(labels[k], predictions[k])
+            print(k, auc(fpr_dict[k], tpr_dict[k]))
             out = RocCurveDisplay.from_predictions(labels[k], predictions[k], ax=ax, name=k)
             out.line_.set_color(color_list[i])
 
