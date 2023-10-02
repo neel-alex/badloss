@@ -136,7 +136,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp28"
+project_id = "exp40"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -224,10 +224,13 @@ val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_
                                                                             experiment_output_dir, main_proc, img_size,
                                                                             device,)
 
+include_val_probe_examples = False
 train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, train_set_wo_aug,
                                                          num_train_probes, train_probe_attack,
                                                          experiment_output_dir, main_proc, img_size, device,
-                                                         val_probe_indices=val_probes["all_backdoor_idx"])
+                                                         val_probe_indices=val_probes["all_backdoor_idx"],
+                                                         include_val_probe_examples=include_val_probe_examples)
+train_probes_idx = train_probe["all_backdoor_idx"]
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
                                random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
@@ -270,11 +273,12 @@ moving_avg_weight = None
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
     make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
-                       train_transform, val_probe_attacks, experiment_output_dir, device)
+                       train_transform, val_probe_attacks, experiment_output_dir,
+                       device, include_val_probe_examples=include_val_probe_examples)
 valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
 
 
-model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+model = get_model(dataset, num_classes, device, local_rank, verbose=False)
 criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_epochs)
 
 new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
@@ -285,7 +289,10 @@ new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
 # ...could load entire train set onto gpu (15GB tops in GTSRB), but that's a pain, code-wise.
 to_cuda = copy.deepcopy(attack_types)
 if defense == 'mapd':
-    to_cuda += ['backdoor_val', 'clean', 'clean_val']
+    if include_val_probe_examples:
+        to_cuda += ['backdoor_val', 'clean', 'clean_val']
+    else:
+        to_cuda += ['clean']
 
 for key in to_cuda:
     probes[key] = probes[key].to(device)
@@ -370,17 +377,21 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                        msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
                                        log_predictions=log_predictions, batch_size=tensor_batch_size,
                                        use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
-            val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
-                                               probes[f"{attack_type}_val_labels"],
-                                               msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
-                                               log_predictions=log_predictions, batch_size=tensor_batch_size,
-                                               use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
+            val_stats, val_preds = None, None
+            if attack_type+"_val" in probes:
+                val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
+                                                probes[f"{attack_type}_val_labels"],
+                                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
+                                                log_predictions=log_predictions, batch_size=tensor_batch_size,
+                                                use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
             if predictions is not None:
                 predictions[epoch][attack_type] = preds
-                predictions[epoch][attack_type+"_val"] = val_preds
+                if val_preds is not None:
+                    predictions[epoch][attack_type+"_val"] = val_preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
-                statistics[attack_type+"_val"].append(val_stats)
+                if val_stats is not None:
+                    statistics[attack_type+"_val"].append(val_stats)
         else:
             suffix = ' (val)'
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
@@ -436,7 +447,8 @@ if not os.path.exists(model_file):
     elif defense == "mapd":
         statistics = {"train": [], "test": []}
         statistics.update({k: [] for k in attack_types + ['clean']})
-        statistics.update({k+"_val": [] for k in ref_probe_classes})
+        if include_val_probe_examples:
+            statistics.update({k+"_val": [] for k in ref_probe_classes})
         inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
 
         predictions = {}
@@ -663,6 +675,7 @@ if defense == "mapd":
     assert len(dataset_probe_identity) == len(comb_train_set)
 
     print("Computing the sorted loss list...")
+    normalize_trajectory = False
     for i in range(len(ex_idx)):  # Iterate over the epochs
         current_ex_idx = ex_idx[i]
         current_loss_vals = loss_values[i]
@@ -670,7 +683,12 @@ if defense == "mapd":
         current_sorted_loss_vals = [None for _ in range(len(dataset_probe_identity))]  # Includes both the training set as well as the probes i.e. len(comb_train_set)
         for j, k in enumerate(current_ex_idx):
             current_sorted_loss_vals[k] = current_loss_vals[j]
-        if moving_avg_weight is not None and i > 0:
+
+        if normalize_trajectory:
+            new_vals = np.array(current_sorted_loss_vals)
+            new_vals[new_vals != None] = (new_vals[new_vals != None] - new_vals[new_vals != None].mean()) / new_vals[new_vals != None].std()
+            current_sorted_loss_vals = new_vals.tolist()
+        elif moving_avg_weight is not None and i > 0:
             old_vals = np.array(sorted_losses_all[-1])
             new_vals = np.array(current_sorted_loss_vals)
             new_vals[new_vals != None] = moving_avg_weight * old_vals[old_vals != None] + (1. - moving_avg_weight) * new_vals[new_vals != None]
@@ -768,9 +786,9 @@ if defense == "mapd":
     print("Class2idx updated:", class2idx)
     print("Class2idx val:", class2idx_val)
 
-    probe_val_x = np.concatenate([np.array(traj_dataset[f"{k}_val"]) for k in main_classes_val], axis=0)
-    probe_val_binary_y = np.concatenate([np.array([class2idx[k] for _ in range(len(traj_dataset[f"{k}_val"]))]) for k in main_classes_val])
-    probe_val_y = np.concatenate([np.array([class2idx_val[k] for _ in range(len(traj_dataset[f"{k}_val"]))]) for k in main_classes_val])
+    probe_val_x = np.concatenate([np.array(traj_dataset[f"{k}_val"] if f"{k}_val" in traj_dataset else traj_dataset[k]) for k in main_classes_val], axis=0)
+    probe_val_binary_y = np.concatenate([np.array([class2idx[k] for _ in range(len(traj_dataset[f"{k}_val"] if f"{k}_val" in traj_dataset else traj_dataset[k]))]) for k in main_classes_val])
+    probe_val_y = np.concatenate([np.array([class2idx_val[k] for _ in range(len(traj_dataset[f"{k}_val"] if f"{k}_val" in traj_dataset else traj_dataset[k]))]) for k in main_classes_val])
     print("Validation set:", probe_val_x.shape, probe_val_binary_y.shape, probe_val_y.shape)
 
 
@@ -996,7 +1014,9 @@ if defense == "mapd":
     output_file = os.path.join(experiment_output_dir, f"attack_success_initial.png")
     print(output_dict)
     plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model")
+
     # In[ ]:
+
     print("!! Collecting clean training indices...")
     losses_np = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
     missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
@@ -1008,10 +1028,25 @@ if defense == "mapd":
     all_ex_probs = np.zeros((len(losses_np), 2), dtype=avail_ex_probs.dtype)
     all_ex_probs[available_ex] = avail_ex_probs
     all_ex_probs[missing_vals] = 1.1  # Always marked as probes and removed
+
+    evaluate_classifier_on_training_probes = False
+    if not evaluate_classifier_on_training_probes:
+        print("!! Including training probe examples with their clean labels for retraining...")
+        all_probe_original_idx = train_probes_idx
+        train_probe_names = ["backdoor", "clean", "backdoor_val", "clean_val"]
+
+        selected_idx = [(i, x) for i, x in enumerate(dataset_probe_identity) if x in train_probe_names]
+        assert len(selected_idx) == len(all_probe_original_idx), f"{len(selected_idx)} == {len(all_probe_original_idx)}"
+        all_probe_new_idx = [x[0] for x in selected_idx]
+
+        # Include all probe idx -- remove their corrupted conunterparts as part of probe examples
+        all_ex_probs[all_probe_original_idx] = 0.  # Always marked as clean and included
+        all_ex_probs[all_probe_new_idx] = 1.1  # Always marked as probes and removed
+
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.10]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.1]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
@@ -1036,8 +1071,7 @@ if defense == "mapd":
                 title = "Retraining on the original train set (w/o backdoors)"
             else:
                 assert threshold is not None, threshold
-                is_clean = all_ex_probs[:,
-                           backdoor_idx] <= threshold  # probability of an example being the backdoor is less than thresh
+                is_clean = all_ex_probs[:, backdoor_idx] <= threshold  # probability of an example being the backdoor is less than thresh
                 clean_indices = np.where(is_clean)[0]
 
                 if train_type == "cleaned":  # Remove examples marked as backdoors
@@ -1062,7 +1096,7 @@ if defense == "mapd":
                 new_train_set_dl = get_loader(idx_dataset, indices=selected_indices, distributed=distributed,
                                               num_workers=num_workers, batch_size=batch_size)
 
-            clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+            clean_model = get_model(dataset, num_classes, device, local_rank, verbose=False)
             criterion, optimizer, lr_scheduler, scaler = get_optimizer(clean_model, device, lr, momentum, wd,
                                                                        num_epochs)
             postfix = ""
@@ -1203,7 +1237,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
                                   indices=retrain_indices, batch_size=batch_size)
 
-    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=False)
     clean_criterion, clean_optimizer, clean_lr_scheduler, clean_scaler = \
         get_optimizer(clean_model, device, lr, momentum, wd, num_epochs)
 
@@ -1644,7 +1678,7 @@ if defense == "abl":
     num_pretrain_epochs = 10
     flooding_threshold = 0.5
 
-    model = get_model(dataset, num_classes, device, local_rank, verbose=True)
+    model = get_model(dataset, num_classes, device, local_rank, verbose=False)
 
     finetune_and_unlearn = False  # If this is true, then normal ABL is done.
     if finetune_and_unlearn:

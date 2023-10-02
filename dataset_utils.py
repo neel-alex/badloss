@@ -181,14 +181,18 @@ def get_loader(dataset, distributed, num_workers, indices=None, batch_size=16, s
 
 
 def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
-                       train_transform, val_probe_attacks, output_dir, device):
+                       train_transform, val_probe_attacks, output_dir, device,
+                       include_val_probe_examples=True):
     discarded_idx = set(probes['all_backdoor_idx'])
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
 
     if defense == "mapd":
-        probes_to_be_used = ["backdoor", "clean", "backdoor_val", "clean_val"]
+        if include_val_probe_examples:
+            probes_to_be_used = ["backdoor", "clean", "backdoor_val", "clean_val"]
+        else:
+            probes_to_be_used = ["backdoor", "clean"]
         print("Selected probes to be used:", probes_to_be_used)
 
         probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)

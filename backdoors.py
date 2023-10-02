@@ -1,4 +1,5 @@
 import os
+import collections
 
 import numpy as np
 import torch
@@ -216,13 +217,14 @@ def add_probe_data(probe_dict, key, indices, dataset, device, labels, transform=
 
 def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
                       train_probe_attack, output_dir, main_proc, img_size, device,
-                      val_probe_indices, include_harder_backdoor_probes=True):
+                      val_probe_indices, include_harder_backdoor_probes=True,
+                      include_val_probe_examples=True):
     probes = {"backdoor": [], "clean": [], "backdoor_val": [], "clean_val": []}
     attack_target = np.random.choice(np.arange(num_classes))
     print("Chosen train probe target:", attack_target)
     train_indices = list(range(len(train_set_wo_aug)))
     valid_indices = [i for i in train_indices if i not in val_probe_indices]
-    base_splits = 4
+    base_splits = 4 if include_val_probe_examples else 2
     num_examples = (base_splits * num_train_probes)
     if include_harder_backdoor_probes:
         hard_probe_size = num_train_probes
@@ -230,7 +232,6 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
     probe_indices = np.random.choice(valid_indices, size=num_examples, replace=False)
     if train_probe_attack == "reversed_sinusoid":
         class_set = np.array(train_set_wo_aug.targets)[np.array(valid_indices)]
-        import collections
         class_counts = collections.Counter(class_set)
         while class_counts[attack_target] < 4 * num_train_probes:
             attack_target = np.random.choice(np.arange(num_classes))
@@ -247,6 +248,8 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
     base_idx, val_idx = probe_indices[:2*num_train_probes], probe_indices[2*num_train_probes:4*num_train_probes]
     # TODO: Add sleeper probe option...
     for suffix, indices in zip(('', '_val'), (base_idx, val_idx)):
+        if not include_val_probe_examples and suffix == '_val':
+            break
         probe_transform, aux_data = make_probe_transform(train_probe_attack, img_size, dataset, output_dir, main_proc)
         backdoor_idx = indices[:num_train_probes]
         attack_labels = np.array([attack_target for i in backdoor_idx])
@@ -259,13 +262,23 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
         add_probe_data(probes, "clean"+suffix, clean_idx, train_set_wo_aug, device, clean_labels)
 
     if include_harder_backdoor_probes:
-        mislabeled_probe_idx = probe_indices[4*num_train_probes:]
+        mislabeled_probe_idx = probe_indices[base_splits*num_train_probes:]
         print(f"!! Adding {len(mislabeled_probe_idx)} harder backdoor examples with mislabeled probe...")
         orig_labels = np.array([train_set_wo_aug[i][1] for i in mislabeled_probe_idx])
         all_classes = np.arange(num_classes)
         probe_labels = np.array([np.random.choice(all_classes[orig_label != all_classes]) for orig_label in orig_labels])
         add_probe_data(probes, "backdoor", mislabeled_probe_idx, train_set_wo_aug, device, probe_labels,
                        override_dict_key=False)
+
+    if not include_val_probe_examples:
+        del probes["clean_val"]
+        del probes["backdoor_val"]
+        # clean_shape = probes["clean"].shape
+        # probes["clean_val"] = torch.zeros((0, *clean_shape[1:]), dtype=probes["clean"].dtype)
+        # probes["clean_val_labels"] = torch.zeros((0,), dtype=probes["clean_labels"].dtype)
+        # probes["backdoor_val"] = probes["clean_val"].clone()
+        # probes["backdoor_val_labels"] = torch.zeros((0,), dtype=probes["backdoor_labels"].dtype)
+        # print(f"!! Setting shape for no val probes case / Clean shape: {clean_shape} / Validation shape: {probes['clean_val'].shape}")
 
     return probes, attack_target, aux_data
 
@@ -275,7 +288,6 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
     val_probes = {}
     attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in val_probe_attacks}
     if 'sinusoid' in val_probe_attacks and dataset == "gtsrb":
-        import collections
         class_counts = collections.Counter(train_set_wo_aug.targets)
         while class_counts[attack_targets['sinusoid']] < 1000:
             attack_targets['sinusoid'] = np.random.choice(np.arange(num_classes))
