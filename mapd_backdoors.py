@@ -108,8 +108,8 @@ num_val_probes = {
     "sleeper": 0.01,  # TODO: Is this right? Checks out for CIFAR-10 I think...
 }
 if dataset == "gtsrb":
-    num_val_probes["patch"] = 0.03
-    num_val_probes["single_pix"] = 0.03
+    num_val_probes["patch"] = 0.02
+    num_val_probes["single_pix"] = 0.04
     num_val_probes["warped"] = 0.2
 correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
 if correct_abl and defense == "abl":
