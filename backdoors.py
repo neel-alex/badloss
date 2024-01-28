@@ -15,14 +15,14 @@ FIXED_BACKDOOR_ALPHA = 0.025
 SINUSOID_BACKDOOR_ALPHA = 0.075
 SINUSOID_BACKDOOR_FREQ = 6
 
-BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid'}
+BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid', "narcissus"}
 BOOSTING_RATIO = 2
-CLEAN_LABEL_ATTACKS = {'sinusoid'}
+CLEAN_LABEL_ATTACKS = {'sinusoid', 'narcissus'}
 
 
 class BackdoorPatch(object):
     def __init__(self, single_pixel_backdoor=False, reverse_backdoor=False,
-                 pattern=None, alpha=None):
+                 pattern=None, alpha=None, mode='average'):
         assert pattern is None or (not single_pixel_backdoor and not reverse_backdoor and alpha is not None)
 
         self.single_pixel_backdoor = single_pixel_backdoor
@@ -30,12 +30,15 @@ class BackdoorPatch(object):
 
         self.pattern = pattern
         self.alpha = alpha
+        self.mode = mode
 
     def __call__(self, tensor):
         backdoor_pix_val = 1.0
 
-        if self.pattern is not None:
+        if self.pattern is not None and self.mode == 'average':
             tensor = (1 - self.alpha) * tensor + (self.alpha) * self.pattern
+        elif self.pattern is not None and self.mode == 'add':
+            tensor = tensor + self.pattern * self.alpha
         elif self.single_pixel_backdoor:
             if self.reverse_backdoor:
                 tensor[:, 1, 1] = backdoor_pix_val
@@ -142,6 +145,10 @@ def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
                 pattern[:, col, :] = 1 - np.cos(2 * np.pi * col * freq / pattern.shape[1])
         pattern = transforms.ToTensor()(pattern)
 
+    if "narcissus" in attack_name:
+        pattern = np.load(f'data/{attack_name}_noise_{dataset}.npy')  # TODO: generate a new narcissus, currently just the same
+        pattern = torch.tensor(pattern[0])
+
     return pattern
 
 
@@ -180,6 +187,8 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
             backdoor = WarpingAttack(img_size[0], identity_grid=id_grid, noise_grid=noise_grid)
 
         aux_data = (backdoor.identity_grid, backdoor.noise_grid)
+    elif attack_name == "narcissus" or attack_name == "alt_narcissus":
+        backdoor = BackdoorPatch(pattern=pattern, alpha=1*alpha_boost, mode='add')
     else:
         raise NameError(f"Attack type {attack_name} is not a valid attack type.")
     backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
@@ -293,6 +302,8 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
             attack_targets['sinusoid'] = np.random.choice(np.arange(num_classes))
     if 'sleeper' in val_probe_attacks:
         attack_targets['sleeper'] = sleeper_classes[dataset]['train']
+    if 'narcissus' in val_probe_attacks:
+        attack_targets['narcissus'] = narcissus_classes[dataset]
     print("Chosen val attack targets:", attack_targets)
     attack_numbers = {attack: int(len(train_set_wo_aug) * num_val_probes[attack]) for attack in val_probe_attacks}
     print("Making attack image quantities:", attack_numbers, "(clean label attacks may be incorrect)")
@@ -316,7 +327,7 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
         # For clean attacks, get clean indices to choose from.
         indices_to_choose_from = train_indices
         if attack in CLEAN_LABEL_ATTACKS:
-            indices_to_choose_from = np.where(train_set_wo_aug.targets == target)[0]
+            indices_to_choose_from = np.where(np.array(train_set_wo_aug.targets) == target)[0]
             # Clean label attacks are expressed as a fraction of the target class! Adjust attack number appropriately.
             num = int(num_val_probes[attack] * len(indices_to_choose_from))
             if dataset == "gtsrb":
@@ -370,7 +381,7 @@ def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, atta
 
         # Don't use any clean indices -- this way, the attack success rate should start at 0.
         #   (though practically there will be some randomly classified training images with low test acc.)
-        non_clean_test_indices = np.where(test_set.targets != target)[0]
+        non_clean_test_indices = np.where(np.array(test_set.targets) != target)[0]
         test_indices = np.random.choice(non_clean_test_indices, size=min(len(non_clean_test_indices), num_test_probes),
                                         replace=False)
         test_labels = np.array([target for _ in test_indices])
@@ -391,6 +402,10 @@ sleeper_classes = {
         'train': 6,  # Train images are frogs
         'test':  4   # Source class is deer
     }
+}
+
+narcissus_classes = {
+    'cifar10': 2
 }
 
 DATA_ROOT = "./data/"  # TODO: set this better, somehow resolve circular import risk?

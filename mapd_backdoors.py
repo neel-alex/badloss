@@ -41,15 +41,15 @@ from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other
 from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, FreqCNN
 
-default_attack  = "all"
-default_defense = "mapd"
+default_attack  = "narcissus"
+default_defense = "nc"
 default_poisoning_ratio = None
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
-attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped"]  # TODO: Add sleeper...
+attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped", "narcissus"]  # TODO: Add sleeper...
 defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
-poisoning_ratio_choices = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05]
+poisoning_ratio_choices = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3]
 
 if len(sys.argv) < 2:
     print(f"Usage: {sys.argv[0]} <Dataset: {'/'.join(dataset_choices)}>")
@@ -87,10 +87,13 @@ if attack == "all":
 elif attack in {"patch", "single_pix", "fixed", "sinusoid"}:
     train_probe_attack = "reversed_" + attack
     val_probe_attacks = [attack]
+elif attack == "narcissus":
+    train_probe_attack = "alt_narcissus"
+    val_probe_attacks = [attack]
 else:
     train_probe_attack = attack
     val_probe_attacks = [attack]
-num_train_probes = 500  # Fixed number -- 4x this many probes will be made
+num_train_probes = 250  # Fixed number -- 4x this many probes will be made
                             # (now 3x this number of backdoor probes -- (num) normal, (num) mislabeled, (num) normal for val;
                             #  then (2*num) clean examples set aside for comparison.
 if attack == "warped":
@@ -105,7 +108,8 @@ num_val_probes = {
     "fixed": 0.01,
     "sinusoid": 0.1,  # Clean label attacks are expressed as a fraction of the target class!
     "warped": 0.1,
-    "sleeper": 0.01,  # TODO: Is this right? Checks out for CIFAR-10 I think...
+    "sleeper": 0.05,  # TODO: Is this right? Checks out for CIFAR-10 I think, but it's 100% 
+    "narcissus": 0.005,  # So they claim... 25 images!!
 }
 if dataset == "gtsrb":
     num_val_probes["patch"] = 0.02
@@ -136,7 +140,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp40"
+project_id = "exp43"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -225,11 +229,14 @@ val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_
                                                                             device,)
 
 include_val_probe_examples = False
+
+
 train_probe, attack_target, aux_data = make_train_probes(num_classes, dataset, train_set_wo_aug,
                                                          num_train_probes, train_probe_attack,
                                                          experiment_output_dir, main_proc, img_size, device,
                                                          val_probe_indices=val_probes["all_backdoor_idx"],
                                                          include_val_probe_examples=include_val_probe_examples)
+
 train_probes_idx = train_probe["all_backdoor_idx"]
 
 test_probes = make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets,
@@ -884,9 +891,6 @@ if defense == "mapd":
         print(f"{current_cls} AUC")
         plot_auc(label_dict, pred_dict, key_list, output_file)
 
-    if poisoning_ratio is not None:
-        quit()
-
     def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class, output_dir, class_to_surface, probe_class_to_surface):
         print("Computing probabilities for probe classes using kNN...")
 
@@ -1046,7 +1050,7 @@ if defense == "mapd":
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.1]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
@@ -1368,7 +1372,7 @@ if defense == "nc":
     attacked_classes = attacked_classes[(norms[attacked_classes] <= median).nonzero()[:, 0]]
 
     clean_activations, clean_indices, _, _ = get_last_layer_activations(model, new_idx_loader)
-    clean_probe_indices = np.concatenate([train_probe['clean_idx'], train_probe['clean_val_idx']])
+    clean_probe_indices = np.array(train_probe['clean_idx'])
     indices_to_check = torch.isin(clean_indices, torch.tensor(clean_probe_indices)).nonzero()[:, 0]
 
     poison_acts_by_class = []
