@@ -96,7 +96,7 @@ else:
 num_train_probes = 250  # Fixed number -- 4x this many probes will be made
                             # (now 3x this number of backdoor probes -- (num) normal, (num) mislabeled, (num) normal for val;
                             #  then (2*num) clean examples set aside for comparison.
-train_probe_counts = [25, 50, 100, 150, 200, 250, 300, 400, 500]
+train_probe_counts = [25]#, 50, 100, 150, 200, 250, 300, 400, 500]
 num_train_probes = train_probe_counts[0]  # TODO: What if multiple of the same count are wanted?
 
 if attack == "warped":
@@ -281,6 +281,10 @@ lr = 0.1
 momentum = 0.9
 wd = 0.0001
 moving_avg_weight = None
+augment_in_pretraining = False
+augment_in_retraining = True
+if augment_in_retraining == False:
+    raise NotImplementedError("Set augment = False in dataset_utils instead, good luck.")
 
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
@@ -434,8 +438,9 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, v
 
 if defense in {"nc", "ac", "ss", "freq", "abl"}:
     if not os.path.exists(model_file):
+        loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
         for epoch in range(num_epochs):
-            train(model, device, new_idx_loader, optimizer, criterion, scaler)
+            train(model, device, loader, optimizer, criterion, scaler)
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
@@ -546,9 +551,10 @@ elif defense == "mapd":
             use_eval_mode = True  # eval mode BN
             print(f"!! Using max loss bound: {max_loss_val_bound} / Eval mode: {use_eval_mode}")
             moving_avg_weight = None
+            loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
 
             for epoch in range(num_epochs):
-                output_dict = train(model, device, new_idx_loader, optimizer, criterion, scaler)
+                output_dict = train(model, device, loader, optimizer, criterion, scaler)
 
                 # Collect test set statistics
                 print("Stats for epoch #", epoch+1)
