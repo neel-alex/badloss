@@ -226,8 +226,8 @@ def add_probe_data(probe_dict, key, indices, dataset, device, labels, transform=
 
 def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
                       train_probe_attack, output_dir, main_proc, img_size, device,
-                      val_probe_indices, include_harder_backdoor_probes=True,
-                      include_val_probe_examples=True):
+                      val_probe_indices, include_harder_backdoor_probes=False,
+                      include_val_probe_examples=False):
     probes = {"backdoor": [], "clean": [], "backdoor_val": [], "clean_val": []}
     attack_target = np.random.choice(np.arange(num_classes))
     print("Chosen train probe target:", attack_target)

@@ -137,6 +137,8 @@ def some_plot(statistics, log_predictions, label_map_dict, include_plot_title, d
 
         x_vals = list(range(1, len(statistics["test"]) + 1))
         for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
+            if k == "aux":
+                continue
             if k == "predictions":
                 continue
             if not log_predictions and k == "train":
@@ -179,6 +181,8 @@ def some_other_plot(statistics, log_predictions, label_map_dict, include_plot_ti
 
         x_vals = list(range(1, len(statistics["test"]) + 1))
         for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
+            if k == "aux":
+                continue
             if k == "predictions":
                 continue
             if not log_predictions and k == "train":
