@@ -632,7 +632,7 @@ if defense == "mapd":
         print("Keys in statistics file:", natsort.natsorted(list(statistics.keys())))
 
         some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
-        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
+        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, num_train_probes)
 
 
         if not log_predictions:

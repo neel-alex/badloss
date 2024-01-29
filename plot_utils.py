@@ -169,7 +169,7 @@ def some_plot(statistics, log_predictions, label_map_dict, include_plot_title, d
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
 
-def some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, output_dir):
+def some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, output_dir, num_train_probes):
     line_styles = ['solid', 'dashed', 'dashdot', 'dotted']
     marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
     marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink",
@@ -204,7 +204,7 @@ def some_other_plot(statistics, log_predictions, label_map_dict, include_plot_ti
         if include_plot_title:
             plt.title(f"Training loss dynamics computed for ResNet-50 (CIFAR-100)", fontsize=font_size)
         plt.tight_layout()
-        output_file = os.path.join(output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}.png")
+        output_file = os.path.join(output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}_{num_train_probes}_probes.png")
         if main_proc and output_file is not None:
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
