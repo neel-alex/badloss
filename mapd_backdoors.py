@@ -96,7 +96,7 @@ else:
 num_train_probes = 250  # Fixed number -- 4x this many probes will be made
                             # (now 3x this number of backdoor probes -- (num) normal, (num) mislabeled, (num) normal for val;
                             #  then (2*num) clean examples set aside for comparison.
-train_probe_counts = [25]#, 50, 100, 150, 200, 250, 300, 400, 500]
+train_probe_counts = [25, 50, 100, 150, 200, 250, 300, 400, 500]
 num_train_probes = train_probe_counts[0]  # TODO: What if multiple of the same count are wanted?
 
 if attack == "warped":
@@ -265,11 +265,11 @@ if dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
-    num_epochs = 100
+    num_epochs = 100 if defense != "mapd" else 50
     batch_size = 128
 else:
     assert dataset == "imagenet" or dataset == "gtsrb"
-    num_epochs = 100
+    num_epochs = 100 if defense != "mapd" else 50
     optimizer_batch_size = 256
     batch_size = 256
     if distributed:
@@ -1181,8 +1181,9 @@ if defense == "mapd":
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
+    num_epochs = 100
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
     if not os.path.exists(output_checkpoint_dir):
