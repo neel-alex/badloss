@@ -134,6 +134,8 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 np.random.seed(seed=seed)
 random.seed(seed)
+torch.use_deterministic_algorithms(True)
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 # Plotting config
 include_plot_title = False
@@ -599,6 +601,7 @@ test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_p
 
 if defense == "mapd":
     knn_classifiers = {}
+    oc_knn_classifiers = {}
     for key in stats_dict:
         num_train_probes = key
         statistics = stats_dict[key]
@@ -895,6 +898,7 @@ if defense == "mapd":
         oc_clf_neighbors = len(clean_trajectories)
         oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
         oc_clf.fit(clean_trajectories, clean_labels)
+        oc_knn_classifiers[num_train_probes] = clf
 
 
         print("Evaluating the trajectory classifier...")
@@ -1106,6 +1110,7 @@ if defense == "mapd":
 
     # In[ ]:
     print(knn_classifiers)
+    print(oc_knn_classifiers)
 
     print("!! Collecting clean training indices...")
     losses_np = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
@@ -1115,19 +1120,37 @@ if defense == "mapd":
     num_missing_vals = np.sum(missing_vals)
     print(f"!! Total loss traj len: {len(losses_np)} / Missing vals in loss trajs: {num_missing_vals}")
     take_weighted_average = True
+    use_one_class = True
+    use_exp_weighting = True
+    oc_eps = 0.01
     all_probs = []
     all_dists = []
 
-    for c in knn_classifiers:
-        clf = knn_classifiers[c]
-        all_probs.append(clf.predict_proba(losses_np[available_ex]))
-        if take_weighted_average:
-            all_dists.append(clf.kneighbors(losses_np[available_ex], clf.n_samples_fit_)[0].mean(axis=1))
+    if use_one_class:
+        take_weighted_average = False
+        for c in oc_knn_classifiers:
+            clf = oc_knn_classifiers[c]
+            dists = clf.kneighbors(losses_np[available_ex])[0]
+            if use_exp_weighting:
+                exp_weighted_dists = np.log(oc_eps + dists.mean(axis=1))
+                zero_min_dists = exp_weighted_dists - exp_weighted_dists.min()
+                probs = zero_min_dists / zero_min_dists.max()
+            else:
+                probs = (dists - dists.min()) / (dists - dists.min()).max()  # Min 0, max 1 -- extremely naive.
+            all_probs.append(probs)
+        all_probs = np.array(all_probs).reshape((*np.array(all_probs).shape, 1))
+
+    else:
+        for c in knn_classifiers:
+            clf = knn_classifiers[c]
+            all_probs.append(clf.predict_proba(losses_np[available_ex]))
+            if take_weighted_average:
+                all_dists.append(clf.kneighbors(losses_np[available_ex], clf.n_samples_fit_)[0].mean(axis=1))
 
     if take_weighted_average:
         avail_ex_probs = (np.array(all_probs)[:, :, 0] * (np.array(all_dists) / np.array(all_dists).sum(axis=0))).sum(axis=0)  # TODO: Weight the distances somehow...
     else:
-        avail_ex_probs = np.array(all_probs).mean(axis=0)
+        avail_ex_probs = np.array(all_probs)[:, :, 0].mean(axis=0)
 
     avail_ex_probs = np.array([avail_ex_probs, 1-avail_ex_probs]).T
 
