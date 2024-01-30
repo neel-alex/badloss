@@ -11,6 +11,7 @@ import os
 import sys
 import math
 import copy
+import wandb
 import pickle
 import shutil
 import random
@@ -155,6 +156,17 @@ surface_examples = False
 print("Dataset:", dataset)
 print("Distributed training:", distributed)
 
+# Initalize W&B -- assumes wandb is already logged in
+log_wandb = False
+if dist_utils.is_main_proc():
+    print("Initializing w&b")
+    wandb_project = f"mapd_backdoors_{dataset}"
+    wandb_run_name = f"attack_{attack}_defense_{defense}{'_poisoning_ratio' + str(poisoning_ratio) if poisoning_ratio is not None else ''}_run_{project_id}"
+    wandb.init(
+        project=wandb_project,
+        name=wandb_run_name,
+    )
+    log_wandb = True
 
 # Initialize the distributed environment
 gpu = 0
@@ -365,6 +377,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                   log_predictions=log_predictions)
     if statistics is not None:
         statistics["test"].append(test_stats)
+        if log_wandb:
+            wandb.log({"test": test_stats})
 
     if log_predictions:
         # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
@@ -373,6 +387,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                         max_loss_val_bound=max_loss_val_bound)
         if statistics is not None:
             statistics["train"].append(train_stats)
+            if log_wandb:
+                wandb.log({"train": train_stats})
 
         # Add predictions from all the different sets / probes
         if predictions is not None:
@@ -406,8 +422,12 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                     predictions[epoch][attack_type+"_val"] = val_preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
+                if log_wandb:
+                    wandb.log({attack_type: stats})
                 if val_stats is not None:
                     statistics[attack_type+"_val"].append(val_stats)
+                    if log_wandb:
+                        wandb.log({attack_type+"_val": val_stats})
         else:
             suffix = ' (val)'
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
@@ -419,6 +439,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                 predictions[epoch][attack_type] = preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
+            if log_wandb:
+                wandb.log({attack_type: stats})
 
 
 def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size):
@@ -433,6 +455,8 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, v
         output_dict[attack]['accuracy'] = stats['acc']
         output_dict[attack]['total'] = stats['total']
         output_dict[attack]['correct'] = stats['correct']
+    if log_wandb:
+        wandb.log({"unseen_probes": output_dict})
     return output_dict
 
 
