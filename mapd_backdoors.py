@@ -1966,3 +1966,6 @@ if defense == "abl":
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                       log_predictions=log_predictions)
         test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+
+if log_wandb:
+    wandb.finish()
