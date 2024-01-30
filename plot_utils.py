@@ -1,4 +1,5 @@
 import os
+import wandb
 import natsort
 import itertools
 
@@ -29,8 +30,13 @@ linewidth = 5.0
 alpha = 0.7
 
 
+def log_wandb_img(image_loc):
+    image_name = os.path.splitext(os.path.split(image_loc)[1])[0]
+    wandb.log({image_name: wandb.Image(image_name)})
+
+
 def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, output_file=None, add_mem_scores=False,
-         diff_image=False, use_abs_val=True):
+         diff_image=False, use_abs_val=True, log_wandb=False):
     num_plots_per_row = 3
     plot_rows = 3
     plot_size = 3
@@ -81,10 +87,13 @@ def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, ou
     fig.tight_layout()
     if output_file is not None:
         plt.savefig(os.path.join(output_dir, output_file), dpi=300, bbox_inches="tight")
+        if log_wandb:
+            log_wandb_img(os.path.join(output_dir, output_file))
+
     plt.close('all')
 
 
-def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_dir):
+def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_dir, log_wandb=False):
     print("Backdoor examples")
     for attack_type in attack_types:
         plot(probes[f"{attack_type}"], probes[f"{attack_type}_labels"], None, class_names=train_set.classes,
@@ -93,11 +102,14 @@ def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_d
              output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_diff_{rank}.png", diff_image=True)
 
     print("Clean examples")
+    output_file = f"clean_{dataset}_{rank}.png"
     plot(probes["clean"], probes["clean_labels"], None, class_names=train_set.classes,
-         output_file=f"clean_{dataset}_{rank}.png", output_dir=output_dir)
+         output_file=output_file, output_dir=output_dir)
+    if log_wandb:
+        log_wandb_img(os.path.join(output_dir, output_file))
 
 
-def plot_probe_ex(x, y, probs, output_file=None):
+def plot_probe_ex(x, y, probs, output_file=None, log_wandb=False):
     plot_size = 3
     fig, ax = plt.subplots(plot_rows, num_plots_per_row, figsize=(plot_size * num_plots_per_row, plot_size * plot_rows), sharex=True, sharey=True)
 
@@ -122,10 +134,12 @@ def plot_probe_ex(x, y, probs, output_file=None):
     fig.tight_layout()
     if output_file is not None:
         fig.savefig(output_file, bbox_inches=0.0, pad_inches=0)
+        if log_wandb:
+            log_wandb_img(output_file)
     plt.close()
 
 
-def some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, output_dir):
+def some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, output_dir, log_wandb=False):
     line_styles = ['solid', 'dashed', 'dashdot', 'dotted']
     marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
     marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink",
@@ -167,9 +181,12 @@ def some_plot(statistics, log_predictions, label_map_dict, include_plot_title, d
         output_file = os.path.join(output_dir, f"probe_acc_{dataset}{'_val' if val_included else ''}.png")
         if main_proc and output_file is not None:
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
+            if log_wandb:
+                log_wandb_img(output_file)
+    return output_file
 
 
-def some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, output_dir, num_train_probes):
+def some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, output_dir, num_train_probes, log_wandb=False):
     line_styles = ['solid', 'dashed', 'dashdot', 'dotted']
     marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
     marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink",
@@ -207,6 +224,9 @@ def some_other_plot(statistics, log_predictions, label_map_dict, include_plot_ti
         output_file = os.path.join(output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}_{num_train_probes}_probes.png")
         if main_proc and output_file is not None:
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
+            if log_wandb:
+                log_wandb_img(output_file)
+    return output_file
 
 
 def make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_identity):
@@ -217,7 +237,7 @@ def make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_id
 
 
 def yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
-                     label_map_dict, include_plot_title, dataset, main_proc, output_dir):
+                     label_map_dict, include_plot_title, dataset, main_proc, output_dir, log_wandb=False):
     # Normalization should only happen for num_train_probes (val probes are separate)
 
 
@@ -259,11 +279,13 @@ def yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cum
                                        f"{'first_learned' if iden == 1 else 'learning'}_dynamics_{dataset}{'_val' if val_included else ''}.png")
             if main_proc and output_file is not None:
                 plt.savefig(output_file, dpi=300, bbox_inches="tight")
+                if log_wandb:
+                    log_wandb_img(output_file)
             plt.close('all')
 
 
 def one_more_plot(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                  dataset, main_proc, output_dir):
+                  dataset, main_proc, output_dir, log_wandb=False):
     fig, ax = plt.subplots(1, 1, figsize=(50, 10))
     labels = list(range(1, len(sorted_losses_all) + 1))
     color_list = ['tab:red', 'tab:blue', 'tab:green', 'tab:purple', 'tab:brown', 'tab:pink', 'tab:cyan', 'tab:olive',
@@ -305,10 +327,12 @@ def one_more_plot(sorted_losses_all, class_names, label_map_dict, dataset_probe_
     output_file = os.path.join(output_dir, f"loss_dist_{dataset}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
+        if log_wandb:
+            log_wandb_img(output_file)
 
 
 def plot_loss_dynamics_and_violin(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                                  dataset, output_dir, main_proc):
+                                  dataset, output_dir, main_proc, log_wandb=False):
     loss_dynamics_output_dir = os.path.join(output_dir, "loss_distribution")
     violin_loss_dynamics_output_dir = os.path.join(output_dir, "loss_distribution_violin")
     if main_proc and not os.path.exists(loss_dynamics_output_dir):
@@ -367,6 +391,8 @@ def plot_loss_dynamics_and_violin(sorted_losses_all, class_names, label_map_dict
         output_file = os.path.join(loss_dynamics_output_dir, f"loss_dist_ep_{epoch}_{dataset}.png")
         if main_proc and output_file is not None:
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
+            if log_wandb:
+                log_wandb_img(output_file)
         plt.close('all')
 
     for epoch in range(0, len(sorted_losses_all), 5):
@@ -429,12 +455,14 @@ def plot_loss_dynamics_and_violin(sorted_losses_all, class_names, label_map_dict
         output_file = os.path.join(violin_loss_dynamics_output_dir, f"loss_dist_violin_ep_{epoch}_{dataset}.png")
         if main_proc and output_file is not None:
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
+            if log_wandb:
+                log_wandb_img(output_file)
         plt.close('all')
 
 
 def visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_identity,
                                 sorted_losses_all, output_dir, main_proc, dataset,
-                                val_included=False, clf=None, output_file=None):
+                                val_included=False, clf=None, output_file=None, log_wandb=False):
     current_class_names = [x for x in class_names if x not in ["train", "train_noisy", "train_non_noisy"]]
     if not val_included:
         current_class_names = [x for x in current_class_names if not x.endswith("_val")]
@@ -519,11 +547,14 @@ def visualize_loss_trajectories(class_names, label_map_dict, dataset_probe_ident
                                    f"loss_trajectories_{dataset}{'_val' if val_included else ''}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
+        if log_wandb:
+            log_wandb_img(output_file)
     plt.close('all')
 
 
 def visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_probe_identity,
-                                         sorted_losses_all, output_dir, main_proc, dataset, output_file=None):
+                                         sorted_losses_all, output_dir, main_proc, dataset, output_file=None,
+                                         log_wandb=False):
     current_class_names = [x for x in class_names if x not in ["train", "train_noisy", "train_non_noisy"]]
     current_class_names = [x for x in current_class_names if "_val" not in x or x.replace("_val", "") not in class_names]
     print("Selected class names:", current_class_names)
@@ -589,12 +620,14 @@ def visualize_loss_trajectories_specific(class_names, label_map_dict, dataset_pr
         output_file = os.path.join(output_dir, f"loss_trajectories_{dataset}_specific.pdf")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
+        if log_wandb:
+            log_wandb_img(output_file)
     plt.close('all')
 
 
 def generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
                                           sorted_losses_all, output_dir, main_proc, dataset,
-                                          output_file=None, embedding_type='tsne'):
+                                          output_file=None, embedding_type='tsne', log_wandb=False):
     assert embedding_type in ["tsne", "pca", "mds"]
     
     current_class_names = [x for x in class_names if x not in ["train", "train_noisy", "train_non_noisy"]]
@@ -670,12 +703,14 @@ def generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_p
         output_file = os.path.join(output_dir, f"{dataset}_{embedding_type}_trajs.pdf")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
+        if log_wandb:
+            log_wandb_img(output_file)
     plt.close('all')
 
 
 def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, num_train_probes,
                                      output_dir, normalize=False, title=None, cmap=plt.cm.Blues,
-                                     fontsize=15):
+                                     fontsize=15, log_wandb=False):
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     cm = confusion_matrix(
         y_true,
@@ -719,9 +754,12 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, include_all_val, n
     output_file = os.path.join(output_dir,
                                f"probe_confusion_matrix_trajectories_val_probes{'_all' if include_all_val else ''}_{num_train_probes}{'_norm' if normalize else ''}.png")
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    if log_wandb:
+        log_wandb_img(output_file)
 
 
-def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_auc=False, title=None):
+def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_auc=False, title=None,
+             log_wandb=False):
     assert isinstance(predictions, dict), predictions
     assert isinstance(key_list, list), key_list
 
@@ -803,9 +841,11 @@ def plot_auc(labels, predictions, key_list, output_file, log_plot=False, adapt_a
 
     plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    if log_wandb:
+        log_wandb_img(output_file)
 
 
-def plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=None):
+def plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=None, log_wandb=False):
     fontsize = 15
     fig, ax = plt.subplots(1, 1, figsize=(6, 7 + (1 if title is not None else 0)))
 
@@ -826,3 +866,5 @@ def plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, ou
 
     plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    if log_wandb:
+        log_wandb_img(output_file)

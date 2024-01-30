@@ -266,7 +266,7 @@ if defense == "mapd":
     unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
     probes['all_backdoor_idx'] = unified_backdoor_idx
     chosen_attack_targets = {**{'backdoor': attack_target}, **attack_targets}
-    plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
+    plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir, log_wandb=log_wandb)
 else:
     probes = val_probes
 
@@ -655,8 +655,8 @@ if defense == "mapd":
 
         print("Keys in statistics file:", natsort.natsorted(list(statistics.keys())))
 
-        some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
-        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, num_train_probes)
+        some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
+        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, num_train_probes, log_wandb=log_wandb)
 
 
         if not log_predictions:
@@ -786,7 +786,7 @@ if defense == "mapd":
 
         normalizers = make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_identity)
         yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
-                         label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
+                         label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
 
         # ### Loss distribution plots
 
@@ -825,11 +825,11 @@ if defense == "mapd":
 
 
         one_more_plot(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                          dataset, main_proc, experiment_output_dir)
+                          dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
 
 
         plot_loss_dynamics_and_violin(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                                          dataset, experiment_output_dir, main_proc)
+                                          dataset, experiment_output_dir, main_proc, log_wandb=log_wandb)
 
 
         if poisoning_ratio is None:
@@ -844,7 +844,7 @@ if defense == "mapd":
             if generate_tsne_plot:
                 generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
                                                     sorted_losses_all, experiment_output_dir, main_proc,
-                                                    dataset, output_file=None, embedding_type='tsne')
+                                                    dataset, output_file=None, embedding_type='tsne', log_wandb=log_wandb)
 
         # Convert the data into a complete trajectory dataset
         print("Converting trajectories to dataset...")
@@ -953,7 +953,7 @@ if defense == "mapd":
                 test_acc = (prediction == current_probe_val_y).astype(np.float32).mean()
                 print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
                 plot_confusion_matrix_from_preds(current_probe_val_y, prediction, plot_classes, include_all_val,
-                                                 num_train_probes, experiment_output_dir, normalize=normalize)
+                                                 num_train_probes, experiment_output_dir, normalize=normalize, log_wandb=log_wandb)
 
 
         # In[ ]:
@@ -986,7 +986,7 @@ if defense == "mapd":
 
         output_file = os.path.join(experiment_output_dir, f"auc_{dataset}_clean_vs_backdoor.png")
         print("Base AUC")
-        plot_auc(label_dict, pred_dict, key_list, output_file)
+        plot_auc(label_dict, pred_dict, key_list, output_file, log_wandb=log_wandb)
 
         for current_cls in main_classes_val:
             if current_cls == "clean":
@@ -1008,7 +1008,7 @@ if defense == "mapd":
 
             output_file = os.path.join(experiment_output_dir, f"auc_{dataset}_clean_vs_backdoor_{current_cls}.png")
             print(f"{current_cls} AUC")
-            plot_auc(label_dict, pred_dict, key_list, output_file)
+            plot_auc(label_dict, pred_dict, key_list, output_file, log_wandb=log_wandb)
 
         def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class, output_dir, class_to_surface, probe_class_to_surface):
             print("Computing probabilities for probe classes using kNN...")
@@ -1077,7 +1077,7 @@ if defense == "mapd":
                                 file_name = f"rank_{rank}_idx_{global_idx}_count_{folder_counter[pred_folder]}_conf_{pred_prob:.2f}_{pred_folder}.png"
                                 output_file = os.path.join(output_dir, pred_folder, file_name)
                                 plot_probe_ex([x[0] for x in folder_queue[pred_folder]], [x[1] for x in folder_queue[pred_folder]],
-                                            [x[2] for x in folder_queue[pred_folder]], output_file)
+                                            [x[2] for x in folder_queue[pred_folder]], output_file, log_wandb=log_wandb)
                                 folder_counter[pred_folder] += 1
                                 if iterator % 4 == 0:
                                     print("Writing image to fle:", output_file)
@@ -1136,7 +1136,7 @@ if defense == "mapd":
                                  log_predictions)
         output_file = os.path.join(experiment_output_dir, f"attack_success_initial.png")
         print(output_dict)
-        plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model")
+        plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model", log_wandb=log_wandb)
 
     # In[ ]:
     print(knn_classifiers)
@@ -1279,7 +1279,7 @@ if defense == "mapd":
             add_clean_to_output_dict(output_dict, clean_model, device, criterion, test_idx_loader, distributed, rank,
                                      log_predictions)
             output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
-            plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title)
+            plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title, log_wandb=log_wandb)
             print("~" * 100)
         print("=" * 100)
 
