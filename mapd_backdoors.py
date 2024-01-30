@@ -1225,6 +1225,7 @@ if defense == "mapd":
 
         current_thresh_list = [None] if train_type == "original" else thresh_list
         for threshold in current_thresh_list:
+            wandb_prefix = f"{train_type}_thresh_{threshold}_"
             if train_type == "original":
                 # Use the training set w/o attacks
                 assert threshold is None, threshold
@@ -1434,6 +1435,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     return clean_model
 
 
+wandb_prefix = "retraining_"
 if defense == "nc":
     def apply_mask_and_trigger(batch, mask, trigger):
         return batch * (1 - mask) + mask * trigger
