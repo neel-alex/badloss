@@ -32,7 +32,7 @@ alpha = 0.7
 
 def log_wandb_img(image_loc):
     image_name = os.path.splitext(os.path.split(image_loc)[1])[0]
-    wandb.log({image_name: wandb.Image(image_name)})
+    wandb.log({image_name: wandb.Image(image_loc)})
 
 
 def plot(x, y=None, memorization_val=None, class_names=None, output_dir=None, output_file=None, add_mem_scores=False,
