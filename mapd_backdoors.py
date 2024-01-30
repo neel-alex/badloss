@@ -146,7 +146,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp44"
+project_id = "exp45"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -378,7 +378,7 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
     if statistics is not None:
         statistics["test"].append(test_stats)
         if log_wandb:
-            wandb.log({"test": test_stats})
+            wandb.log({wandb_prefix+"test": test_stats})
 
     if log_predictions:
         # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
@@ -388,7 +388,7 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
         if statistics is not None:
             statistics["train"].append(train_stats)
             if log_wandb:
-                wandb.log({"train": train_stats})
+                wandb.log({wandb_prefix+"train": train_stats})
 
         # Add predictions from all the different sets / probes
         if predictions is not None:
@@ -423,11 +423,11 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             if statistics is not None:
                 statistics[attack_type].append(stats)
                 if log_wandb:
-                    wandb.log({attack_type: stats})
+                    wandb.log({wandb_prefix+attack_type: stats})
                 if val_stats is not None:
                     statistics[attack_type+"_val"].append(val_stats)
                     if log_wandb:
-                        wandb.log({attack_type+"_val": val_stats})
+                        wandb.log({wandb_prefix+attack_type+"_val": val_stats})
         else:
             suffix = ' (val)'
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
@@ -440,7 +440,7 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             if statistics is not None:
                 statistics[attack_type].append(stats)
             if log_wandb:
-                wandb.log({attack_type: stats})
+                wandb.log({wandb_prefix+attack_type: stats})
 
 
 def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size):
@@ -460,6 +460,7 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, v
     return output_dict
 
 
+wandb_prefix = ''
 if defense in {"nc", "ac", "ss", "freq", "abl"}:
     if not os.path.exists(model_file):
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
@@ -492,6 +493,7 @@ if defense in {"nc", "ac", "ss", "freq", "abl"}:
 elif defense == "mapd":
     stats_dict = {n: {} for n in train_probe_counts}
     for num_train_probes in train_probe_counts:
+        wandb_prefix = f"num_train_probes_{num_train_probes}_"
         if num_train_probes != train_probe_counts[0]:
             val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, dataset,
                                                                                         train_set_wo_aug,
