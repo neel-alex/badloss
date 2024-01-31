@@ -11,6 +11,7 @@ import os
 import sys
 import math
 import copy
+import wandb
 import pickle
 import shutil
 import random
@@ -148,7 +149,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp44"
+project_id = "exp45"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -158,6 +159,17 @@ surface_examples = False
 print("Dataset:", dataset)
 print("Distributed training:", distributed)
 
+# Initalize W&B -- assumes wandb is already logged in
+log_wandb = False
+if dist_utils.is_main_proc():
+    print("Initializing w&b")
+    wandb_project = f"mapd_backdoors_{dataset}"
+    wandb_run_name = f"attack_{attack}_defense_{defense}{'_poisoning_ratio' + str(poisoning_ratio) if poisoning_ratio is not None else ''}_run_{project_id}"
+    wandb.init(
+        project=wandb_project,
+        name=wandb_run_name,
+    )
+    log_wandb = True
 
 # Initialize the distributed environment
 gpu = 0
@@ -257,7 +269,7 @@ if defense == "mapd":
     unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
     probes['all_backdoor_idx'] = unified_backdoor_idx
     chosen_attack_targets = {**{'backdoor': attack_target}, **attack_targets}
-    plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir)
+    plot_probe_examples(probes, dataset, train_set, attack_types, rank, experiment_output_dir, log_wandb=log_wandb)
 else:
     probes = val_probes
 
@@ -368,6 +380,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                   log_predictions=log_predictions)
     if statistics is not None:
         statistics["test"].append(test_stats)
+        if log_wandb:
+            wandb.log({wandb_prefix+"test": test_stats})
 
     if log_predictions:
         # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
@@ -376,6 +390,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                         max_loss_val_bound=max_loss_val_bound)
         if statistics is not None:
             statistics["train"].append(train_stats)
+            if log_wandb:
+                wandb.log({wandb_prefix+"train": train_stats})
 
         # Add predictions from all the different sets / probes
         if predictions is not None:
@@ -409,8 +425,12 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                     predictions[epoch][attack_type+"_val"] = val_preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
+                if log_wandb:
+                    wandb.log({wandb_prefix+attack_type: stats})
                 if val_stats is not None:
                     statistics[attack_type+"_val"].append(val_stats)
+                    if log_wandb:
+                        wandb.log({wandb_prefix+attack_type+"_val": val_stats})
         else:
             suffix = ' (val)'
             stats, preds = test_tensor(model, device, criterion, probes[attack_type],
@@ -422,6 +442,8 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                 predictions[epoch][attack_type] = preds
             if statistics is not None:
                 statistics[attack_type].append(stats)
+            if log_wandb:
+                wandb.log({wandb_prefix+attack_type: stats})
 
 
 def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size):
@@ -436,9 +458,12 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, v
         output_dict[attack]['accuracy'] = stats['acc']
         output_dict[attack]['total'] = stats['total']
         output_dict[attack]['correct'] = stats['correct']
+    if log_wandb:
+        wandb.log({"unseen_probes": output_dict})
     return output_dict
 
 
+wandb_prefix = ''
 if defense in {"nc", "ac", "ss", "freq", "abl", "cd"}:
     if not os.path.exists(model_file):
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
@@ -471,6 +496,7 @@ if defense in {"nc", "ac", "ss", "freq", "abl", "cd"}:
 elif defense == "mapd":
     stats_dict = {n: {} for n in train_probe_counts}
     for num_train_probes in train_probe_counts:
+        wandb_prefix = f"num_train_probes_{num_train_probes}_"
         if num_train_probes != train_probe_counts[0]:
             val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, dataset,
                                                                                         train_set_wo_aug,
@@ -634,8 +660,8 @@ if defense == "mapd":
 
         print("Keys in statistics file:", natsort.natsorted(list(statistics.keys())))
 
-        some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
-        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, num_train_probes)
+        some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
+        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, num_train_probes, log_wandb=log_wandb)
 
 
         if not log_predictions:
@@ -765,7 +791,7 @@ if defense == "mapd":
 
         normalizers = make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_identity)
         yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
-                         label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir)
+                         label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
 
         # ### Loss distribution plots
 
@@ -804,11 +830,11 @@ if defense == "mapd":
 
 
         one_more_plot(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                          dataset, main_proc, experiment_output_dir)
+                          dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
 
 
         plot_loss_dynamics_and_violin(sorted_losses_all, class_names, label_map_dict, dataset_probe_identity,
-                                          dataset, experiment_output_dir, main_proc)
+                                          dataset, experiment_output_dir, main_proc, log_wandb=log_wandb)
 
 
         if poisoning_ratio is None:
@@ -823,7 +849,7 @@ if defense == "mapd":
             if generate_tsne_plot:
                 generate_embeddings_from_trajectories(class_names, label_map_dict, dataset_probe_identity,
                                                     sorted_losses_all, experiment_output_dir, main_proc,
-                                                    dataset, output_file=None, embedding_type='tsne')
+                                                    dataset, output_file=None, embedding_type='tsne', log_wandb=log_wandb)
 
         # Convert the data into a complete trajectory dataset
         print("Converting trajectories to dataset...")
@@ -932,7 +958,7 @@ if defense == "mapd":
                 test_acc = (prediction == current_probe_val_y).astype(np.float32).mean()
                 print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
                 plot_confusion_matrix_from_preds(current_probe_val_y, prediction, plot_classes, include_all_val,
-                                                 num_train_probes, experiment_output_dir, normalize=normalize)
+                                                 num_train_probes, experiment_output_dir, normalize=normalize, log_wandb=log_wandb)
 
 
         # In[ ]:
@@ -965,7 +991,7 @@ if defense == "mapd":
 
         output_file = os.path.join(experiment_output_dir, f"auc_{dataset}_clean_vs_backdoor.png")
         print("Base AUC")
-        plot_auc(label_dict, pred_dict, key_list, output_file)
+        plot_auc(label_dict, pred_dict, key_list, output_file, log_wandb=log_wandb)
 
         for current_cls in main_classes_val:
             if current_cls == "clean":
@@ -987,7 +1013,7 @@ if defense == "mapd":
 
             output_file = os.path.join(experiment_output_dir, f"auc_{dataset}_clean_vs_backdoor_{current_cls}.png")
             print(f"{current_cls} AUC")
-            plot_auc(label_dict, pred_dict, key_list, output_file)
+            plot_auc(label_dict, pred_dict, key_list, output_file, log_wandb=log_wandb)
 
         def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class, output_dir, class_to_surface, probe_class_to_surface):
             print("Computing probabilities for probe classes using kNN...")
@@ -1056,7 +1082,7 @@ if defense == "mapd":
                                 file_name = f"rank_{rank}_idx_{global_idx}_count_{folder_counter[pred_folder]}_conf_{pred_prob:.2f}_{pred_folder}.png"
                                 output_file = os.path.join(output_dir, pred_folder, file_name)
                                 plot_probe_ex([x[0] for x in folder_queue[pred_folder]], [x[1] for x in folder_queue[pred_folder]],
-                                            [x[2] for x in folder_queue[pred_folder]], output_file)
+                                            [x[2] for x in folder_queue[pred_folder]], output_file, log_wandb=log_wandb)
                                 folder_counter[pred_folder] += 1
                                 if iterator % 4 == 0:
                                     print("Writing image to fle:", output_file)
@@ -1115,7 +1141,7 @@ if defense == "mapd":
                                  log_predictions)
         output_file = os.path.join(experiment_output_dir, f"attack_success_initial.png")
         print(output_dict)
-        plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model")
+        plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title="Initial model", log_wandb=log_wandb)
 
     # In[ ]:
     print(knn_classifiers)
@@ -1202,6 +1228,7 @@ if defense == "mapd":
 
         current_thresh_list = [None] if train_type == "original" else thresh_list
         for threshold in current_thresh_list:
+            wandb_prefix = f"{train_type}_thresh_{threshold}_"
             if train_type == "original":
                 # Use the training set w/o attacks
                 assert threshold is None, threshold
@@ -1258,7 +1285,7 @@ if defense == "mapd":
             add_clean_to_output_dict(output_dict, clean_model, device, criterion, test_idx_loader, distributed, rank,
                                      log_predictions)
             output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
-            plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title)
+            plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title, log_wandb=log_wandb)
             print("~" * 100)
         print("=" * 100)
 
@@ -1411,6 +1438,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     return clean_model
 
 
+wandb_prefix = "retraining_"
 if defense == "nc":
     def apply_mask_and_trigger(batch, mask, trigger):
         return batch * (1 - mask) + mask * trigger
@@ -1970,3 +1998,7 @@ if defense == "cd":
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
                   detection_thresh, probes, log_predictions, test_probes, defense)
+
+
+if log_wandb:
+    wandb.finish()
