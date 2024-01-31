@@ -40,6 +40,7 @@ from plot_utils import plot_probe_examples, plot_probe_ex, some_plot, some_other
     num_queue_plots, plot_auc, generate_embeddings_from_trajectories
 from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, FreqCNN
+from cognitive_distillation import CognitiveDistillation
 
 default_attack  = "patch"
 default_defense = "mapd"
@@ -47,8 +48,8 @@ default_poisoning_ratio = None
 
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
-attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped", "narcissus"]  # TODO: Add sleeper...
-defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl"]
+attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped", "narcissus", "frequency"]
+defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl", "cd"]
 poisoning_ratio_choices = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3]
 
 if len(sys.argv) < 2:
@@ -81,10 +82,10 @@ print(dataset, attack, defense, poisoning_ratio)
 
 if attack == "all":
     train_probe_attack = "reversed_patch"
-    val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "warped"]
+    val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "warped", "narcissus", "frequency"]
     # if dataset == "cifar10":  # TODO: Add sleeper fully...
     #     val_probe_attacks.append("sleeper")
-elif attack in {"patch", "single_pix", "fixed", "sinusoid"}:
+elif attack in {"patch", "single_pix", "fixed", "sinusoid", "frequency"}:
     train_probe_attack = "reversed_" + attack
     val_probe_attacks = [attack]
 elif attack == "narcissus":
@@ -111,13 +112,15 @@ num_val_probes = {
     "fixed": 0.01,
     "sinusoid": 0.1,  # Clean label attacks are expressed as a fraction of the target class!
     "warped": 0.1,
-    "sleeper": 0.05,  # TODO: Is this right? Checks out for CIFAR-10 I think, but it's 100%
+    "sleeper": 0.05,  # TODO: Remove sleeper...
     "narcissus": 0.005,  # So they claim... 25 images!!
+    "frequency": 0.02,  # They claim this is right, but it feels too high
 }
 if dataset == "gtsrb":
     num_val_probes["patch"] = 0.02
     num_val_probes["single_pix"] = 0.04
     num_val_probes["warped"] = 0.2
+    num_val_probes["frequency"] = 0.05
 correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
 if correct_abl and defense == "abl":
     poisoning_ratio = 0.1
@@ -281,7 +284,7 @@ lr = 0.1
 momentum = 0.9
 wd = 0.0001
 moving_avg_weight = None
-augment_in_pretraining = False
+augment_in_pretraining = False if defense == "mapd" else True
 augment_in_retraining = True
 if augment_in_retraining == False:
     raise NotImplementedError("Set augment = False in dataset_utils instead, good luck.")
@@ -436,7 +439,7 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, v
     return output_dict
 
 
-if defense in {"nc", "ac", "ss", "freq", "abl"}:
+if defense in {"nc", "ac", "ss", "freq", "abl", "cd"}:
     if not os.path.exists(model_file):
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
         for epoch in range(num_epochs):
@@ -1416,7 +1419,7 @@ if defense == "nc":
     def train_cleanse(model, mask, trigger, optimizer, target_class, l1_penalty, train_set,
                       use_autocast=False, log_interval=5):
         optimizer.zero_grad()
-        pbar = tqdm(new_idx_loader)
+        pbar = tqdm(new_idx_loader_wo_aug)
         total_in_cls = 0
         for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
             data = data.to(device)
@@ -1503,7 +1506,7 @@ if defense == "nc":
     print("Skipping detected attacks where norm is above median.")
     attacked_classes = attacked_classes[(norms[attacked_classes] <= median).nonzero()[:, 0]]
 
-    clean_activations, clean_indices, _, _ = get_last_layer_activations(model, new_idx_loader)
+    clean_activations, clean_indices, _, _ = get_last_layer_activations(model, new_idx_loader_wo_aug)
     clean_probe_indices = np.array(train_probe['clean_idx'])
     indices_to_check = torch.isin(clean_indices, torch.tensor(clean_probe_indices)).nonzero()[:, 0]
 
@@ -1512,7 +1515,7 @@ if defense == "nc":
     for atk_class in attacked_classes:
         # Get all activations
         mask, trigger = masks[atk_class], triggers[atk_class]
-        dirty_activations, dirty_indices, _, dirty_predictions = get_last_layer_activations(model, new_idx_loader,
+        dirty_activations, dirty_indices, _, dirty_predictions = get_last_layer_activations(model, new_idx_loader_wo_aug,
                                                                             masking_op=lambda img: apply_mask_and_trigger(img, mask, trigger))
         # See how successful the attacks were
         attack_success = (dirty_predictions == atk_class).sum()
@@ -1578,7 +1581,7 @@ if defense == "ac":
 
         return torch.hstack(identified_indices) if identified_indices else np.array([], dtype=int)
 
-    activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader)
+    activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader_wo_aug)
     activation_by_predicted_class = {}
     for i in range(num_classes):
         indices_to_pick = np.where(predictions.cpu() == i)[0]
@@ -1665,7 +1668,7 @@ if defense == "ss":
         rejected_indices = torch.hstack(rejected_indices).unique()
         return indices[rejected_indices.cpu()].numpy()
 
-    activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader)
+    activations, indices, classes, predictions = get_last_layer_activations(model, new_idx_loader_wo_aug)
     taus, cls_idx = [], []
     for cls in range(num_classes):
         cls_indices = (classes == cls).nonzero()[:, 0]
@@ -1938,3 +1941,32 @@ if defense == "abl":
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                       log_predictions=log_predictions)
         test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+
+if defense == "cd":
+    cd = CognitiveDistillation()
+    masks = torch.zeros(len(new_idx_loader_wo_aug.dataset), *img_size[:-1])
+    pbar = tqdm(new_idx_loader_wo_aug)
+    for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
+        masks[ex_idx] = cd(model, data.to(device)).squeeze()
+
+    mask_norms = torch.norm(masks, dim=(1, 2), p=1)
+    valid_mask_idx = torch.where(mask_norms != 0)[0]
+    clean_idx = train_probe['clean_idx']
+    base_idx = np.intersect1d(clean_idx, valid_mask_idx.numpy())
+    print("Num training examples for cognitive distillation", len(base_idx))
+
+    # Not actually necessary, but good if we want to do their thresholded detection
+    #   (everything less than -1 or -0.5 marked suspicious)
+    mean, std = mask_norms[base_idx].mean(), mask_norms[base_idx].std()
+    mask_norms[valid_mask_idx] -= mean
+    mask_norms[valid_mask_idx] /= std
+
+    # Like usual, remove bottom 15% and retrain?
+    sorted_idx = mask_norms.argsort()
+    detection_thresh = 0.15
+    identified_indices = sorted_idx[:int(detection_thresh*len(mask_norms))]
+
+    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes)
+    retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
+                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  detection_thresh, probes, log_predictions, test_probes, defense)

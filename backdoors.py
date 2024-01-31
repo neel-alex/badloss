@@ -108,6 +108,50 @@ class WarpingAttack(object):
         warped_x = self.apply_warping(x, grid_temps)
         return warped_x
 
+class FrequencyAttack(object):
+    def __init__(self, window_size=32, positions=((15, 15), (31, 31)), magnitude=40):
+        super().__init__()
+        self.window_size = window_size
+        self.positions = positions
+        self.magnitude = magnitude
+
+    def __call__(self, x):
+        import copy
+        x_original = copy.deepcopy(x)
+        x = x.numpy()
+        x = np.moveaxis(x, 0, -1)
+        x *= 255.
+        x = x.astype(np.uint8)
+        x = cv2.cvtColor(x, cv2.COLOR_RGB2YCrCb)
+        x = np.moveaxis(x, -1, 0)
+
+        x_dct = np.zeros(x.shape, dtype=np.float)
+        for ch in range(x.shape[0]):
+            for w in range(0, x.shape[1], self.window_size):
+                for h in range(0, x.shape[2], self.window_size):
+                    x_dct[ch, w:w+self.window_size, h:h+self.window_size] = cv2.dct(x[ch][w:w+self.window_size, h:h+self.window_size].astype(np.float))
+
+        # Add trigger
+        for ch in (1, 2):
+            for w in range(0, x.shape[1], self.window_size):
+                for h in range(0, x.shape[2], self.window_size):
+                    for pos in self.positions:
+                        x_dct[ch][w+pos[0], h+pos[1]] += self.magnitude
+
+        for ch in range(x.shape[0]):
+            for w in range(0, x.shape[1], self.window_size):
+                for h in range(0, x.shape[2], self.window_size):
+                    x[ch, w:w+self.window_size, h:h+self.window_size] = cv2.idct(x_dct[ch][w:w+self.window_size, h:h+self.window_size].astype(np.float))
+
+        x = x.astype(np.uint8)
+        x = np.moveaxis(x, 0, -1)
+        x = cv2.cvtColor(x, cv2.COLOR_YCrCb2RGB)
+        x = x / 255.
+        x = np.clip(x, 0, 1)
+        x = np.moveaxis(x, -1, 0)
+        x = torch.tensor(x, dtype=torch.float)
+        return x
+
 
 def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
     pattern = None
@@ -189,6 +233,8 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         aux_data = (backdoor.identity_grid, backdoor.noise_grid)
     elif attack_name == "narcissus" or attack_name == "alt_narcissus":
         backdoor = BackdoorPatch(pattern=pattern, alpha=1*alpha_boost, mode='add')
+    elif attack_name in {"frequency", "reversed_frequency"}:
+        backdoor = FrequencyAttack()
     else:
         raise NameError(f"Attack type {attack_name} is not a valid attack type.")
     backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
