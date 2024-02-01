@@ -8,7 +8,10 @@ import numpy as np
 import torch
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder
-from catalyst.data import DistributedSamplerWrapper
+try:
+    from catalyst.data import DistributedSamplerWrapper
+except ImportError:
+    print("catalyst not found for DistributedSamplerWrapper!")
 
 from plot_utils import plot
 from backdoors import BackdoorPatch, WarpingAttack, ClampRangeTransform
@@ -89,10 +92,14 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
     else:
         assert dataset == "imagenet" or dataset == "gtsrb"
         img_size = (224, 224, 3)
+        if dataset == "gtsrb":  # specifically for GTSRB
+            rand_crop_scale = (0.8, 1.0)
+        else:  # imagenet default
+            rand_crop_scale = (0.08, 1.0)
 
         if use_augmentations:
             print("Training w/ augmentations...")
-            train_transform = [transforms.RandomResizedCrop(224),
+            train_transform = [transforms.RandomResizedCrop(224, scale=rand_crop_scale),
                                transforms.RandomHorizontalFlip(),
                                transforms.ToTensor()]
             test_transform = [transforms.Resize(256),
