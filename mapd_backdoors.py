@@ -43,7 +43,7 @@ from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, FreqCNN
 from cognitive_distillation import CognitiveDistillation
 
-default_attack  = "patch"
+default_attack  = "all"
 default_defense = "mapd"
 default_poisoning_ratio = None
 
@@ -95,16 +95,18 @@ elif attack == "narcissus":
 else:
     train_probe_attack = attack
     val_probe_attacks = [attack]
+train_probe_attack = 'clean_2'
 num_train_probes = 250  # Fixed number -- 4x this many probes will be made
                             # (now 3x this number of backdoor probes -- (num) normal, (num) mislabeled, (num) normal for val;
                             #  then (2*num) clean examples set aside for comparison.
-train_probe_counts = [25, 50, 100, 150, 200, 250, 300, 400, 500]
-num_train_probes = train_probe_counts[0]  # TODO: What if multiple of the same count are wanted?
-
+ensemble_count = 5
+mapd_pretrain_epochs = 50
+"""
 if attack == "warped":
     num_train_probes = 1500  # More probes to more closely imitate learning dynamics of the larger warped attack.
 if attack == "sinusoid" and dataset == "gtsrb":
     num_train_probes = 250  # Need to choose number of train probes carefully since the classes are so small -- this produces 500 poisoned.
+"""
 # Fraction in terms of overall dataset size!! Not in terms of per-class size.
 num_val_probes = {
     "patch": 0.01,
@@ -115,13 +117,12 @@ num_val_probes = {
     "warped": 0.1,
     "sleeper": 0.05,  # TODO: Remove sleeper...
     "narcissus": 0.005,  # So they claim... 25 images!!
-    "frequency": 0.02,  # They claim this is right, but it feels too high
+    "frequency": 0.01,  # They claim this is right, but it feels too high
 }
 if dataset == "gtsrb":
     num_val_probes["patch"] = 0.02
     num_val_probes["single_pix"] = 0.04
     num_val_probes["warped"] = 0.2
-    num_val_probes["frequency"] = 0.05
 correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
 if correct_abl and defense == "abl":
     poisoning_ratio = 0.1
@@ -149,7 +150,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp45"
+project_id = "exp46"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -280,11 +281,11 @@ if dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in dataset:
-    num_epochs = 100 if defense != "mapd" else 50
+    num_epochs = 100 if defense != "mapd" else mapd_pretrain_epochs
     batch_size = 128
 else:
     assert dataset == "imagenet" or dataset == "gtsrb"
-    num_epochs = 100 if defense != "mapd" else 50
+    num_epochs = 100 if defense != "mapd" else mapd_pretrain_epochs
     optimizer_batch_size = 256
     batch_size = 256
     if distributed:
@@ -366,6 +367,11 @@ label_map_dict = {"backdoor": "Backdoor (probe)",
                   "backdoor_fixed_boosted_val": "Backdoor (Blend-P; boosted)",
                   "backdoor_sinusoid_boosted_val": "Backdoor (Sinusoid; boosted)",
                   "backdoor_warped_val": "Backdoor (Warped)",
+                  "backdoor_warped_boosted_val": "Backdoor (Warped; boosted)",
+                  "backdoor_narcissus_val": "Backdoor (Narcissus)",
+                  "backdoor_narcissus_boosted_val": "Backdoor (Narcissus; boosted)",
+                  "backdoor_frequency_val": "Backdoor (Frequency)",
+                  "backdoor_frequency_boosted_val": "Backdoor (Frequency; boosted)",
                   "train": "Train",
                   "test": "Test"}
 
@@ -494,10 +500,10 @@ if defense in {"nc", "ac", "ss", "freq", "abl", "cd"}:
 
         model.load_state_dict(torch.load(model_file, map_location=device))
 elif defense == "mapd":
-    stats_dict = {n: {} for n in train_probe_counts}
-    for num_train_probes in train_probe_counts:
-        wandb_prefix = f"num_train_probes_{num_train_probes}_"
-        if num_train_probes != train_probe_counts[0]:
+    stats_dict = {i: {} for i in range(ensemble_count)}
+    for ensemble_idx in range(ensemble_count):
+        wandb_prefix = f"ensemble_{ensemble_idx}_"
+        if ensemble_idx != 0:
             val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, dataset,
                                                                                         train_set_wo_aug,
                                                                                         num_val_probes,
@@ -555,16 +561,16 @@ elif defense == "mapd":
                 for key in test_probes:
                     test_probes[key] = test_probes[key].to(device)
 
-        model_file = os.path.join(model_dir, f"model_{dataset}_{num_train_probes}_probes_dynamics.pth")
-        data_file = os.path.join(model_collection_dir, f"stats_{dataset}_{num_train_probes}_probes_dynamics.pkl")
+        model_file = os.path.join(model_dir, f"model_{dataset}_{ensemble_idx}_probes_dynamics.pth")
+        data_file = os.path.join(model_collection_dir, f"stats_{dataset}_{ensemble_idx}_probes_dynamics.pkl")
 
         if os.path.exists(model_file):
             assert os.path.exists(data_file)
-            print(f"Data files for {num_train_probes} probes already found. Loading data from saved checkpoints...")
+            print(f"Data files for ensemble {ensemble_idx} already found. Loading data from saved checkpoints...")
             model.load_state_dict(torch.load(model_file, map_location=device))
             assert os.path.exists(data_file)
             with open(data_file, "rb") as f:
-                stats_dict[num_train_probes] = pickle.load(f)
+                stats_dict[ensemble_idx] = pickle.load(f)
 
         else:
             statistics = {"train": [], "test": []}
@@ -623,7 +629,7 @@ elif defense == "mapd":
                 # Save the final data
                 with open(data_file, "wb") as f:
                     pickle.dump(statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
-            stats_dict[num_train_probes] = statistics
+            stats_dict[ensemble_idx] = statistics
 else:
     raise NotImplementedError
 
@@ -637,14 +643,15 @@ test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_p
 if defense == "mapd":
     knn_classifiers = {}
     oc_knn_classifiers = {}
+    all_losses = {}
     for key in stats_dict:
-        num_train_probes = key
+        ensemble_idx = key
         statistics = stats_dict[key]
         dataset_probe_identity, discarded_idx, valid_idx = statistics['aux']['dataset_probe_identity'], statistics['aux']['discarded_idx'], statistics['aux']['valid_idx']
 
-        print(f"===== {num_train_probes} probes =====")
-        data_statistics_file = os.path.join(model_collection_dir, f"stats_{dataset}_{num_train_probes}_probes_data_statistics.pkl")
-        model_file = os.path.join(model_dir, f"model_{dataset}_{num_train_probes}_probes_dynamics.pth")
+        print(f"===== Ensembler {ensemble_idx} =====")
+        data_statistics_file = os.path.join(model_collection_dir, f"stats_{dataset}_{ensemble_idx}_probes_data_statistics.pkl")
+        model_file = os.path.join(model_dir, f"model_{dataset}_{ensemble_idx}_probes_dynamics.pth")
         model.load_state_dict(torch.load(model_file, map_location=device))
 
         print("Final train accuracy:", statistics["train"][-1])
@@ -661,7 +668,7 @@ if defense == "mapd":
         print("Keys in statistics file:", natsort.natsorted(list(statistics.keys())))
 
         some_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
-        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, num_train_probes, log_wandb=log_wandb)
+        some_other_plot(statistics, log_predictions, label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, ensemble_idx, log_wandb=log_wandb)
 
 
         if not log_predictions:
@@ -925,7 +932,7 @@ if defense == "mapd":
         n_neighbors = 20  # TODO: Change the number of nearest neighbors here
         clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
         clf.fit(probe_train_x, probe_train_y)
-        knn_classifiers[num_train_probes] = clf
+        knn_classifiers[ensemble_idx] = clf
 
         # Create the one-class classifier
         clean_trajectories = traj_dataset["clean"]
@@ -933,8 +940,9 @@ if defense == "mapd":
         oc_clf_neighbors = len(clean_trajectories)
         oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
         oc_clf.fit(clean_trajectories, clean_labels)
-        oc_knn_classifiers[num_train_probes] = clf
+        oc_knn_classifiers[ensemble_idx] = oc_clf
 
+        all_losses[ensemble_idx] = sorted_losses_all
 
         print("Evaluating the trajectory classifier...")
         # TODO!!! Because there's no explicit clean_val or backdoor_val, there's nothing here that's assigned to
@@ -1147,25 +1155,30 @@ if defense == "mapd":
     print(knn_classifiers)
     print(oc_knn_classifiers)
 
-    print("!! Collecting clean training indices...")
-    losses_np = np.array(sorted_losses_all).transpose().astype(np.float64)  # Should be in format (# ex \times # epochs)
-    missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
-    missing_vals_idx = np.where(missing_vals)[0]
-    available_ex = np.logical_not(missing_vals)
-    num_missing_vals = np.sum(missing_vals)
-    print(f"!! Total loss traj len: {len(losses_np)} / Missing vals in loss trajs: {num_missing_vals}")
     take_weighted_average = True
     use_one_class = True
     use_exp_weighting = True
     oc_eps = 0.01
     all_probs = []
     all_dists = []
+    n_neighbors = 50
+
 
     if use_one_class:
         take_weighted_average = False
         for c in oc_knn_classifiers:
+            sorted_losses_all = all_losses[c]
+            print("!! Collecting clean training indices...")
+            losses_np = np.array(sorted_losses_all).transpose().astype(
+                np.float64)  # Should be in format (# ex \times # epochs)
+            missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
+            missing_vals_idx = np.where(missing_vals)[0]
+            available_ex = np.logical_not(missing_vals)
+            num_missing_vals = np.sum(missing_vals)
+            print(f"!! Total loss traj len: {len(losses_np)} / Missing vals in loss trajs: {num_missing_vals}")
+
             clf = oc_knn_classifiers[c]
-            dists = clf.kneighbors(losses_np[available_ex])[0]
+            dists = clf.kneighbors(losses_np[available_ex], n_neighbors=n_neighbors)[0]
             if use_exp_weighting:
                 exp_weighted_dists = np.log(oc_eps + dists.mean(axis=1))
                 zero_min_dists = exp_weighted_dists - exp_weighted_dists.min()
@@ -1177,6 +1190,16 @@ if defense == "mapd":
 
     else:
         for c in knn_classifiers:
+            sorted_losses_all = all_losses[c]
+            print("!! Collecting clean training indices...")
+            losses_np = np.array(sorted_losses_all).transpose().astype(
+                np.float64)  # Should be in format (# ex \times # epochs)
+            missing_vals = np.isnan(losses_np).any(axis=1)  # Identify probe examples
+            missing_vals_idx = np.where(missing_vals)[0]
+            available_ex = np.logical_not(missing_vals)
+            num_missing_vals = np.sum(missing_vals)
+            print(f"!! Total loss traj len: {len(losses_np)} / Missing vals in loss trajs: {num_missing_vals}")
+
             clf = knn_classifiers[c]
             all_probs.append(clf.predict_proba(losses_np[available_ex]))
             if take_weighted_average:

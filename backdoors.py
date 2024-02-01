@@ -15,7 +15,7 @@ FIXED_BACKDOOR_ALPHA = 0.025
 SINUSOID_BACKDOOR_ALPHA = 0.075
 SINUSOID_BACKDOOR_FREQ = 6
 
-BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid', "narcissus"}
+BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid', 'warped', 'narcissus', 'frequency'}
 BOOSTING_RATIO = 2
 CLEAN_LABEL_ATTACKS = {'sinusoid', 'narcissus'}
 
@@ -67,9 +67,9 @@ class ClampRangeTransform(object):
 
 
 class WarpingAttack(object):
-    def __init__(self, img_size, s=0.75, k=6, grid_rescale=1.0, identity_grid=None, noise_grid=None):
+    def __init__(self, img_size, s=0.5, k=4, grid_rescale=1.0, identity_grid=None, noise_grid=None, boost=1):
         self.img_size = img_size
-        self.s = s
+        self.s = s * boost
         self.k = k
         self.grid_rescale = grid_rescale
 
@@ -108,12 +108,13 @@ class WarpingAttack(object):
         warped_x = self.apply_warping(x, grid_temps)
         return warped_x
 
+
 class FrequencyAttack(object):
-    def __init__(self, window_size=32, positions=((15, 15), (31, 31)), magnitude=40):
+    def __init__(self, window_size=32, positions=((15, 15), (31, 31)), magnitude=30, boost=1):
         super().__init__()
         self.window_size = window_size
         self.positions = positions
-        self.magnitude = magnitude
+        self.magnitude = magnitude * boost
 
     def __call__(self, x):
         import copy
@@ -125,11 +126,11 @@ class FrequencyAttack(object):
         x = cv2.cvtColor(x, cv2.COLOR_RGB2YCrCb)
         x = np.moveaxis(x, -1, 0)
 
-        x_dct = np.zeros(x.shape, dtype=np.float)
+        x_dct = np.zeros(x.shape, dtype=float)
         for ch in range(x.shape[0]):
             for w in range(0, x.shape[1], self.window_size):
                 for h in range(0, x.shape[2], self.window_size):
-                    x_dct[ch, w:w+self.window_size, h:h+self.window_size] = cv2.dct(x[ch][w:w+self.window_size, h:h+self.window_size].astype(np.float))
+                    x_dct[ch, w:w+self.window_size, h:h+self.window_size] = cv2.dct(x[ch][w:w+self.window_size, h:h+self.window_size].astype(float))
 
         # Add trigger
         for ch in (1, 2):
@@ -141,7 +142,7 @@ class FrequencyAttack(object):
         for ch in range(x.shape[0]):
             for w in range(0, x.shape[1], self.window_size):
                 for h in range(0, x.shape[2], self.window_size):
-                    x[ch, w:w+self.window_size, h:h+self.window_size] = cv2.idct(x_dct[ch][w:w+self.window_size, h:h+self.window_size].astype(np.float))
+                    x[ch, w:w+self.window_size, h:h+self.window_size] = cv2.idct(x_dct[ch][w:w+self.window_size, h:h+self.window_size].astype(float))
 
         x = x.astype(np.uint8)
         x = np.moveaxis(x, 0, -1)
@@ -196,6 +197,14 @@ def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
     return pattern
 
 
+class Identity(object):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, x):
+        return x
+
+
 def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, aux_data=None, alpha_boost=1):
     if "random" in attack_name and aux_data is not None:
         pattern = aux_data
@@ -228,13 +237,15 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         if dataset == "gtsrb":
             backdoor = WarpingAttack(img_size[0], s=1.0, k=8, identity_grid=id_grid, noise_grid=noise_grid)
         else:
-            backdoor = WarpingAttack(img_size[0], identity_grid=id_grid, noise_grid=noise_grid)
+            backdoor = WarpingAttack(img_size[0], identity_grid=id_grid, noise_grid=noise_grid, boost=alpha_boost)
 
         aux_data = (backdoor.identity_grid, backdoor.noise_grid)
     elif attack_name == "narcissus" or attack_name == "alt_narcissus":
         backdoor = BackdoorPatch(pattern=pattern, alpha=1*alpha_boost, mode='add')
     elif attack_name in {"frequency", "reversed_frequency"}:
-        backdoor = FrequencyAttack()
+        backdoor = FrequencyAttack(boost=alpha_boost)
+    elif 'clean' in attack_name:
+        backdoor = Identity()
     else:
         raise NameError(f"Attack type {attack_name} is not a valid attack type.")
     backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
@@ -307,7 +318,10 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
             break
         probe_transform, aux_data = make_probe_transform(train_probe_attack, img_size, dataset, output_dir, main_proc)
         backdoor_idx = indices[:num_train_probes]
-        attack_labels = np.array([attack_target for i in backdoor_idx])
+        if 'clean' in train_probe_attack:
+            attack_labels = np.array([train_set_wo_aug[i][1] for i in backdoor_idx])
+        else:
+            attack_labels = np.array([attack_target for i in backdoor_idx])
         add_probe_data(probes, "backdoor"+suffix, backdoor_idx, train_set_wo_aug, device, attack_labels,
                        transform=probe_transform, compute_diffs=True)
 
@@ -328,6 +342,7 @@ def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes,
     if not include_val_probe_examples:
         del probes["clean_val"]
         del probes["backdoor_val"]
+        probes['all_backdoor_idx'] = np.concatenate((probes['backdoor_idx'], probes['clean_idx']))
         # clean_shape = probes["clean"].shape
         # probes["clean_val"] = torch.zeros((0, *clean_shape[1:]), dtype=probes["clean"].dtype)
         # probes["clean_val_labels"] = torch.zeros((0,), dtype=probes["clean_labels"].dtype)
