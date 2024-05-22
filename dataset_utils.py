@@ -64,6 +64,8 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
     # data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
     data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
     # data_dir = f"./rds/user/sma92/hpc-work/mapd_data/{dataset}/"
+    if dataset == "gtsrb":
+        use_augmentations = False
     if "mnist" in dataset:
         img_size = (28, 28, 1)
         train_transform = [transforms.ToTensor()]

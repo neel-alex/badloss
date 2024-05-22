@@ -83,7 +83,9 @@ print(dataset, attack, defense, poisoning_ratio)
 
 if attack == "all":
     train_probe_attack = "reversed_patch"
-    val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "warped", "narcissus", "frequency"]
+    val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "narcissus", "frequency"]
+    if dataset == "gtsrb":
+        val_probe_attacks = ["patch", "single_pix", "random", "fixed", "sinusoid", "frequency"]
     # if dataset == "cifar10":  # TODO: Add sleeper fully...
     #     val_probe_attacks.append("sleeper")
 elif attack in {"patch", "single_pix", "fixed", "sinusoid", "frequency"}:
@@ -99,8 +101,8 @@ train_probe_attack = 'clean_2'
 num_train_probes = 250  # Fixed number -- 4x this many probes will be made
                             # (now 3x this number of backdoor probes -- (num) normal, (num) mislabeled, (num) normal for val;
                             #  then (2*num) clean examples set aside for comparison.
-ensemble_count = 5
-mapd_pretrain_epochs = 50
+ensemble_count = 1
+mapd_pretrain_epochs = 30
 """
 if attack == "warped":
     num_train_probes = 1500  # More probes to more closely imitate learning dynamics of the larger warped attack.
@@ -150,7 +152,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp46"
+project_id = "exp52"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -797,8 +799,8 @@ if defense == "mapd":
 
 
         normalizers = make_normalizers(num_train_probes, train_set, discarded_idx, unique_probe_identity)
-        yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
-                         label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
+        # yet_another_plot(statistics, normalizers, epoch_cumulative_scores, epoch_cumulative_scores_first_learned,
+        #                  label_map_dict, include_plot_title, dataset, main_proc, experiment_output_dir, log_wandb=log_wandb)
 
         # ### Loss distribution plots
 
@@ -1158,6 +1160,7 @@ if defense == "mapd":
     take_weighted_average = True
     use_one_class = True
     use_exp_weighting = True
+    use_filtering = True
     oc_eps = 0.01
     all_probs = []
     all_dists = []
@@ -1167,6 +1170,7 @@ if defense == "mapd":
     if use_one_class:
         take_weighted_average = False
         for c in oc_knn_classifiers:
+            # breakpoint()
             sorted_losses_all = all_losses[c]
             print("!! Collecting clean training indices...")
             losses_np = np.array(sorted_losses_all).transpose().astype(
@@ -1178,6 +1182,28 @@ if defense == "mapd":
             print(f"!! Total loss traj len: {len(losses_np)} / Missing vals in loss trajs: {num_missing_vals}")
 
             clf = oc_knn_classifiers[c]
+            
+            fit_data = clf._fit_X
+            epoch_avg_loss = losses_np[available_ex].mean(axis=0)
+            final_avgs = epoch_avg_loss[:3].tolist()
+            epochs_to_keep = [0, 1, 2]
+            for i in range(3, len(epoch_avg_loss)):
+                if epoch_avg_loss[i] < 2 * sum(final_avgs[-3:])/3: # If less than twice the average of the previous 3 VALID losses
+                    epochs_to_keep.append(i)
+                    final_avgs.append(epoch_avg_loss[i])
+
+            print(epochs_to_keep, final_avgs)
+            filtered_fit_data = fit_data[:, epochs_to_keep]
+            filtered_losses_np = losses_np[:, epochs_to_keep]
+            filtered_clf = sklearn.neighbors.KNeighborsClassifier(clf.n_neighbors)
+            filtered_clf.fit(filtered_fit_data, clean_labels)
+
+            if use_filtering == True:
+                losses_np = filtered_losses_np
+                clf = filtered_clf
+            
+            # breakpoint()
+
             dists = clf.kneighbors(losses_np[available_ex], n_neighbors=n_neighbors)[0]
             if use_exp_weighting:
                 exp_weighted_dists = np.log(oc_eps + dists.mean(axis=1))
@@ -1211,6 +1237,15 @@ if defense == "mapd":
         avail_ex_probs = np.array(all_probs)[:, :, 0].mean(axis=0)
 
     avail_ex_probs = np.array([avail_ex_probs, 1-avail_ex_probs]).T
+    prob_values = np.linspace(0, 1, len(avail_ex_probs[:, 0]))
+    final_probs = np.zeros((len(avail_ex_probs[:, 0])))
+    final_probs[avail_ex_probs[:, 0].argsort()] = prob_values
+    avail_ex_probs = np.array([final_probs, 1-final_probs]).T
+
+
+    from sklearn.metrics import roc_curve, auc
+    x, y, _ = roc_curve(np.array([1 if 'val' in x else 0 for x in dataset_probe_identity])[available_ex], avail_ex_probs[:, 0])
+    print("AUC:", auc(x, y))
 
     all_ex_probs = np.zeros((len(losses_np), 2), dtype=avail_ex_probs.dtype)
     all_ex_probs[available_ex] = avail_ex_probs
@@ -1233,7 +1268,7 @@ if defense == "mapd":
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95] # if attack == "all" else [0.15, 0.3]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
     num_epochs = 100
 
@@ -1521,7 +1556,7 @@ if defense == "nc":
         rejected_indices = torch.hstack(rejected_indices).unique()
         return clean_indices[rejected_indices.cpu()].numpy() if clean_indices is not None else np.array([], dtype=int)
 
-    cleanse_epochs = 20
+    cleanse_epochs = 15
 
     masks, norms, triggers = [], [], []
 

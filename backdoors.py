@@ -384,7 +384,8 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
             continue
         target = attack_targets[attack]
         num = attack_numbers[attack]
-
+        # if attack == 'single_pix':
+        #     num = 1
         # For clean attacks, get clean indices to choose from.
         indices_to_choose_from = train_indices
         if attack in CLEAN_LABEL_ATTACKS:
@@ -393,7 +394,7 @@ def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_
             num = int(num_val_probes[attack] * len(indices_to_choose_from))
             if dataset == "gtsrb":
                 # TODO: something more principled...
-                num = max(num, 500)
+                num = max(num, 300)
 
 
         # don't let multiple attacks hit the same image, including train probe images.
