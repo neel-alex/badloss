@@ -361,3 +361,175 @@ class FreqCNN(torch.nn.Module):
         x = self.fc1(x)
 
         return x
+
+class FeatureExtractor:
+    def __init__(self, model):
+        self.model = model
+        self.last_layer_activations = None
+        
+        # Register a forward hook on the last layer (layer4)
+        self.model.avgpool.register_forward_hook(self.hook)
+    
+    def hook(self, module, input, output):
+        self.last_layer_activations = output
+    
+    def __call__(self, x):
+        logits = self.model(x)
+        return logits, torch.flatten(self.last_layer_activations, 1)
+
+
+def train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader, optimizer, adv_optimizer, criterion):
+    backdoor_model.eval()
+    backdoor_model.to(device)
+    clean_model.train()
+    clean_model.to(device)
+    discriminator.train()
+    discriminator.to(device)
+
+    backdoor_model_fe, clean_model_fe = FeatureExtractor(backdoor_model), FeatureExtractor(clean_model) # output shape: ([batch x 10], [batch x 2048])
+
+    pbar = tqdm(new_idx_loader)
+    for (data, target), ex_idx in pbar:
+        data = data.to(device)
+        output1, z_hidden = clean_model_fe(data)
+        with torch.no_grad():
+            output2, r_hidden = backdoor_model_fe(data)
+        
+        r_hidden, z_hidden = r_hidden.detach(), z_hidden.detach()
+        # max dis_loss
+        dis_loss = - discriminator(r_hidden, z_hidden)
+        adv_optimizer.zero_grad()
+        dis_loss.backward()
+        adv_optimizer.step()
+        # Lipschitz constrain for Disc of WGAN
+        discriminator.spectral_norm()
+        pbar.set_description(f"Loss: {float(dis_loss):.4f}")
+
+    pbar = tqdm(new_idx_loader)
+    for (data, target), ex_idx in pbar:
+        data = data.to(device)
+        target = target.to(device)
+
+        output1, z_hidden = clean_model_fe(data)
+        with torch.no_grad():
+            output2, r_hidden = backdoor_model_fe(data)
+            loss_bias = criterion(output2, target)
+            loss_d = criterion(output1, target).detach()
+
+        r_hidden = r_hidden.detach()
+        dis_loss = discriminator(r_hidden, z_hidden)
+
+        weight = loss_bias / (loss_d + loss_bias + 1e-8)
+
+        weight = weight * weight.shape[0] / torch.sum(weight)
+        loss = torch.mean(weight * criterion(output1, target))
+
+        loss += dis_loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        pbar.set_description(f"Loss: {float(loss):.4f}")
+
+def train_intraclass(backdoor_model, device, new_idx_loader, optimizer, criterion, scaler, num_classes):
+    backdoor_model.train()
+    backdoor_model.to(device)
+
+    backdoor_model_fe = FeatureExtractor(backdoor_model)
+
+    pbar = tqdm(new_idx_loader)
+    for (data, target), ex_idx in pbar:
+        data = data.to(device)
+        target = target.to(device)
+
+        outputs, features = backdoor_model_fe(data)
+
+        # Calculate intra-class loss
+        centers = []
+        for j in range(num_classes):
+            j_idx = torch.where(target == j)[0]
+            if j_idx.shape[0] == 0:
+                continue
+            j_features = features[j_idx]
+            j_center = torch.mean(j_features, dim=0)
+            centers.append(j_center)
+
+        centers = torch.stack(centers, dim=0)
+        centers = torch.nn.functional.normalize(centers, dim=1)
+        similarity_matrix = torch.matmul(centers, centers.T)
+        mask = torch.eye(similarity_matrix.shape[0], dtype=torch.bool).to(device)
+        similarity_matrix[mask] = 0.0
+        loss = torch.mean(similarity_matrix)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+def calc_fct(backdoor_model, device, new_idx_loader_wo_aug):
+    backdoor_model.eval()
+    backdoor_model.to(device)
+
+    backdoor_model_fe = FeatureExtractor(backdoor_model)
+
+    from torchvision import transforms
+    fct_transform = transforms.Compose([
+        transforms.RandomRotation(180),
+        transforms.RandomAffine(degrees=0, translate=(0.2, 0.2)),
+    ])
+
+    fcts = torch.zeros((len(new_idx_loader_wo_aug.dataset),)).to(device)
+
+    pbar = tqdm(new_idx_loader_wo_aug)
+    for (data, target), ex_idx in pbar:
+        data = data.to(device)
+        target = target.to(device)
+        data2 = fct_transform(data)
+        with torch.no_grad():
+            outputs1, features1 = backdoor_model_fe(data)
+            outputs2, features2 = backdoor_model_fe(data2)
+
+        feature_consistency = torch.mean((features1 - features2)**2, dim=1)
+        fcts[ex_idx] = feature_consistency
+    
+    return fcts
+
+def pss_unlearn(model, device, clean_dl, pois_dl, optimizer, criterion):
+    model.train()
+    model.to(device)
+
+    pbar = tqdm(pois_dl)
+    for (data, target), ex_idx in pbar:
+        data = data.to(device)
+        target = target.to(device)
+
+
+        output = model(data)
+        loss = criterion(output, target)
+        
+        loss = loss.mean()  # Reduction has been disabled -- do explicit reduction
+        
+        loss = -loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        pbar.set_description(f"Loss: {float(loss):.4f}")
+
+    pbar = tqdm(clean_dl)
+    for (data, target), ex_idx in pbar:
+        data = data.to(device)
+        target = target.to(device)
+
+
+        output = model(data)
+        loss = criterion(output, target)
+        
+        loss = loss.mean()  # Reduction has been disabled -- do explicit reduction
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        pbar.set_description(f"Loss: {float(loss):.4f}")

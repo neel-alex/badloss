@@ -50,7 +50,7 @@ default_poisoning_ratio = None
 
 dataset_choices = ["mnist", "cifar10", "cifar100", "gtsrb", "imagenet"]
 attack_choices  = ["all", "patch", "single_pix", "random", "fixed", "sinusoid", "warped", "narcissus", "frequency"]
-defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl", "cd"]
+defense_choices = ["mapd", "nc", "ac", "ss", "freq", "abl", "cd", "cbd", "pss"]
 poisoning_ratio_choices = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3]
 
 if len(sys.argv) < 2:
@@ -152,7 +152,7 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if dataset == "imagenet" else False
-project_id = "exp52"
+project_id = "exp53"
 experiment_output_dir = f"./backdoor_{project_id}_{dataset}_{defense}_{attack}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{dataset}_{attack}{'_' + defense if defense in {'mapd'} else ''}{'_' + str(poisoning_ratio) if poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
@@ -472,7 +472,7 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, v
 
 
 wandb_prefix = ''
-if defense in {"nc", "ac", "ss", "freq", "abl", "cd"}:
+if defense in {"nc", "ac", "ss", "freq", "abl", "cd", "pss"}:
     if not os.path.exists(model_file):
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
         for epoch in range(num_epochs):
@@ -632,6 +632,8 @@ elif defense == "mapd":
                 with open(data_file, "wb") as f:
                     pickle.dump(statistics, f, protocol=pickle.HIGHEST_PROTOCOL)
             stats_dict[ensemble_idx] = statistics
+elif defense == "cbd":
+    pass
 else:
     raise NotImplementedError
 
@@ -1271,6 +1273,8 @@ if defense == "mapd":
     thresh_list = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95] # if attack == "all" else [0.15, 0.3]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
     num_epochs = 100
+
+    breakpoint()
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
     if not os.path.exists(output_checkpoint_dir):
@@ -2056,6 +2060,175 @@ if defense == "cd":
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
                   detection_thresh, probes, log_predictions, test_probes, defense)
+
+if defense == "cbd":
+    num_pretrain_epochs = 5
+
+    backdoor_model = get_model(dataset, num_classes, device, local_rank, verbose=False)
+
+    # Step # 01: Regular pretraining
+    print("!! Performing CBD initial pretraining...")
+    output_checkpoint_file = os.path.join(experiment_output_dir, "cbd_model_pretrain.pth")
+    if not os.path.exists(output_checkpoint_file):
+        criterion, optimizer, lr_scheduler, scaler = get_optimizer(backdoor_model, device, lr, momentum, wd, num_pretrain_epochs)
+        for epoch in tqdm(range(num_pretrain_epochs)):
+            train(backdoor_model, device, new_idx_loader, optimizer, criterion, scaler)
+            if epoch % 5 == 4:
+                log_results_and_update_stats_and_preds(log_predictions, backdoor_model, device, criterion, test_idx_loader,
+                                                       distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                       val_probes, defense, tensor_batch_size, epoch)
+        torch.save(backdoor_model.state_dict(), output_checkpoint_file)
+    else:
+        print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
+        backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
+    
+    clean_model = get_model(dataset, num_classes, device, local_rank, verbose=False)
+    # discriminator = ???
+
+
+    
+    from cbd_util import DisenEstimator
+    from torch_utils import train_cbd
+    discriminator = DisenEstimator(2048, 2048, dropout=0.2) # TODO: Magic number batd
+
+    adv_params = list(discriminator.parameters())
+    adv_optimizer = torch.optim.Adam(adv_params, lr=0.2)
+    adv_scheduler = torch.optim.lr_scheduler.StepLR(adv_optimizer, step_size=20, gamma=0.1)
+    optimizer = torch.optim.SGD(clean_model.parameters(), lr=0.1, momentum=0.9,
+                                weight_decay=1e-4, nesterov=True)
+    
+    clean_train_epochs = 100
+
+    output_checkpoint_file = os.path.join(experiment_output_dir, "cbd_model.pth")
+    if not os.path.exists(output_checkpoint_file):
+        criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
+        scaler = None
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 70], gamma=0.1)
+        for epoch in range(clean_train_epochs):
+            train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader, optimizer, adv_optimizer, criterion)
+            if epoch % 5 == 4:
+                print(f"Evaluation at epoch {epoch+1}")
+                log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
+                                                       distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                       val_probes, defense, tensor_batch_size, epoch)
+            scheduler.step()
+            adv_scheduler.step()
+        torch.save(clean_model.state_dict(), output_checkpoint_file)
+    else:
+        print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
+        clean_model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
+
+    print("Retrained model performance:")
+    log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
+                                           distributed, rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
+                                           tensor_batch_size, num_epochs+1)
+    test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+
+if defense == "pss":
+    # Train from clean for 2 epochs w/o aug || train_attack_noTrans.py
+    num_pretrain_epochs = 2
+    num_intraclass_epochs = 3
+
+    backdoor_model = get_model(dataset, num_classes, device, local_rank, verbose=False)
+    optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=0.01, momentum=0.9,
+                                weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+    scaler = None
+
+
+    # Step # 01: Regular pretraining
+    print("!! Performing PSS initial pretraining...")
+    output_checkpoint_file = os.path.join(experiment_output_dir, "pss_model_pretrain.pth")
+    if not os.path.exists(output_checkpoint_file):
+        criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
+        scaler = None
+        for epoch in tqdm(range(num_pretrain_epochs)):
+            train(backdoor_model, device, new_idx_loader_wo_aug, optimizer, criterion, scaler)
+            if epoch % 2 == 1:
+                log_results_and_update_stats_and_preds(log_predictions, backdoor_model, device, criterion, test_idx_loader,
+                                                       distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                       val_probes, defense, tensor_batch_size, epoch)
+        torch.save(backdoor_model.state_dict(), output_checkpoint_file)
+    else:
+        print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
+        backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
+    
+    from torch_utils import train_intraclass
+
+    # TODO!!!
+    
+    # Train intraclass loss for 10 epochs w/o aug || finetune_attack_noTrans.py
+    optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=0.01, momentum=0.9,
+                                weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+    train_criterion = torch.nn.CrossEntropyLoss().to(device)
+
+    output_checkpoint_file = os.path.join(experiment_output_dir, "pss_model_intraclass.pth")
+    print("!! Performing intraclass training...")
+    if not os.path.exists(output_checkpoint_file):
+        for epoch in tqdm(range(num_intraclass_epochs)):
+            train_intraclass(backdoor_model, device, new_idx_loader_wo_aug, optimizer, train_criterion, scaler, num_classes)
+            scheduler.step()
+            if epoch % 5 == 4:
+                log_results_and_update_stats_and_preds(log_predictions, backdoor_model, device, criterion, test_idx_loader,
+                                                       distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                       val_probes, defense, tensor_batch_size, epoch)
+        torch.save(backdoor_model.state_dict(), output_checkpoint_file)
+    else:
+        print(f"!! Loading intraclass trained checkpoint file:", output_checkpoint_file)
+        backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
+    
+
+    # Calculate FCT and sort samples || calculate_consistency.py & calculate_gamma.py & separate_samples.py
+    from torch_utils import calc_fct
+    
+    high_thresh, low_thresh = 0.95, 0.80 # Inverted 
+    print("!! Calculating FCT metric...")
+    fcts = calc_fct(backdoor_model, device, new_idx_loader_wo_aug)
+    fcts = fcts.cpu()
+
+    classifications = [None for _ in range(len(fcts))]
+    nonzero_fcts = fcts[fcts.nonzero()[:, 0]]
+    sorted_fcts = nonzero_fcts.sort()[0]
+    lower_limit = sorted_fcts[int(len(sorted_fcts) * low_thresh)].item()
+    upper_limit = sorted_fcts[int(len(sorted_fcts) * high_thresh)].item()
+
+    clean_idx = torch.where((fcts > 0) & (fcts < lower_limit))[0]
+    pois_idx = torch.where(fcts >= upper_limit)[0]
+
+    clean_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=clean_idx,
+                          num_workers=num_workers, batch_size=batch_size)
+    pois_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=pois_idx,
+                         num_workers=num_workers, batch_size=batch_size)
+
+
+    # Train backdoored model for 20 epochs of alternating learning and unlearning || unlearn_relearn.py
+    from torch_utils import pss_unlearn
+    
+    retrain_epochs = 20
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0001, momentum=0.9,
+                                weight_decay=5e-4)
+    criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
+
+    print("!! Performing PSS backdoor defense...")
+    output_checkpoint_file = os.path.join(experiment_output_dir, "pss_model.pth")
+    if not os.path.exists(output_checkpoint_file):
+        for epoch in tqdm(range(retrain_epochs)):
+            pss_unlearn(model, device, clean_dl, pois_dl, optimizer, criterion)
+            if epoch % 5 == 4:
+                log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
+                                                       distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
+                                                       val_probes, defense, tensor_batch_size, epoch)
+        torch.save(model.state_dict(), output_checkpoint_file)
+    else:
+        print(f"!! Loading PSS-trained checkpoint file:", output_checkpoint_file)
+        model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
+
+    print("Retrained model performance:")
+    test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
+    test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+    
+    print("Done with PSS")
 
 
 if log_wandb:
