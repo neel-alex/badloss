@@ -7,7 +7,7 @@ import itertools
 import numpy as np
 import torch
 from torchvision import transforms
-from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder
+from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder, Imagenette
 try:
     from catalyst.data import DistributedSamplerWrapper
 except ImportError:
@@ -92,7 +92,7 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
         train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
         test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
     else:
-        assert dataset == "imagenet" or dataset == "gtsrb"
+        assert dataset == "imagenet" or dataset == "gtsrb" or dataset == "imagenette"
         img_size = (224, 224, 3)
         if dataset == "gtsrb":  # specifically for GTSRB
             rand_crop_scale = (0.8, 1.0)
@@ -122,9 +122,7 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
             train_set.targets = [label for (img, label) in train_set]
             train_set_wo_aug.targets = [label for (img, label) in train_set_wo_aug]
             test_set.targets = [label for (img, label) in test_set]
-        else:
-            assert dataset == "imagenet"
-
+        elif dataset == "imagenet":
             data_dir = "/ds/images/imagenet/"  # TODO: Configure dataset path
             train_set = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(train_transform))
             train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
@@ -132,6 +130,16 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
 
             # Replace train_set.classes with real names
             train_set.original_classes = train_set.classes
+        else:
+            assert dataset == "imagenette"
+            train_set = Imagenette(data_dir, download=False, split="train", transform=transforms.Compose(train_transform))
+            train_set_wo_aug = Imagenette(data_dir, download=False, split="train", transform=transforms.Compose(no_transform))
+            test_set = Imagenette(data_dir, download=False, split="val", transform=transforms.Compose(test_transform))
+            
+            train_set.targets = [label for (img, label) in train_set]
+            train_set_wo_aug.targets = [label for (img, label) in train_set_wo_aug]
+            test_set.targets = [label for (img, label) in test_set]
+
 
         label2name, _ = load_class_mapping(dataset)
         label2name = {k: v.split(',')[0][:20] for k, v in label2name.items()}
