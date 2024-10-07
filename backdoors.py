@@ -14,7 +14,7 @@ RANDOM_BACKDOOR_ALPHA = 0.075
 FIXED_BACKDOOR_ALPHA = 0.025
 SINUSOID_BACKDOOR_ALPHA = 0.075
 SINUSOID_BACKDOOR_FREQ = 6
-IMAGENETTE_ALPHA = 0.2
+IMAGENETTE_ALPHA = 0.15
 
 BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid', 'warped', 'narcissus', 'frequency'}
 BOOSTING_RATIO = 2
@@ -23,9 +23,8 @@ CLEAN_LABEL_ATTACKS = {'sinusoid', 'narcissus'}
 
 class BackdoorPatch(object):
     def __init__(self, single_pixel_backdoor=False, reverse_backdoor=False,
-                 pattern=None, alpha=None, mode='average', four_corners=False):
+                 pattern=None, alpha=None, mode='average', imagenette=False):
         assert pattern is None or (not single_pixel_backdoor and not reverse_backdoor and alpha is not None)
-        print(f"BACKDOOR PATCH: {four_corners}")
 
         self.single_pixel_backdoor = single_pixel_backdoor
         self.reverse_backdoor = reverse_backdoor
@@ -34,7 +33,7 @@ class BackdoorPatch(object):
         self.alpha = alpha
         self.mode = mode
 
-        self.four_corners = four_corners
+        self.imagenette = imagenette
 
     def __call__(self, tensor):
         backdoor_pix_val = 1.0
@@ -46,7 +45,7 @@ class BackdoorPatch(object):
         elif self.single_pixel_backdoor:
             if self.reverse_backdoor:
                 tensor[:, 1, 1] = backdoor_pix_val
-            elif self.four_corners:
+            elif self.imagenette:
                 tensor[:, 1, 1] = backdoor_pix_val
                 tensor[:, 1, tensor.shape[2] - 2] = backdoor_pix_val
                 tensor[:, tensor.shape[1] - 2, 1] = backdoor_pix_val
@@ -59,26 +58,11 @@ class BackdoorPatch(object):
                 tensor[:, 3, 1] = backdoor_pix_val
                 tensor[:, 1, 3] = backdoor_pix_val
                 tensor[:, 2, 2] = backdoor_pix_val
-            elif self.four_corners:
-                tensor[:, 1, 1] = backdoor_pix_val
-                tensor[:, 3, 1] = backdoor_pix_val
-                tensor[:, 1, 3] = backdoor_pix_val
-                tensor[:, 2, 2] = backdoor_pix_val
-
-                tensor[:, 1, tensor.shape[2] - 2] = backdoor_pix_val
-                tensor[:, 3, tensor.shape[2] - 2] = backdoor_pix_val
-                tensor[:, 1, tensor.shape[2] - 4] = backdoor_pix_val
-                tensor[:, 2, tensor.shape[2] - 3] = backdoor_pix_val
-
-                tensor[:, tensor.shape[1] - 2, 1] = backdoor_pix_val
-                tensor[:, tensor.shape[1] - 4, 1] = backdoor_pix_val
-                tensor[:, tensor.shape[1] - 2, 3] = backdoor_pix_val
-                tensor[:, tensor.shape[1] - 3, 2] = backdoor_pix_val
-
-                tensor[:, tensor.shape[1] - 2, tensor.shape[2] - 2] = backdoor_pix_val
-                tensor[:, tensor.shape[1] - 4, tensor.shape[2] - 2] = backdoor_pix_val
-                tensor[:, tensor.shape[1] - 2, tensor.shape[2] - 4] = backdoor_pix_val
-                tensor[:, tensor.shape[1] - 3, tensor.shape[2] - 3] = backdoor_pix_val
+            elif self.imagenette:
+                tensor[:, 8:16, 8:16] = backdoor_pix_val
+                tensor[:, 24:32, 8:16] = backdoor_pix_val
+                tensor[:, 8:16, 24:32] = backdoor_pix_val
+                tensor[:, 16:24, 16:24] = backdoor_pix_val
             else:
                 tensor[:, tensor.shape[1] - 2, tensor.shape[2] - 2] = backdoor_pix_val
                 tensor[:, tensor.shape[1] - 4, tensor.shape[2] - 2] = backdoor_pix_val
@@ -241,11 +225,11 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         pattern = get_pattern(attack_name, img_size, dataset, output_dir, main_proc)
 
     if attack_name == "patch":
-        backdoor = BackdoorPatch(four_corners=(dataset == 'imagenette'))
+        backdoor = BackdoorPatch(imagenette=(dataset == 'imagenette'))
     elif attack_name == "reversed_patch":
         backdoor = BackdoorPatch(reverse_backdoor=True)
     elif attack_name == "single_pix":
-        backdoor = BackdoorPatch(single_pixel_backdoor=True, four_corners=(dataset == 'imagenette'))
+        backdoor = BackdoorPatch(single_pixel_backdoor=True, imagenette=(dataset == 'imagenette'))
     elif attack_name == "reversed_single_pix":
         backdoor = BackdoorPatch(single_pixel_backdoor=True, reverse_backdoor=True)
     elif attack_name == "random":
@@ -286,7 +270,7 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         backdoor = FrequencyAttack(boost=alpha_boost)
 
         if dataset == "imagenette":
-            backdoor = FrequencyAttack(boost=alpha_boost, magnitude=120) # Try making stronger on imagenette
+            backdoor = FrequencyAttack(boost=alpha_boost, magnitude=90) # Try making stronger on imagenette
     elif 'clean' in attack_name:
         backdoor = Identity()
     else:

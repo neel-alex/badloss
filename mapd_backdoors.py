@@ -40,7 +40,6 @@ from cognitive_distillation import CognitiveDistillation
 from cbd_util import DisenEstimator
 
 
-
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
@@ -48,10 +47,12 @@ args = config().parse_args()
 print(args.dataset, args.attack, args.defense, args.poisoning_ratio)
 
 # TODO
-train_probe_attack = 'reversed_patch'
-all_attacks = ["patch", "single_pix", "random",
-               "fixed", "sinusoid", "frequency"]
-val_probe_attacks = args.attack if args.attack != 'all' else all_attacks
+train_probe_attack = 'clean'
+all_attacks = ["patch", "random", "fixed", "sinusoid", "frequency"]
+val_probe_attacks = [args.attack] if args.attack != 'all' else all_attacks
+if args.dataset == "gtsrb" or args.dataset == "cifar10":
+    # val_probe_attacks.append("patch")
+    val_probe_attacks.append("single_pix")
 if args.dataset == 'cifar10':
     val_probe_attacks.append('narcissus')
 ensemble_count = 1
@@ -74,7 +75,7 @@ if args.dataset == "gtsrb":
     num_val_probes["single_pix"] = 0.04
     num_val_probes["warped"] = 0.2
 if args.dataset == "imagenette":
-    num_val_probes["patch"] = 0.05
+    num_val_probes["patch"] = 0.05 # TODO??
     num_val_probes["single_pix"] = 0.1
 correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
 if correct_abl and args.defense == "abl":
@@ -88,11 +89,12 @@ num_test_probes = 10000
 
 # Set random seed
 seed = 3
+print("Seed:", seed)
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 np.random.seed(seed=seed)
 random.seed(seed)
-torch.use_deterministic_algorithms(True)
+torch.use_deterministic_algorithms(True, warn_only=True)
 
 # Plotting config
 include_plot_title = False
@@ -102,11 +104,11 @@ font_size = 16
 # Essential config
 log_predictions = True
 distributed = True if args.dataset == "imagenet" else False
-project_id = "exp56"
+project_id = "exp67"
 experiment_output_dir = f"./backdoor_{project_id}_{args.dataset}_{args.defense}_{args.attack}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}"
-model_collection_dir = f"./backdoor_{project_id}_model_{args.dataset}_{args.attack}{'_' + args.defense if args.defense in {'mapd'} else ''}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}"
+model_collection_dir = f"./backdoor_{project_id}_model_{args.dataset}_{args.attack}{'_' + args.defense if args.defense in {'badloss'} else ''}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
-num_workers = 8
+num_workers = 8 # TODO: Warning that the number of workers requested isn't right?
 surface_examples = False
 
 print("Dataset:", args.dataset)
@@ -191,7 +193,7 @@ print(args.dataset, num_classes)
 
 
 # Standardizing nomenclature...
-if args.defense == "mapd":
+if args.defense == "badloss":
     attack_types = ["backdoor"] + [f"backdoor_{attack}" for attack in val_probe_attacks]
 else:
     attack_types = [f"backdoor_{attack}" for attack in val_probe_attacks]
@@ -217,7 +219,7 @@ test_probes = make_test_probes(test_set, args.dataset, num_test_probes, val_prob
 
 
 # Merge probe dicts
-if args.defense == "mapd":
+if args.defense == "badloss":
     probes = {**train_probe, **val_probes}
     unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
     probes['all_backdoor_idx'] = unified_backdoor_idx
@@ -233,23 +235,27 @@ if args.dataset == "mnist":
     num_epochs = 25
     batch_size = 256
 elif "cifar" in args.dataset:
-    num_epochs = 100 if args.defense != "mapd" else args.badloss_pretrain_epochs
+    num_epochs = 100
     batch_size = 128
-else:
-    assert args.dataset == "imagenet" or args.dataset == "gtsrb" or args.dataset == "imagenette"
-    num_epochs = 100 if args.defense != "mapd" else args.badloss_pretrain_epochs
+elif args.dataset == "imagenet" or args.dataset == "gtsrb":
+    num_epochs = 100
     optimizer_batch_size = 256
     batch_size = 256
     if distributed:
         assert batch_size % world_size == 0
         batch_size = batch_size // world_size
         print(f"Optimizer batch size: {optimizer_batch_size} / World size: {world_size} / Local batch size: {batch_size}")
+else:
+    assert args.dataset == "imagenette"
+    num_epochs = 250
+    optimizer_batch_size = 250
+    batch_size = 256
 tensor_batch_size = batch_size if args.dataset == "gtsrb" or args.dataset == "imagenette" else None
 lr = 0.1
 momentum = 0.9
 wd = 0.0001
 moving_avg_weight = None
-augment_in_pretraining = False if args.defense == "mapd" else True
+augment_in_pretraining = False if args.defense == "badloss" else True
 augment_in_retraining = True
 if augment_in_retraining == False:
     raise NotImplementedError("Set augment = False in dataset_utils instead, good luck.")
@@ -262,7 +268,7 @@ comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
 valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
 
 
-model = get_model(args.dataset, num_classes, device, local_rank, verbose=False)
+model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
 criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_epochs)
 
 new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
@@ -272,7 +278,7 @@ new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
 # Load train probes onto gpu -- inexpensive and saves time.
 # ...could load entire train set onto gpu (15GB tops in GTSRB), but that's a pain, code-wise.
 to_cuda = copy.deepcopy(attack_types)
-if args.defense == 'mapd':
+if args.defense == 'badloss':
     if include_val_probe_examples:
         to_cuda += ['backdoor_val', 'clean', 'clean_val']
     else:
@@ -358,7 +364,7 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
             predictions[epoch]["test"] = test_preds
 
     # Collect probe statistics
-    if defense == "mapd":
+    if defense == "badloss":
         atks = attack_types + ["clean"]
     else:
         atks = attack_types
@@ -422,7 +428,7 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, v
 
 
 wandb_prefix = ''
-if args.defense in {"nc", "ac", "ss", "freq", "abl", "cd", "pss"}:
+if args.defense in {"nc", "ac", "ss", "cd", "pss"}:
     if not os.path.exists(model_file):
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
         for epoch in range(num_epochs):
@@ -451,7 +457,7 @@ if args.defense in {"nc", "ac", "ss", "freq", "abl", "cd", "pss"}:
         print("Data files already found. Loading data from saved checkpoints.")
 
         model.load_state_dict(torch.load(model_file, map_location=device))
-elif args.defense == "mapd":
+elif args.defense == "badloss":
     stats = {}
     # TODO: revisit names
     model_file = os.path.join(model_dir, f"model_{args.dataset}.pth")
@@ -471,7 +477,7 @@ elif args.defense == "mapd":
         use_eval_mode = True  # eval mode BN
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
         
-        for epoch in range(num_epochs):
+        for epoch in range(args.badloss_pretrain_epochs):
             output_dict = train(model, device, loader, optimizer, criterion, scaler) # TODO
             if not collect_losses_in_training:
                 loss_array = collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler)
@@ -493,7 +499,7 @@ elif args.defense == "mapd":
             # Save the final data
             with open(data_file, "wb") as f:
                 pickle.dump(stats, f, protocol=pickle.HIGHEST_PROTOCOL)
-elif args.defense == "cbd":
+elif args.defense in {"freq", "abl", "cbd"}:
     pass
 else:
     raise NotImplementedError
@@ -503,7 +509,7 @@ test(model, device, criterion, test_idx_loader, distributed, rank, log_predictio
 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
 
 
-if args.defense == "mapd":
+if args.defense == "badloss":
     losses = stats['losses']
 
     dataset_probe_identity = np.array(dataset_probe_identity)
@@ -555,9 +561,9 @@ if args.defense == "mapd":
     print(f"!! Total loss traj len: {len(losses)} / Modified examples identified: {num_missing_vals}")
     
     fit_data = oc_clf._fit_X
-    
     # TODO: Do this earlier?
-    epoch_avg_loss = losses[available_ex].mean(axis=0)
+    print("using avail")
+    epoch_avg_loss = losses[available_ex].mean(axis=0)  # TODO: clean_idx or available_ex?
     final_avgs = epoch_avg_loss[:3].tolist()
     epochs_to_keep = [0, 1, 2]
     for i in range(3, len(epoch_avg_loss)):
@@ -613,9 +619,9 @@ if args.defense == "mapd":
     assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
     print("Output probs shape:", all_ex_probs.shape)
     # In[ ]:
-    thresh_list = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95] # if attack == "all" else [0.15, 0.3]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
+    thresh_list = [0.6]  # if attack == "all" else [0.15, 0.3]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
-    num_epochs = 100
+    num_epochs = 100 if args.dataset != "imagenette" else 250
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
     if not os.path.exists(output_checkpoint_dir):
@@ -665,7 +671,8 @@ if args.defense == "mapd":
                 new_train_set_dl = get_loader(idx_dataset, indices=selected_indices, distributed=distributed,
                                               num_workers=num_workers, batch_size=batch_size)
 
-            clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False)
+            clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
+
             criterion, optimizer, lr_scheduler, scaler = get_optimizer(clean_model, device, lr, momentum, wd,
                                                                        num_epochs)
             postfix = ""
@@ -806,7 +813,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
                                   indices=retrain_indices, batch_size=batch_size)
 
-    clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False)
+    clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
     clean_criterion, clean_optimizer, clean_lr_scheduler, clean_scaler = \
         get_optimizer(clean_model, device, lr, momentum, wd, num_epochs)
 
@@ -1148,8 +1155,63 @@ if args.defense == "freq":
     #   backdoor probes examples.
     freq_probes = {
         'clean': train_probe['clean'].cpu().numpy(),
-        'backdoor': train_probe['backdoor'].cpu().numpy(),
+        'backdoor': copy.deepcopy(train_probe['clean'].cpu().numpy()),
     }
+
+    def apply_random_transform(probe):
+        attack = np.random.randint(0, 5)
+        patch_x = np.random.randint(2, 8)
+        patch_y = np.random.randint(2, 8)
+        loc = np.random.randint(0, 6)
+        corner = np.random.randint(0, 4)
+
+        attack = np.random.randint(0, 2)
+
+        if attack < 2:
+            if attack == 0:
+                block = np.ones((3, patch_x, patch_y))
+            elif attack == 1:
+                block = np.random.rand(3, patch_x, patch_y)
+
+            if corner == 0:
+                probe[:, loc:loc+patch_x, loc:loc+patch_y] = block
+            elif corner == 1:
+                probe[:, loc:loc+patch_x, -(loc+patch_y):-loc or None] = block
+            elif corner == 2:
+                probe[:, -(loc+patch_x):-loc or None, loc:loc+patch_y] = block
+            elif corner == 3:
+                probe[:, -(loc+patch_x):-loc or None, -(loc+patch_y):-loc or None] = block
+
+        elif attack == 2:
+            mean = 25
+            var = np.random.uniform(10, 70)
+            noise = np.random.randn(*probe.shape) * var + mean
+            probe += noise / 255
+        elif attack == 3:
+            # very simplified version, thanks claude -- TODO?
+            h, w = probe.shape[1:]
+            top_y = np.random.randint(0, h)
+            bottom_y = np.random.randint(top_y + 1, h + 1)
+            left_x = np.random.randint(0, w)
+            right_x = np.random.randint(left_x + 1, w + 1)
+
+            shadow_mask = np.ones(probe.shape)
+            shadow_mask[top_y:bottom_y, left_x:right_x] = 0.5  # 50% darkness
+
+            # Apply shadow
+            probe = probe * shadow_mask
+        elif attack == 4:
+            randind = np.random.randint(freq_probes['clean'].shape[0])
+            blend_im = freq_probes['clean'][randind]
+            probe = probe + 0.3 * blend_im
+
+        return np.clip(probe, 0, 1)
+
+    for i in range(freq_probes['backdoor'].shape[0]):
+        probe = freq_probes['backdoor'][i]
+        new_probe = apply_random_transform(probe)
+        freq_probes['backdoor'][i] = new_probe
+
 
     def dct2(block):
         # Copied from:
@@ -1244,11 +1306,10 @@ if args.defense == "abl":
         identified_indices = [int(ex_idx[i]) for i in identified_indices]
         return np.array(identified_indices)
 
-
     num_pretrain_epochs = 10
     flooding_threshold = 0.5
 
-    model = get_model(args.dataset, num_classes, device, local_rank, verbose=False)
+    model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
 
     finetune_and_unlearn = False  # If this is true, then normal ABL is done.
     if finetune_and_unlearn:
@@ -1405,7 +1466,7 @@ if args.defense == "cd":
 if args.defense == "cbd":
     num_pretrain_epochs = 5
 
-    backdoor_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False)
+    backdoor_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
 
     # Step # 01: Regular pretraining
     print("!! Performing CBD initial pretraining...")
@@ -1423,20 +1484,16 @@ if args.defense == "cbd":
         print(f"!! Loading pretrained checkpoint file:", output_checkpoint_file)
         backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
     
-    clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False)
-    # discriminator = ???
-
-
+    clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
     
     discriminator = DisenEstimator(2048, 2048, dropout=0.2) # TODO: Magic number batd
-
     adv_params = list(discriminator.parameters())
     adv_optimizer = torch.optim.Adam(adv_params, lr=0.2)
     adv_scheduler = torch.optim.lr_scheduler.StepLR(adv_optimizer, step_size=20, gamma=0.1)
     optimizer = torch.optim.SGD(clean_model.parameters(), lr=0.1, momentum=0.9,
                                 weight_decay=1e-4, nesterov=True)
     
-    clean_train_epochs = 100
+    clean_train_epochs = num_epochs
 
     output_checkpoint_file = os.path.join(experiment_output_dir, "cbd_model.pth")
     if not os.path.exists(output_checkpoint_file):
@@ -1444,12 +1501,15 @@ if args.defense == "cbd":
         scaler = None
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 70], gamma=0.1)
         for epoch in range(clean_train_epochs):
-            train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader, optimizer, adv_optimizer, criterion)
+            train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader, optimizer, adv_optimizer, criterion, args.cbd_ce_gamma)
             if epoch % 5 == 4:
                 print(f"Evaluation at epoch {epoch+1}")
                 log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
                                                        val_probes, args.defense, tensor_batch_size, epoch)
+            if epoch % 50 == 49:
+                test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+
             scheduler.step()
             adv_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint_file)
@@ -1468,7 +1528,7 @@ if args.defense == "pss":
     num_pretrain_epochs = 2
     num_intraclass_epochs = 3
 
-    backdoor_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False)
+    backdoor_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
     optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=0.01, momentum=0.9,
                                 weight_decay=5e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)

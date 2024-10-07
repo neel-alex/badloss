@@ -9,7 +9,7 @@ from catalyst.data import DistributedSamplerWrapper
 import dist_utils
 
 
-def get_model(dataset, num_classes, device, local_rank, verbose=False):
+def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='resnet50'):
     if dataset == "mnist":
         # Create BadNet architecture (https://arxiv.org/abs/1708.06733)
         model = torch.nn.Sequential(OrderedDict([
@@ -26,12 +26,37 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False):
         ]))
         model = model.to(device)
     else:
-        # Create ResNet-50
-        model = models.resnet50(pretrained=False, num_classes=num_classes)
-        if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
-            model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-            model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
-        model = model.to(device)
+        if arch == 'resnet50':
+            # Create ResNet-50
+            model = models.resnet50(pretrained=False, num_classes=num_classes)
+            if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
+                model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+                model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+            model = model.to(device)
+        elif arch == 'resnet18':
+            model = models.resnet18(pretrained=False, num_classes=num_classes)
+            if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
+                model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+                model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+            model = model.to(device)
+        elif arch == 'resnet34':
+            model = models.resnet34(pretrained=False, num_classes=num_classes)
+            if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
+                model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+                model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+            model = model.to(device)
+        elif arch == 'vgg16':
+            model = models.vgg16_bn(pretrained=False, num_classes=num_classes)
+            model = model.to(device)
+        elif arch == 'densenet':
+            model = models.densenet121(pretrained=False, num_classes=num_classes)
+            model = model.to(device)
+        elif arch == 'squeezenet':
+            model = models.squeezenet1_0(pretrained=False, num_classes=num_classes)
+            model = model.to(device)
+        elif arch == 'efficientnet':
+            model = models.efficientnet_b7(pretrained=False, num_classes=num_classes)
+            model = model.to(device)
     if verbose:
         print(model)
     model = dist_utils.convert_to_distributed(model, local_rank=local_rank, sync_bn=True)
@@ -378,7 +403,7 @@ class FeatureExtractor:
         return logits, torch.flatten(self.last_layer_activations, 1)
 
 
-def train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader, optimizer, adv_optimizer, criterion):
+def train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader, optimizer, adv_optimizer, criterion, ce_gamma=1.0):
     backdoor_model.eval()
     backdoor_model.to(device)
     clean_model.train()
@@ -419,7 +444,7 @@ def train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader
         r_hidden = r_hidden.detach()
         dis_loss = discriminator(r_hidden, z_hidden)
 
-        weight = loss_bias / (loss_d + loss_bias + 1e-8)
+        weight = (loss_bias / (loss_d + loss_bias + 1e-8)) ** ce_gamma
 
         weight = weight * weight.shape[0] / torch.sum(weight)
         loss = torch.mean(weight * criterion(output1, target))

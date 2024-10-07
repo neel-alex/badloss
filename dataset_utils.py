@@ -206,7 +206,7 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
 
-    if defense == "mapd":
+    if defense == "badloss":
         if include_val_probe_examples:
             probes_to_be_used = ["backdoor", "clean", "backdoor_val", "clean_val"]
         else:
@@ -257,7 +257,7 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
     print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape,
           val_probe_dataset_standard[0][1])
 
-    if defense == "mapd":
+    if defense == "badloss":
         comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard, val_probe_dataset_standard])
         comb_train_indices = train_indices + [(len(train_set) + x) for x in
                                               range(len(probe_dataset_standard) + len(val_probe_dataset_standard))]
