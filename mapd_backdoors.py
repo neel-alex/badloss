@@ -26,11 +26,12 @@ from sklearn.metrics import roc_curve, auc
 from scipy.fftpack import dct
 
 
-from config import config
+import config
+import utils
 import dist_utils
 from dataset_utils import get_settings_for_dataset, make_probe_dataset, \
                           make_index_dataset, get_loader, IdxDataset
-from plot_utils import plot_probe_examples, plot_attack_success_stats
+from plot_utils import plot_probe_examples
 from backdoors import make_train_probes, make_val_probes, make_test_probes
 from torch_utils import get_model, get_optimizer, train, test, test_tensor, \
     FreqCNN, collect_losses, train_cbd, train_intraclass, calc_fct, pss_unlearn
@@ -40,79 +41,31 @@ from cognitive_distillation import CognitiveDistillation
 from cbd_util import DisenEstimator
 
 
+# Required for determinism
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+torch.use_deterministic_algorithms(True, warn_only=True)
 
 
-args = config().parse_args()
+args = config.config().parse_args()
 print(args.dataset, args.attack, args.defense, args.poisoning_ratio)
 
 # TODO
-train_probe_attack = 'clean'
-all_attacks = ["patch", "random", "fixed", "sinusoid", "frequency"]
-val_probe_attacks = [args.attack] if args.attack != 'all' else all_attacks
-if args.dataset == "gtsrb" or args.dataset == "cifar10":
-    # val_probe_attacks.append("patch")
-    val_probe_attacks.append("single_pix")
-if args.dataset == 'cifar10':
-    val_probe_attacks.append('narcissus')
-ensemble_count = 1
-
-# Fraction in terms of overall dataset size!! Not in terms of per-class size.
-num_val_probes = {
-    "patch": 0.01,
-    "single_pix": 0.01,
-    "random": 0.01,
-    "fixed": 0.01,
-    "sinusoid": 0.1,  # Clean label attacks are expressed as a fraction of the target class!
-    "warped": 0.1,
-    "sleeper": 0.05,  # TODO: Remove sleeper...
-    "narcissus": 0.005,  # So they claim... 25 images!!
-    "frequency": 0.01,  # They claim this is right, but it feels too high
-}
-
-if args.dataset == "gtsrb":
-    num_val_probes["patch"] = 0.02
-    num_val_probes["single_pix"] = 0.04
-    num_val_probes["warped"] = 0.2
-if args.dataset == "imagenette":
-    num_val_probes["patch"] = 0.05 # TODO??
-    num_val_probes["single_pix"] = 0.1
-correct_abl = False  # If true, hard set poisoning ratio for abl to 10% at least.
-if correct_abl and args.defense == "abl":
-    args.poisoning_ratio = 0.1
-
-if args.poisoning_ratio is not None:
-    for k in num_val_probes:
-        num_val_probes[k] = args.poisoning_ratio
-num_test_probes = 10000
-
+attacks = config.get_attacks(args.attack, args.dataset)
+poison_ratios = config.get_poisoning_ratio(args.dataset, args.poisoning_ratio)
 
 # Set random seed
-seed = 3
+seed = args.seed
 print("Seed:", seed)
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-np.random.seed(seed=seed)
-random.seed(seed)
-torch.use_deterministic_algorithms(True, warn_only=True)
-
-# Plotting config
-include_plot_title = False
-font_size = 16
-
+utils.seed_all(seed)
 
 # Essential config
 log_predictions = True
-distributed = True if args.dataset == "imagenet" else False
 project_id = "exp67"
 experiment_output_dir = f"./backdoor_{project_id}_{args.dataset}_{args.defense}_{args.attack}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{args.dataset}_{args.attack}{'_' + args.defense if args.defense in {'badloss'} else ''}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}"
 # model_collection_dir = experiment_output_dir
 num_workers = 8 # TODO: Warning that the number of workers requested isn't right?
 surface_examples = False
-
-print("Dataset:", args.dataset)
-print("Distributed training:", distributed)
 
 # Initalize W&B -- assumes wandb is already logged in
 log_wandb = False
@@ -127,6 +80,7 @@ if dist_utils.is_main_proc():
     log_wandb = True
 
 # Initialize the distributed environment
+distributed = False
 gpu = 0
 world_size = 1
 distributed = distributed or int(os.getenv('WORLD_SIZE', 1)) > 1
@@ -194,18 +148,18 @@ print(args.dataset, num_classes)
 
 # Standardizing nomenclature...
 if args.defense == "badloss":
-    attack_types = ["backdoor"] + [f"backdoor_{attack}" for attack in val_probe_attacks]
+    attack_types = ["backdoor"] + [f"backdoor_{attack}" for attack in attacks]
 else:
-    attack_types = [f"backdoor_{attack}" for attack in val_probe_attacks]
+    attack_types = [f"backdoor_{attack}" for attack in attacks]
 
 val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, args.dataset, train_set_wo_aug,
-                                                                            num_val_probes, val_probe_attacks,
+                                                                            poison_ratios, attacks,
                                                                             experiment_output_dir, main_proc, img_size,
                                                                             device,)
 
 include_val_probe_examples = False
 
-
+train_probe_attack = 'clean'
 train_probe, attack_target, aux_data = make_train_probes(num_classes, args.dataset, train_set_wo_aug,
                                                          args.num_train_probes, train_probe_attack,
                                                          experiment_output_dir, main_proc, img_size, device,
@@ -214,7 +168,8 @@ train_probe, attack_target, aux_data = make_train_probes(num_classes, args.datas
 
 train_probes_idx = train_probe["all_backdoor_idx"]
 
-test_probes = make_test_probes(test_set, args.dataset, num_test_probes, val_probe_attacks, attack_targets,
+num_test_probes = 10000
+test_probes = make_test_probes(test_set, args.dataset, num_test_probes, attacks, attack_targets,
                                random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
 
 
@@ -229,27 +184,10 @@ else:
     probes = val_probes
 
 
+num_epochs = args.num_epochs if args.num_epochs is not None \
+                else config.get_num_epochs(args.dataset)
+batch_size = args.batch_size
 
-# Hyperparameters
-if args.dataset == "mnist":
-    num_epochs = 25
-    batch_size = 256
-elif "cifar" in args.dataset:
-    num_epochs = 100
-    batch_size = 128
-elif args.dataset == "imagenet" or args.dataset == "gtsrb":
-    num_epochs = 100
-    optimizer_batch_size = 256
-    batch_size = 256
-    if distributed:
-        assert batch_size % world_size == 0
-        batch_size = batch_size // world_size
-        print(f"Optimizer batch size: {optimizer_batch_size} / World size: {world_size} / Local batch size: {batch_size}")
-else:
-    assert args.dataset == "imagenette"
-    num_epochs = 250
-    optimizer_batch_size = 250
-    batch_size = 256
 tensor_batch_size = batch_size if args.dataset == "gtsrb" or args.dataset == "imagenette" else None
 lr = 0.1
 momentum = 0.9
@@ -263,10 +201,9 @@ if augment_in_retraining == False:
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
     make_probe_dataset(probes, train_set, args.dataset, args.num_train_probes, args.defense,
-                       train_transform, val_probe_attacks, experiment_output_dir,
+                       train_transform, attacks, experiment_output_dir,
                        device, include_val_probe_examples=include_val_probe_examples)
 valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
-
 
 model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
 criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_epochs)
@@ -310,29 +247,6 @@ if main_proc and not os.path.exists(model_dir):
 
 
 ref_probe_classes = ["backdoor", "clean"]
-label_map_dict = {"backdoor": "Backdoor (probe)",
-                  "backdoor_val": "Backdoor (probe) [Val]",
-                  "clean": "Clean",
-                  "clean_val": "Clean [Val]",
-                  "backdoor_patch_val": "Backdoor (Patch)",
-                  "backdoor_single_pix_val": "Backdoor (Single pixel patch)",
-                  "backdoor_reversed_val": "Backdoor (Reversed)",
-                  "backdoor_reversed_single_pix_val": "Backdoor (Reversed single pixel)",
-                  "backdoor_random_val": "Backdoor (Blend-R)",
-                  "backdoor_fixed_val": "Backdoor (Blend-P)",
-                  "backdoor_sinusoid_val": "Backdoor (Sinusoid)",
-                  "backdoor_random_boosted_val": "Backdoor (Blend-R; boosted)",
-                  "backdoor_fixed_boosted_val": "Backdoor (Blend-P; boosted)",
-                  "backdoor_sinusoid_boosted_val": "Backdoor (Sinusoid; boosted)",
-                  "backdoor_warped_val": "Backdoor (Warped)",
-                  "backdoor_warped_boosted_val": "Backdoor (Warped; boosted)",
-                  "backdoor_narcissus_val": "Backdoor (Narcissus)",
-                  "backdoor_narcissus_boosted_val": "Backdoor (Narcissus; boosted)",
-                  "backdoor_frequency_val": "Backdoor (Frequency)",
-                  "backdoor_frequency_boosted_val": "Backdoor (Frequency; boosted)",
-                  "train": "Train",
-                  "test": "Test"}
-
 
 # In[ ]:
 
@@ -410,10 +324,10 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                 wandb.log({wandb_prefix+attack_type: stats})
 
 
-def test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size):
+def test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size):
     output_dict = {}
-    attacks = [x for x in test_probes.keys() if not x.endswith("_labels")]
-    for attack in attacks:
+    all_attacks = [x for x in test_probes.keys() if not x.endswith("_labels")]
+    for attack in all_attacks:
         stats, _ = test_tensor(model, device, criterion, test_probes[attack],
                                test_probes[f"{attack}_labels"],
                                msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
@@ -438,7 +352,7 @@ if args.defense in {"nc", "ac", "ss", "cd", "pss"}:
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
                                                        val_probes, args.defense, tensor_batch_size, epoch)
-                test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
+                test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks,
                                    tensor_batch_size)
                 if main_proc:
                     # Save the model
@@ -487,12 +401,12 @@ elif args.defense == "badloss":
                 correct_class_probs[:, epoch] = probs_array
 
             if epoch % 5 == 4:
-                test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
+                test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks,
                                     tensor_batch_size)
             if lr_scheduler is not None:
                 lr_scheduler.step()
 
-        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
         stats['losses'] = losses
         stats['probs'] = correct_class_probs
         stats['probe_id'] = dataset_probe_identity
@@ -511,7 +425,7 @@ else:
 
 print("Final model performance:")
 test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
 
 
 if args.defense == "badloss":
@@ -700,12 +614,11 @@ if args.defense == "badloss":
 
             # Evaluate the attack success rate for the model trained on clean data
             output_dict = test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes,
-                                             val_probe_attacks, tensor_batch_size)
+                                             attacks, tensor_batch_size)
 
             add_clean_to_output_dict(output_dict, clean_model, device, criterion, test_idx_loader, distributed, rank,
                                      log_predictions)
             output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
-            plot_attack_success_stats(output_dict, label_map_dict, ref_probe_classes, output_file, title=title, log_wandb=log_wandb)
             print("~" * 100)
         print("=" * 100)
 
@@ -854,7 +767,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader,
                                            distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense,
                                            tensor_batch_size, num_epochs+1)
-    test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, val_probe_attacks, tensor_batch_size)
+    test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, attacks, tensor_batch_size)
     return clean_model
 
 
@@ -1442,7 +1355,7 @@ if args.defense == "abl":
 
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                       log_predictions=log_predictions)
-        test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+        test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
 
 if args.defense == "cd":
     cd = CognitiveDistillation()
@@ -1518,7 +1431,7 @@ if args.defense == "cbd":
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
                                                        val_probes, args.defense, tensor_batch_size, epoch)
             if epoch % 50 == 49:
-                test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+                test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, attacks, tensor_batch_size)
 
             scheduler.step()
             adv_scheduler.step()
@@ -1531,7 +1444,7 @@ if args.defense == "cbd":
     log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
                                            distributed, rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, args.defense,
                                            tensor_batch_size, num_epochs+1)
-    test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+    test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, attacks, tensor_batch_size)
 
 if args.defense == "pss":
     # Train from clean for 2 epochs w/o aug || train_attack_noTrans.py
@@ -1631,7 +1544,7 @@ if args.defense == "pss":
 
     print("Retrained model performance:")
     test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-    test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
+    test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
     
     print("Done with PSS")
 
