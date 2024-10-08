@@ -563,14 +563,18 @@ def pss_unlearn(model, device, clean_dl, pois_dl, optimizer, criterion):
 def collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler):
     model.eval()
     loss_array = torch.zeros(len(new_idx_loader_wo_aug.dataset))
+    probs_array = torch.zeros(len(new_idx_loader_wo_aug.dataset))
 
     for (data, target), ex_idx in new_idx_loader_wo_aug:
         with torch.no_grad():
             data, target = data.to(device), target.to(device)
             output = model(data)
+            probs = torch.nn.functional.softmax(output, dim=1)
+            correct_class_probs = probs[torch.arange(probs.shape[0]), target]
             loss_vals = criterion(output, target)
 
             loss_array[ex_idx] = loss_vals.detach().clone().cpu()
+            probs_array[ex_idx] = correct_class_probs.detach().clone().cpu()
             # TODO: Report avg. training loss/correct
 
-    return loss_array
+    return loss_array, probs_array

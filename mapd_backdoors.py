@@ -473,6 +473,8 @@ elif args.defense == "badloss":
 
     else:
         losses = torch.zeros((len(new_idx_loader.dataset), args.badloss_pretrain_epochs))
+        correct_class_probs = torch.zeros((len(new_idx_loader.dataset), args.badloss_pretrain_epochs))
+
         collect_losses_in_training = False  # TODO: Implement
         use_eval_mode = True  # eval mode BN
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
@@ -480,8 +482,9 @@ elif args.defense == "badloss":
         for epoch in range(args.badloss_pretrain_epochs):
             output_dict = train(model, device, loader, optimizer, criterion, scaler) # TODO
             if not collect_losses_in_training:
-                loss_array = collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler)
+                loss_array, probs_array = collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler)
                 losses[:, epoch] = loss_array
+                correct_class_probs[:, epoch] = probs_array
 
             if epoch % 5 == 4:
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks,
@@ -491,6 +494,8 @@ elif args.defense == "badloss":
 
         test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_probe_attacks, tensor_batch_size)
         stats['losses'] = losses
+        stats['probs'] = correct_class_probs
+        stats['probe_id'] = dataset_probe_identity
 
         if main_proc:
             # Save the model
@@ -510,7 +515,12 @@ test_unseen_probes(log_predictions, model, device, criterion, test_probes, val_p
 
 
 if args.defense == "badloss":
-    losses = stats['losses']
+    if args.badloss_metric == 'loss':
+        losses = stats['losses']
+    elif args.badloss_metric == 'prob':
+        losses = stats['probs']  # TODO: refactor
+    else:
+        raise NotImplementedError
 
     dataset_probe_identity = np.array(dataset_probe_identity)
     clean_idx = np.where(dataset_probe_identity == 'clean')[0]
