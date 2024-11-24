@@ -1,5 +1,6 @@
 import argparse
 from typing import List, Dict
+from collections import defaultdict
 
 
 def config() -> argparse.ArgumentParser:
@@ -7,7 +8,7 @@ def config() -> argparse.ArgumentParser:
 
     # Main arguments
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'gtsrb', 'imagenette'])
+                        choices=['cifar10', 'gtsrb', 'imagenette', 'imagenet'])
     parser.add_argument('--attack', default='all', type=str,
                         choices=['all', 'patch', 'single_pix', 'random',
                                  'fixed', 'sinusoid', 'narcissus',
@@ -66,32 +67,31 @@ def get_attacks(attack: str, dataset: str) -> List[str]:
         elif dataset == 'gtsrb':
             return ['patch', 'single_pix', 'random', 'fixed',
                     'sinusoid', 'frequency']
-        elif dataset == 'imagenette':
+        elif dataset == 'imagenette' or dataset == 'imagenet': # TODO
             return ['patch', 'random', 'fixed', 'sinusoid', 'frequency']
     else:
         return [attack]
 
 
 def get_default_poisoning_ratio(dataset: str) -> Dict[str, float]:
-    patch_ratios = {
-        'cifar10': 0.01,
-        'gtsrb': 0.02,
-        'imagenette': 0.05,
-    }
-    single_pix_ratios = {
-        'cifar10': 0.01,
-        'gtsrb': 0.04,
-    }
+    attack_ratios = {"patch": {'default': 0.01,
+                               'gtsrb': 0.02,
+                               'imagenette': 0.05,
+                               'imagenet': 0.001},
+                     "single_pix": {'default': 0.01,
+                                    'gtsrb': 0.04},
+                     "random": {'default': 0.01,
+                                'imagenet': 0.001},
+                     "fixed": {'default': 0.01,
+                               'imagenet': 0.001},
+                     "sinusoid": {'default': 0.1},  # frac. target class
+                     "narcissus": {'default': 0.005},
+                     "frequency": {'default': 0.01,
+                                   'imagenet': 0.001}
+                    }
 
-    poisoning_ratios = {
-        "patch": patch_ratios[dataset],
-        "single_pix": single_pix_ratios[dataset],
-        "random": 0.01,
-        "fixed": 0.01,
-        "sinusoid": 0.1,  # Clean attacks are a fraction of the target class!
-        "narcissus": 0.005,  # So they claim... 25 images!!
-        "frequency": 0.01,  # They claim this is right, but it feels too high
-    }
+    poisoning_ratios = {attack: ratios.get(dataset, ratios['default'])
+                        for attack, ratios in attack_ratios.items()}
 
     return poisoning_ratios
 

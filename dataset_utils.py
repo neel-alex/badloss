@@ -194,7 +194,8 @@ def get_loader(dataset, distributed, num_workers, indices=None, batch_size=16, s
         else:
             sampler = torch.utils.data.distributed.DistributedSampler(dataset)
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                                         sampler=sampler, num_workers=num_workers, pin_memory=True)
+                                         sampler=sampler, num_workers=num_workers, prefetch_factor=4,
+                                         pin_memory=True)
     return loader
 
 

@@ -1,24 +1,17 @@
 #!/usr/bin/env python
 import os
-import sys
-import math
 import copy
 import pickle
 import shutil
-import random
 import warnings
 from tqdm import tqdm
 from collections import Counter
 
 
-import natsort
 import wandb
 import numpy as np
-import cv2
 import torch
 from torch.utils.data import TensorDataset, DataLoader
-from torchvision import transforms
-import matplotlib.pyplot as plt
 import sklearn.neighbors
 import sklearn.cluster
 import sklearn.metrics
@@ -60,11 +53,11 @@ utils.seed_all(seed)
 
 # Essential config
 log_predictions = True
-project_id = "exp67"
-experiment_output_dir = f"./backdoor_{project_id}_{args.dataset}_{args.defense}_{args.attack}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}"
-model_collection_dir = f"./backdoor_{project_id}_model_{args.dataset}_{args.attack}{'_' + args.defense if args.defense in {'badloss'} else ''}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}"
+project_id = "exp68"
+experiment_output_dir = f"./backdoor_{project_id}_{args.dataset}_{args.defense}_{args.attack}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not [] else ''}"
+model_collection_dir = f"./backdoor_{project_id}_model_{args.dataset}_{args.attack}{'_' + args.defense if args.defense in {'badloss'} else ''}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not [] else ''}"
 # model_collection_dir = experiment_output_dir
-num_workers = 8 # TODO: Warning that the number of workers requested isn't right?
+num_workers = 8  # TODO: Warning that the number of workers requested isn't right?
 surface_examples = False
 
 # Initalize W&B -- assumes wandb is already logged in
@@ -188,7 +181,7 @@ num_epochs = args.num_epochs if args.num_epochs is not None \
                 else config.get_num_epochs(args.dataset)
 batch_size = args.batch_size
 
-tensor_batch_size = batch_size if args.dataset == "gtsrb" or args.dataset == "imagenette" else None
+tensor_batch_size = batch_size if args.dataset in {"gtsrb", "imagenette", "imagenet"} else 128
 lr = 0.1
 momentum = 0.9
 wd = 0.0001
@@ -225,7 +218,7 @@ for key in to_cuda:
     probes[key] = probes[key].to(device)
     probes[f'{key}_labels'] = probes[f'{key}_labels'].to(device)
 # Non-GTSRB test probes can stay on the GPU
-if args.dataset != "gtsrb" and args.dataset != "imagenette":
+if args.dataset != "gtsrb" and args.dataset != "imagenette" and args.dataset != "imagenet":
     for key in test_probes:
         test_probes[key] = test_probes[key].to(device)
 
@@ -554,7 +547,7 @@ if args.defense == "badloss":
 
     # train_types = ["original", "cleaned", "random"]
     train_types = ["cleaned"]
-
+    # breakpoint()
     for train_type in train_types:
         print("=" * 100)
         print(f"!! Using {train_type} training set....")
