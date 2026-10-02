@@ -127,9 +127,9 @@ class Experiment:
         self.poison_imgs, self.attack_targets, blend_r_pattern = make_poison_imgs(
             self.num_classes, args.dataset, self.train_set_wo_aug, args.poison_ratios, self.attacks,
             self.output_dir, self.main_proc, self.img_size, data_root=args.data_dir)
-        self.probe_imgs = make_probe_imgs(self.train_set_wo_aug, args.num_train_probes,
+        self.probe_imgs = make_probe_imgs(self.train_set_wo_aug, args.num_probes,
                                           poison_indices=all_poison_indices(self.poison_imgs))
-        self.poison_imgs_test = make_poison_imgs_test(self.test_set, args.dataset, args.num_test_probes, self.attacks,
+        self.poison_imgs_test = make_poison_imgs_test(self.test_set, args.dataset, args.num_asr_images, self.attacks,
                                                       self.attack_targets, blend_r_pattern, self.output_dir,
                                                       self.main_proc, self.img_size, data_root=args.data_dir)
 

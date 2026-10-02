@@ -129,9 +129,6 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
     return output_dict, pred_output_dict
 
 
-# In[ ]:
-
-
 def test_tensor(model, device, criterion, data, target, msg=None, batch_size=None):
     """Evaluate (eval mode) on an in-memory tensor dataset; returns a stats dict."""
     assert torch.is_tensor(data) and torch.is_tensor(target)
@@ -183,6 +180,7 @@ def test_tensor(model, device, criterion, data, target, msg=None, batch_size=Non
 
 
 def collect_losses(model, device, new_idx_loader_wo_aug, criterion):
+    """Per-example loss and correct-class probability (eval mode) over a loader, indexed by example."""
     model.eval()
     loss_array = torch.zeros(len(new_idx_loader_wo_aug.dataset))
     probs_array = torch.zeros(len(new_idx_loader_wo_aug.dataset))
@@ -197,6 +195,5 @@ def collect_losses(model, device, new_idx_loader_wo_aug, criterion):
 
             loss_array[ex_idx] = loss_vals.detach().clone().cpu()
             probs_array[ex_idx] = correct_class_probs.detach().clone().cpu()
-            # TODO: Report avg. training loss/correct
 
     return loss_array, probs_array

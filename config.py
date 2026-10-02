@@ -37,11 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--arch', default='resnet50', type=str,
                         choices=['resnet50', 'resnet18', 'resnet34', 'vgg16', 'densenet', 'squeezenet',
                                  'efficientnet'])
-    parser.add_argument('--num_test_probes', default=None, type=int,
+    parser.add_argument('--num_asr_images', default=None, type=int,
                         help="Triggered test images per attack for measuring ASR; default depends on the dataset")
 
     # Defense arguments
-    parser.add_argument('--num_train_probes', default=250, type=int,
+    parser.add_argument('--num_probes', default=250, type=int,
                         help="Number of bona fide clean examples (probes) available to the defender")
 
     # BaDLoss
@@ -136,7 +136,7 @@ def dataset_defaults(dataset: str, batch_size: int) -> Dict:
         'num_epochs': num_epochs,
         'badloss_retrain_epochs': 50 if dataset == 'imagenet' else num_epochs,
         'eval_batch_size': 128 if dataset == 'cifar10' else batch_size,
-        'num_test_probes': 2000 if dataset == 'imagenet' else 10000,
+        'num_asr_images': 2000 if dataset == 'imagenet' else 10000,
     }
 
 
