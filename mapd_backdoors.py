@@ -202,9 +202,8 @@ num_epochs = args.num_epochs if args.num_epochs is not None \
 batch_size = args.batch_size
 
 tensor_batch_size = batch_size if args.dataset in {"gtsrb", "imagenette", "imagenet"} else 128
-lr = 0.1
-momentum = 0.9
-wd = 0.0001
+lr = 1e-3  # AdamW
+wd = 1e-4
 augment_in_pretraining = False if args.defense == "badloss" else True
 
 
@@ -213,7 +212,7 @@ comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
 valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
 
 model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
-criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_epochs)
+criterion, optimizer, lr_scheduler = get_optimizer(model, device, lr, wd, num_epochs)
 
 new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
     make_index_dataset(comb_train_set, comb_train_indices, test_set,
@@ -281,7 +280,7 @@ if args.defense in {"nc", "ac", "ss", "cd", "pss"}:
     if not os.path.exists(model_file):
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
         for epoch in range(num_epochs):
-            train(model, device, loader, optimizer, criterion, scaler)
+            train(model, device, loader, optimizer, criterion)
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
@@ -321,8 +320,8 @@ elif args.defense == "badloss":
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
 
         for epoch in range(args.badloss_pretrain_epochs):
-            train(model, device, loader, optimizer, criterion, scaler)
-            loss_array, probs_array = collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler)
+            train(model, device, loader, optimizer, criterion)
+            loss_array, probs_array = collect_losses(model, device, new_idx_loader_wo_aug, criterion)
             losses[:, epoch] = loss_array
             correct_class_probs[:, epoch] = probs_array
 
@@ -372,9 +371,9 @@ if args.defense == "badloss":
     clean_trajectories = losses[clean_idx]
     clean_labels = np.zeros(len(clean_trajectories), dtype=int)
 
-    def train_model(clean_model, loader, optimizer, criterion, scaler, lr_scheduler, output_checkpoint):
+    def train_model(clean_model, loader, optimizer, criterion, lr_scheduler, output_checkpoint):
         for _ in range(num_epochs):
-            train(clean_model, device, loader, optimizer, criterion, scaler)
+            train(clean_model, device, loader, optimizer, criterion)
             if lr_scheduler is not None:
                 lr_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint)
@@ -451,12 +450,12 @@ if args.defense == "badloss":
                                   num_workers=num_workers, batch_size=batch_size)
 
     clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
-    criterion, optimizer, lr_scheduler, scaler = get_optimizer(clean_model, device, lr, momentum, wd, num_epochs)
+    criterion, optimizer, lr_scheduler = get_optimizer(clean_model, device, lr, wd, num_epochs)
     output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_cleaned_thresh_{threshold:.2f}.pth")
     print("Selected output checkpoint:", output_checkpoint)
     if not os.path.exists(output_checkpoint):  # Train the model
         print("!! Output checkpoint not found. Training model from scratch...")
-        train_model(clean_model, new_train_set_dl, optimizer, criterion, scaler, lr_scheduler, output_checkpoint)
+        train_model(clean_model, new_train_set_dl, optimizer, criterion, lr_scheduler, output_checkpoint)
     else:  # Load the model
         print("!! Loading model from pretrained checkpoint:", output_checkpoint)
         clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
@@ -494,9 +493,8 @@ def get_last_layer_activations(model, loader, masking_op=None):
         data = data.to(device)
         if masking_op is not None:
             data = masking_op(data)
-        with torch.cuda.amp.autocast(enabled=False):
-            output = model(data)
-            predictions = torch.argmax(output, 1)
+        output = model(data)
+        predictions = torch.argmax(output, 1)
 
         all_acts.append(activations[name].squeeze())  # Remove size 1 dimensions
         example_indices.append(ex_idx)
@@ -575,7 +573,7 @@ def get_auc(idx_list, valid_idx, dataset_probe_identity, num_train_probes):
 
 
 def retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
-                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  num_classes, device, local_rank, lr, wd, num_epochs, experiment_output_dir,
                   detection_thresh, probes, log_predictions, test_probes, defense):
     print(f"Retraining with {identified_indices.shape[0]} elements removed.")
     retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
@@ -584,8 +582,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
                                   indices=retrain_indices, batch_size=batch_size)
 
     clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
-    clean_criterion, clean_optimizer, clean_lr_scheduler, clean_scaler = \
-        get_optimizer(clean_model, device, lr, momentum, wd, num_epochs)
+    clean_criterion, clean_optimizer, clean_lr_scheduler = get_optimizer(clean_model, device, lr, wd, num_epochs)
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
     if main_proc and not os.path.exists(output_checkpoint_dir):
@@ -596,7 +593,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     if not os.path.exists(output_checkpoint):  # Train the model
         print("!! Output checkpoint not found. Training model from scratch...")
         for epoch in range(num_epochs):
-            train(clean_model, device, retrain_set_dl, clean_optimizer, clean_criterion, clean_scaler)
+            train(clean_model, device, retrain_set_dl, clean_optimizer, clean_criterion)
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")
                 log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader, distributed,
@@ -626,8 +623,7 @@ if args.defense == "nc":
         return batch * (1 - mask) + mask * trigger
 
 
-    def train_cleanse(model, mask, trigger, optimizer, target_class, l1_penalty, train_set,
-                      use_autocast=False, log_interval=5):
+    def train_cleanse(model, mask, trigger, optimizer, target_class, l1_penalty, train_set, log_interval=5):
         optimizer.zero_grad()
         pbar = tqdm(new_idx_loader_wo_aug)
         total_in_cls = 0
@@ -637,14 +633,13 @@ if args.defense == "nc":
             cleanse_target = torch.full(target.shape, target_class, device='cuda')
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast(enabled=use_autocast):
-                output = model(triggered_data)
-                predictions = torch.argmax(output, 1)
-                total_in_cls += (predictions == target_class).sum().item()
+            output = model(triggered_data)
+            predictions = torch.argmax(output, 1)
+            total_in_cls += (predictions == target_class).sum().item()
 
-                trigger_loss = criterion(output, cleanse_target).mean()
-                l1_loss = torch.norm(mask, p=1) * l1_penalty
-                loss = trigger_loss + l1_loss
+            trigger_loss = criterion(output, cleanse_target).mean()
+            l1_loss = torch.norm(mask, p=1) * l1_penalty
+            loss = trigger_loss + l1_loss
 
             loss.backward()
             optimizer.step()
@@ -653,8 +648,7 @@ if args.defense == "nc":
             trigger.data.clamp_(0, 1)
 
             if batch_idx % log_interval == 0:
-                pbar.set_description(f"Loss: {float(loss):.4f}")
-            torch.cuda.synchronize()
+                pbar.set_description(f"Loss: {float(loss.detach()):.4f}")
         print(f"Classifies {total_in_cls} as {target_class}")
         # TODO: This isn't what they did in their paper, but what they did is very fiddly. I suspect this will get
         #   very similar results though.
@@ -771,7 +765,7 @@ if args.defense == "nc":
                                            args.num_train_probes, per_class_out=per_class_det)
     record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
-                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                batch_size, num_classes, device, local_rank, lr, wd, num_epochs,
                                 experiment_output_dir, fpr_thresh, probes, log_predictions, test_probes, args.defense)
 
     # fpr_thresh is only misnamed parameter...
@@ -861,7 +855,7 @@ if args.defense == "ac":
                                            args.num_train_probes, per_class_out=per_class_det)
     record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
-                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                batch_size, num_classes, device, local_rank, lr, wd, num_epochs,
                                 experiment_output_dir, detect_thresh, probes, log_predictions, test_probes,
                                 args.defense)  # detect_thresh...
 
@@ -924,7 +918,7 @@ if args.defense == "ss":
                                            args.num_train_probes, per_class_out=per_class_det)
     record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
-                                batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
+                                batch_size, num_classes, device, local_rank, lr, wd, num_epochs,
                                 experiment_output_dir, epsilon_thresh, probes, log_predictions, test_probes, args.defense)
 
     print("Done with ss")
@@ -1028,7 +1022,6 @@ if args.defense == "freq":
     freq_criterion = torch.nn.CrossEntropyLoss()
     freq_optimizer = torch.optim.Adadelta(freq_model.parameters(), lr=0.05, weight_decay=1e-4)
 
-    model.train()
     for epoch in range(10):
         epoch_loss = 0.
         epoch_correct = 0
@@ -1068,7 +1061,7 @@ if args.defense == "freq":
                                            args.num_train_probes, per_class_out=per_class_det)
     record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
-                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  num_classes, device, local_rank, lr, wd, num_epochs, experiment_output_dir,
                   detection_thresh, probes, log_predictions, test_probes, args.defense)
 
 if args.defense == "abl":
@@ -1090,9 +1083,9 @@ if args.defense == "abl":
     print("!! Performing initial pretraining with all examples (using loss flooding)...")
     output_checkpoint_file = os.path.join(experiment_output_dir, "model_pretrain.pth")
     if not os.path.exists(output_checkpoint_file):
-        criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, num_pretrain_epochs)
+        criterion, optimizer, lr_scheduler = get_optimizer(model, device, lr, wd, num_pretrain_epochs)
         for epoch in tqdm(range(num_pretrain_epochs)):
-            train(model, device, new_idx_loader, optimizer, criterion, scaler, flooding_threshold=flooding_threshold)
+            train(model, device, new_idx_loader, optimizer, criterion, flooding_threshold=flooding_threshold)
             if epoch % 5 == 4:
                 log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
@@ -1129,7 +1122,7 @@ if args.defense == "abl":
                                            args.num_train_probes, per_class_out=per_class_det)
     record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
-                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  num_classes, device, local_rank, lr, wd, num_epochs, experiment_output_dir,
                   selection_threshold, probes, log_predictions, test_probes, args.defense)
 
 if args.defense == "cd":
@@ -1161,7 +1154,7 @@ if args.defense == "cd":
                                            args.num_train_probes, per_class_out=per_class_det)
     record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
-                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  num_classes, device, local_rank, lr, wd, num_epochs, experiment_output_dir,
                   detection_thresh, probes, log_predictions, test_probes, args.defense)
 
 if args.defense == "cbd":
@@ -1173,9 +1166,9 @@ if args.defense == "cbd":
     print("!! Performing CBD initial pretraining...")
     output_checkpoint_file = os.path.join(experiment_output_dir, "cbd_model_pretrain.pth")
     if not os.path.exists(output_checkpoint_file):
-        criterion, optimizer, lr_scheduler, scaler = get_optimizer(backdoor_model, device, lr, momentum, wd, num_pretrain_epochs)
+        criterion, optimizer, lr_scheduler = get_optimizer(backdoor_model, device, lr, wd, num_pretrain_epochs)
         for epoch in tqdm(range(num_pretrain_epochs)):
-            train(backdoor_model, device, new_idx_loader, optimizer, criterion, scaler)
+            train(backdoor_model, device, new_idx_loader, optimizer, criterion)
             if epoch % 5 == 4:
                 log_results_and_update_stats_and_preds(log_predictions, backdoor_model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
@@ -1199,7 +1192,6 @@ if args.defense == "cbd":
     output_checkpoint_file = os.path.join(experiment_output_dir, "cbd_model.pth")
     if not os.path.exists(output_checkpoint_file):
         criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
-        scaler = None
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 70], gamma=0.1)
         for epoch in range(clean_train_epochs):
             train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader, optimizer, adv_optimizer, criterion, args.cbd_ce_gamma)
@@ -1235,7 +1227,6 @@ if args.defense == "pss":
     optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=0.01, momentum=0.9,
                                 weight_decay=5e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
-    scaler = None
 
 
     # Step # 01: Regular pretraining
@@ -1243,9 +1234,8 @@ if args.defense == "pss":
     output_checkpoint_file = os.path.join(experiment_output_dir, "pss_model_pretrain.pth")
     if not os.path.exists(output_checkpoint_file):
         criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
-        scaler = None
         for epoch in tqdm(range(num_pretrain_epochs)):
-            train(backdoor_model, device, new_idx_loader_wo_aug, optimizer, criterion, scaler)
+            train(backdoor_model, device, new_idx_loader_wo_aug, optimizer, criterion)
             if epoch % 2 == 1:
                 log_results_and_update_stats_and_preds(log_predictions, backdoor_model, device, criterion, test_idx_loader,
                                                        distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
@@ -1262,13 +1252,12 @@ if args.defense == "pss":
     optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=0.01, momentum=0.9,
                                 weight_decay=5e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
-    train_criterion = torch.nn.CrossEntropyLoss().to(device)
 
     output_checkpoint_file = os.path.join(experiment_output_dir, "pss_model_intraclass.pth")
     print("!! Performing intraclass training...")
     if not os.path.exists(output_checkpoint_file):
         for epoch in tqdm(range(num_intraclass_epochs)):
-            train_intraclass(backdoor_model, device, new_idx_loader_wo_aug, optimizer, train_criterion, scaler, num_classes)
+            train_intraclass(backdoor_model, device, new_idx_loader_wo_aug, optimizer, num_classes)
             scheduler.step()
             if epoch % 5 == 4:
                 log_results_and_update_stats_and_preds(log_predictions, backdoor_model, device, criterion, test_idx_loader,

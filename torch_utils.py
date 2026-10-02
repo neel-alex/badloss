@@ -33,23 +33,15 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='res
     return model
 
 
-def get_optimizer(model, device, lr, momentum, wd, num_epochs, optimizer_name='adamw', use_scaler=False):
-    criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction='mean' by default
-    if optimizer_name == 'sgd':
-        optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
-    elif optimizer_name == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=wd)
-    else:
-        assert optimizer_name == 'adamw'
-        optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=wd)
+def get_optimizer(model, device, lr, wd, num_epochs):
+    """AdamW with a cosine schedule over num_epochs; per-example (reduction='none') cross-entropy."""
+    criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-    scaler = None
-    if use_scaler:
-        scaler = torch.cuda.amp.GradScaler()
-    return criterion, optimizer, lr_scheduler, scaler
+    return criterion, optimizer, lr_scheduler
 
 
-def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, flooding_threshold=None):
+def train(model, device, train_loader, optimizer, criterion, log_interval=10, flooding_threshold=None):
     """One epoch of training. criterion must use reduction='none'. flooding_threshold enables loss flooding (ABL)."""
     model.train()
     optimizer.zero_grad()
@@ -324,7 +316,7 @@ def train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader
         adv_optimizer.step()
         # Lipschitz constrain for Disc of WGAN
         discriminator.spectral_norm()
-        pbar.set_description(f"Loss: {float(dis_loss):.4f}")
+        pbar.set_description(f"Loss: {float(dis_loss.detach()):.4f}")
 
     pbar = tqdm(new_idx_loader)
     for (data, target), ex_idx in pbar:
@@ -351,9 +343,9 @@ def train_cbd(clean_model, backdoor_model, discriminator, device, new_idx_loader
         loss.backward()
         optimizer.step()
 
-        pbar.set_description(f"Loss: {float(loss):.4f}")
+        pbar.set_description(f"Loss: {float(loss.detach()):.4f}")
 
-def train_intraclass(backdoor_model, device, new_idx_loader, optimizer, criterion, scaler, num_classes):
+def train_intraclass(backdoor_model, device, new_idx_loader, optimizer, num_classes):
     backdoor_model.train()
     backdoor_model.to(device)
 
@@ -436,7 +428,7 @@ def pss_unlearn(model, device, clean_dl, pois_dl, optimizer, criterion):
         loss.backward()
         optimizer.step()
 
-        pbar.set_description(f"Loss: {float(loss):.4f}")
+        pbar.set_description(f"Loss: {float(loss.detach()):.4f}")
 
     pbar = tqdm(clean_dl)
     for (data, target), ex_idx in pbar:
@@ -453,10 +445,10 @@ def pss_unlearn(model, device, clean_dl, pois_dl, optimizer, criterion):
         loss.backward()
         optimizer.step()
 
-        pbar.set_description(f"Loss: {float(loss):.4f}")
+        pbar.set_description(f"Loss: {float(loss.detach()):.4f}")
 
 
-def collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler):
+def collect_losses(model, device, new_idx_loader_wo_aug, criterion):
     model.eval()
     loss_array = torch.zeros(len(new_idx_loader_wo_aug.dataset))
     probs_array = torch.zeros(len(new_idx_loader_wo_aug.dataset))
