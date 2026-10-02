@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 import os
 import copy
+import json
 import pickle
+import subprocess
 import shutil
 import warnings
 from tqdm import tqdm
@@ -116,6 +118,41 @@ if main_proc:
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Current device:", device)
+
+
+def _git_sha():
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True,
+                                       cwd=os.path.dirname(os.path.abspath(__file__))).strip()
+    except Exception:
+        return None
+
+
+def _jsonable(x):
+    if torch.is_tensor(x):
+        return x.tolist()
+    if isinstance(x, (np.generic, np.ndarray)):
+        return x.tolist()
+    raise TypeError(f"Not JSON serializable: {type(x)}")
+
+
+results = {"args": vars(args), "git_sha": _git_sha()}
+
+
+def save_results():
+    if main_proc:
+        with open(os.path.join(experiment_output_dir, "results.json"), "w") as f:
+            json.dump(results, f, indent=2, default=_jsonable)
+
+
+def record_model_metrics(key, test_stats, asr_dict):
+    results[key] = {"clean_acc": test_stats["acc"], "asr": {k: v["accuracy"] for k, v in asr_dict.items()}}
+    save_results()
+
+
+def record_detection(**kwargs):
+    results.setdefault("detection", {}).update(kwargs)
+    save_results()
 
 
 # Shunting off this logic to another file -- TODO select file location arg?
@@ -249,6 +286,7 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                                            max_loss_val_bound=None):
     test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
                                   log_predictions=log_predictions)
+    ret_test_stats = test_stats
     if statistics is not None:
         statistics["test"].append(test_stats)
         if log_wandb:
@@ -315,6 +353,7 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
                 statistics[attack_type].append(stats)
             if log_wandb:
                 wandb.log({wandb_prefix+attack_type: stats})
+    return ret_test_stats
 
 
 def test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size):
@@ -417,8 +456,10 @@ else:
     raise NotImplementedError
 
 print("Final model performance:")
-test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
+attacked_test_stats, _ = test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
+attacked_asr = test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
+# NB: for freq/abl/cbd this is the untrained initial model (those defenses train their own)
+record_model_metrics("attacked", attacked_test_stats, attacked_asr)
 
 
 if args.defense == "badloss":
@@ -514,6 +555,7 @@ if args.defense == "badloss":
 
     x, y, _ = roc_curve(np.array([1 if 'val' in x else 0 for x in dataset_probe_identity])[available_ex], avail_ex_probs[:, 0])
     print("AUC:", auc(x, y))
+    record_detection(auc=auc(x, y))
     # TODO: Get rid of second row?
     all_ex_probs = np.zeros((len(losses_np), 2), dtype=avail_ex_probs.dtype)
     all_ex_probs[available_ex] = avail_ex_probs
@@ -572,6 +614,8 @@ if args.defense == "badloss":
                                          i not in missing_vals_idx]
                     probe_identity_discarded_samples = [dataset_probe_identity[i] for i in discarded_indices]
                     print("!! Discarded example identities:", Counter(probe_identity_discarded_samples))
+                    record_detection(num_removed=len(discarded_indices),
+                                     removed_identities=dict(Counter(probe_identity_discarded_samples)))
                     
                     new_train_set_dl = get_loader(idx_dataset, seed=seed, indices=clean_indices, distributed=distributed,
                                                   num_workers=num_workers, batch_size=batch_size)
@@ -611,6 +655,9 @@ if args.defense == "badloss":
 
             add_clean_to_output_dict(output_dict, clean_model, device, criterion, test_idx_loader, distributed, rank,
                                      log_predictions)
+            results["retrained"] = {"clean_acc": output_dict["clean"]["accuracy"],
+                                    "asr": {k: v["accuracy"] for k, v in output_dict.items() if k != "clean"}}
+            save_results()
             output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
             print("~" * 100)
         print("=" * 100)
@@ -659,7 +706,7 @@ def get_last_layer_activations(model, loader, masking_op=None):
 
 
 def get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, num_train_probes,
-                        verbose=True):
+                        verbose=True, per_class_out=None):
     """
         identified_indices: np array of indices considered to be poisonous by a detector.
     """
@@ -702,6 +749,8 @@ def get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, n
         for k in per_class:
             print(f"Accuracy ({k}): {per_class[k]}")
 
+    if per_class_out is not None:
+        per_class_out.update(per_class)
     false_positive_rate = false_positive / (false_positive + true_negative)
     true_positive_rate = true_positive / (true_positive + false_negative)
     return false_positive_rate, true_positive_rate
@@ -757,10 +806,12 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
 
     # Evaluate accuracy
     print("Retrained model performance:")
-    log_results_and_update_stats_and_preds(log_predictions, clean_model, device, clean_criterion, test_idx_loader,
-                                           distributed, rank, retrain_set_dl, attack_types, probes, val_probes, defense,
-                                           tensor_batch_size, num_epochs+1)
-    test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, attacks, tensor_batch_size)
+    retrained_test_stats = log_results_and_update_stats_and_preds(
+        log_predictions, clean_model, device, clean_criterion, test_idx_loader, distributed, rank, retrain_set_dl,
+        attack_types, probes, val_probes, defense, tensor_batch_size, num_epochs+1)
+    retrained_asr = test_unseen_probes(log_predictions, clean_model, device, clean_criterion, test_probes, attacks,
+                                       tensor_batch_size)
+    record_model_metrics("retrained", retrained_test_stats, retrained_asr)
     return clean_model
 
 
@@ -899,14 +950,19 @@ if args.defense == "nc":
     for auc_fpr_threshes in auc_fpr_threshes:
         auc_idx.append(get_indices_for_thresh(auc_fpr_threshes, clean_probe_indices, attacked_classes,
                                               poison_acts_by_class, indices_to_check, clean_indices))
-    print("NC AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes))
+    det_auc = get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes)
+    print("NC AUC", det_auc)
+    record_detection(auc=det_auc)
 
     # Retrain model using default threshold
     identified_indices = get_indices_for_thresh(fpr_thresh, clean_probe_indices, attacked_classes,
                                                 poison_acts_by_class, indices_to_check, clean_indices)
 
     # Print confusion stats...
-    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, args.num_train_probes)
+    per_class_det = {}
+    det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                           args.num_train_probes, per_class_out=per_class_det)
+    record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
                                 experiment_output_dir, fpr_thresh, probes, log_predictions, test_probes, args.defense)
@@ -987,11 +1043,16 @@ if args.defense == "ac":
             auc_detected_classes = [i for i in range(num_classes) if rsc_scores[i] < detect_thresh]
         auc_idx.append(get_indices_for_class_clusters(auc_detected_classes, clusterings, activation_by_predicted_class))
 
-    print("AC AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes))
+    det_auc = get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes)
+    print("AC AUC", det_auc)
+    record_detection(auc=det_auc)
 
     # Retrain model using default threshold
     identified_indices = get_indices_for_class_clusters(detected_classes, clusterings, activation_by_predicted_class)
-    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, args.num_train_probes)
+    per_class_det = {}
+    det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                           args.num_train_probes, per_class_out=per_class_det)
+    record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
                                 experiment_output_dir, detect_thresh, probes, log_predictions, test_probes,
@@ -1043,13 +1104,18 @@ if args.defense == "ss":
     for auc_eps_thresh in auc_eps_threshes:
         auc_idx.append(get_indices_for_eps(auc_eps_thresh, num_classes, taus, cls_idx, indices))
 
-    print("SS AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes))
+    det_auc = get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes)
+    print("SS AUC", det_auc)
+    record_detection(auc=det_auc)
 
     # Retrain model using default threshold
     identified_indices = get_indices_for_eps(epsilon_thresh, num_classes, taus, cls_idx, indices)
 
     # Print confusion stats...
-    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, args.num_train_probes)
+    per_class_det = {}
+    det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                           args.num_train_probes, per_class_out=per_class_det)
+    record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     clean_model = retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers,
                                 batch_size, num_classes, device, local_rank, lr, momentum, wd, num_epochs,
                                 experiment_output_dir, epsilon_thresh, probes, log_predictions, test_probes, args.defense)
@@ -1207,11 +1273,16 @@ if args.defense == "freq":
     for auc_detect_thresh in auc_detect_threshes:
         auc_idx.append(get_indices_for_thresh_from_loader(auc_detect_thresh, new_idx_loader_wo_aug, freq_model))
 
-    print("Freq AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes))
+    det_auc = get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes)
+    print("Freq AUC", det_auc)
+    record_detection(auc=det_auc)
 
     # Retrain model using default threshold
     identified_indices = get_indices_for_thresh_from_loader(detection_thresh, new_idx_loader_wo_aug, freq_model)
-    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, args.num_train_probes)
+    per_class_det = {}
+    det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                           args.num_train_probes, per_class_out=per_class_det)
+    record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
                   detection_thresh, probes, log_predictions, test_probes, args.defense)
@@ -1264,7 +1335,9 @@ if args.defense == "abl":
     auc_idx = []
     for auc_thresh in auc_threshes:
         auc_idx.append(get_indices_from_losses(auc_thresh, train_set, loss_idx, ex_idx))
-    print("ABL AUC", get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes))
+    det_auc = get_auc(auc_idx, valid_idx, dataset_probe_identity, args.num_train_probes)
+    print("ABL AUC", det_auc)
+    record_detection(auc=det_auc)
 
     # Retrain model using default threshold
     indices_to_maximize = get_indices_from_losses(selection_threshold, train_set, loss_idx, ex_idx)
@@ -1286,7 +1359,10 @@ if args.defense == "abl":
     if not finetune_and_unlearn:
         identified_indices = np.array(indices_to_maximize)
         # Retrain with selected indices like normal
-        get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, args.num_train_probes)
+        per_class_det = {}
+        det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                               args.num_train_probes, per_class_out=per_class_det)
+        record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
         retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                       num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
                       selection_threshold, probes, log_predictions, test_probes, args.defense)
@@ -1375,7 +1451,10 @@ if args.defense == "cd":
     detection_thresh = 0.15
     identified_indices = sorted_idx[:int(detection_thresh*len(mask_norms))]
 
-    get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity, args.num_train_probes)
+    per_class_det = {}
+    det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                           args.num_train_probes, per_class_out=per_class_det)
+    record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
     retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
                   num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
                   detection_thresh, probes, log_predictions, test_probes, args.defense)
@@ -1435,10 +1514,12 @@ if args.defense == "cbd":
         clean_model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
 
     print("Retrained model performance:")
-    log_results_and_update_stats_and_preds(log_predictions, clean_model, device, criterion, test_idx_loader,
-                                           distributed, rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, args.defense,
-                                           tensor_batch_size, num_epochs+1)
-    test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, attacks, tensor_batch_size)
+    retrained_test_stats = log_results_and_update_stats_and_preds(
+        log_predictions, clean_model, device, criterion, test_idx_loader, distributed, rank, new_idx_loader_wo_aug,
+        attack_types, probes, val_probes, args.defense, tensor_batch_size, num_epochs+1)
+    retrained_asr = test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, attacks,
+                                       tensor_batch_size)
+    record_model_metrics("retrained", retrained_test_stats, retrained_asr)
 
 if args.defense == "pss":
     # Train from clean for 2 epochs w/o aug || train_attack_noTrans.py
@@ -1537,9 +1618,12 @@ if args.defense == "pss":
         model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
 
     print("Retrained model performance:")
-    test(model, device, criterion, test_idx_loader, distributed, rank, log_predictions=log_predictions)
-    test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
-    
+    retrained_test_stats, _ = test(model, device, criterion, test_idx_loader, distributed, rank,
+                                   log_predictions=log_predictions)
+    retrained_asr = test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks,
+                                       tensor_batch_size)
+    record_model_metrics("retrained", retrained_test_stats, retrained_asr)
+
     print("Done with PSS")
 
 
