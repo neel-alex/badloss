@@ -156,70 +156,57 @@ def get_loader(dataset, distributed, num_workers, seed: int, indices=None, batch
     return loader
 
 
-def make_probe_dataset(probes, train_set, dataset, defense, train_transform, val_probe_attacks, output_dir):
-    discarded_idx = set(probes['all_backdoor_idx'])
+def _image_set_dataset(images, labels, train_transform):
+    """In-memory dataset applying the training augmentation (minus ToTensor; the images are already tensors)."""
+    return CustomTensorDataset(images.to("cpu"), [int(x) for x in labels.to("cpu").numpy().tolist()],
+                               transform=transforms.Compose(train_transform[:-1]))
+
+
+def make_probe_dataset(train_set, dataset, train_transform, probe_sets, poison_imgs, output_dir):
+    """Build the combined training set: the unmodified training examples, then the defender's probe sets (if
+    any; only BaDLoss adds them), then the poisoned images. The original positions of probe and poison images
+    are excluded from the unmodified part.
+
+    probe_sets: list of (identity, ImageSet); poison_imgs: attack -> ImageSet.
+    Returns (combined dataset, its usable indices, identity of every index, set of excluded original indices),
+    where identities are 'train', the probe set identities, or 'poison_<attack>'.
+    """
+    discarded_idx = set(np.concatenate([image_set.idx for _, image_set in probe_sets] +
+                                       [image_set.idx for image_set in poison_imgs.values()]))
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
 
-    if defense == "badloss":
-        probes_to_be_used = ["backdoor", "clean"]
-        print("Selected probes to be used:", probes_to_be_used)
-
-        probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
-        probe_labels = torch.cat([probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
-
-        # Filter the train indexes
-        probe_identity = list(itertools.chain(*([identity] * len(probes[identity])
-                                                for identity in probes_to_be_used)))
-
-        assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
-
+    parts = [train_set]
+    identities = ["train"] * len(train_set)
+    if probe_sets:
+        probe_images = torch.cat([image_set.images for _, image_set in probe_sets], dim=0)
+        probe_labels = torch.cat([image_set.labels for _, image_set in probe_sets], dim=0)
         print(f"Probe | Images: {probe_images.shape} | Labels: {probe_labels.shape}")
-
-        probe_dataset = torch.utils.data.TensorDataset(probe_images, probe_labels)
-        probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"),
-                                                     [int(x) for x in probe_labels.to("cpu").numpy().tolist()],
-                                                     transform=transforms.Compose(train_transform[:-1]))  # Cut off ToTensor transform
+        probe_dataset = _image_set_dataset(probe_images, probe_labels, train_transform)
         # NB: indexing [0] applies the random train transform, which consumes global torch RNG
-        print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape,
-              probe_dataset_standard[0][1])
-        print("Curated probe dataset")
-        plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0),
-             class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png", output_dir=output_dir)
+        print("Probe dataset:", len(probe_dataset), probe_dataset[0][0].shape, probe_dataset[0][1])
+        plot(probe_images, probe_labels, class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png",
+             output_dir=output_dir)
+        parts.append(probe_dataset)
+        identities += list(itertools.chain(*([identity] * len(image_set) for identity, image_set in probe_sets)))
 
-    # TODO: Note how this adds "val".... hopefully this just solves problems and doesn't cause any lol
-    val_probe_identity = list(itertools.chain(*([f"backdoor_{identity}_val"] * len(probes[f"backdoor_{identity}"])
-                                                for identity in val_probe_attacks)))
-
-    # Create the validation set for probes
-    val_probe_images = torch.cat([probes[f"backdoor_{attack}"] for attack in val_probe_attacks], dim=0)
-    val_probe_labels = torch.cat([probes[f"backdoor_{attack}_labels"] for attack in val_probe_attacks], dim=0)
-    val_probe_dataset_standard = CustomTensorDataset(val_probe_images.to("cpu"),
-                                                     [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()],
-                                                     transform=transforms.Compose(train_transform[:-1]))
+    poison_images = torch.cat([image_set.images for image_set in poison_imgs.values()], dim=0)
+    poison_labels = torch.cat([image_set.labels for image_set in poison_imgs.values()], dim=0)
+    poison_dataset = _image_set_dataset(poison_images, poison_labels, train_transform)
     # NB: as above, this consumes global torch RNG
-    print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape,
-          val_probe_dataset_standard[0][1])
+    print("Poison dataset:", len(poison_dataset), poison_dataset[0][0].shape, poison_dataset[0][1])
+    parts.append(poison_dataset)
+    identities += list(itertools.chain(*([f"poison_{attack}"] * len(image_set)
+                                         for attack, image_set in poison_imgs.items())))
 
-    if defense == "badloss":
-        comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard, val_probe_dataset_standard])
-        comb_train_indices = train_indices + [(len(train_set) + x) for x in
-                                              range(len(probe_dataset_standard) + len(val_probe_dataset_standard))]
-        dataset_probe_identity = ["train" for i in range(len(train_set))] + probe_identity + val_probe_identity
-    else:
-        comb_train_set = torch.utils.data.ConcatDataset([train_set, val_probe_dataset_standard])
-        comb_train_indices = train_indices + [(len(train_set) + x) for x in
-                                              range(len(val_probe_dataset_standard))]
-        dataset_probe_identity = ["train" for i in range(len(train_set))] + val_probe_identity
-
+    comb_train_set = torch.utils.data.ConcatDataset(parts)
+    comb_train_indices = train_indices + list(range(len(train_set), len(comb_train_set)))
     print("Indices in combined dataset:", len(comb_train_indices))
     assert len(np.unique(comb_train_indices)) == len(comb_train_indices)
     print("Size of combined dataset:", len(comb_train_set))
-
-    assert len(dataset_probe_identity) == len(comb_train_set), f"{len(dataset_probe_identity)} != {len(comb_train_set)}"
-
-    return comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx
+    assert len(identities) == len(comb_train_set), f"{len(identities)} != {len(comb_train_set)}"
+    return comb_train_set, comb_train_indices, identities, discarded_idx
 
 
 class IdxDataset(torch.utils.data.Dataset):

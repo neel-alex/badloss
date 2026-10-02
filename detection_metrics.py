@@ -10,8 +10,9 @@ def get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity: S
 
     identified_indices: indices (into the combined training set) flagged as poisoned.
     valid_idx: indices of the unmodified training examples (all clean).
-    dataset_probe_identity: identity of every combined-training-set index ('train' for unmodified examples).
-    per_class_out: if given, filled with the per-identity detection rate.
+    dataset_probe_identity: identity of every combined-training-set index: 'train' for unmodified examples,
+        'poison_<attack>' for poisons, anything else for clean probes.
+    per_class_out: if given, filled with the per-attack detection rate.
     """
     false_pos = np.intersect1d(identified_indices, valid_idx)
     true_pos = np.array([])
@@ -23,14 +24,14 @@ def get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity: S
             continue
         if i in identified_indices:
             results[id] += 1
-            if id == 'clean' or id == "clean_val":
+            if not id.startswith('poison_'):
                 false_pos = np.append(false_pos, i)
             else:
                 true_pos = np.append(true_pos, i)
         counter[id] += 1
 
-    num_attacks = sum(v for (k, v) in counter.items() if 'clean' not in k)
-    num_clean = len(valid_idx) + sum(v for (k, v) in counter.items() if 'clean' in k)
+    num_attacks = sum(v for (k, v) in counter.items() if k.startswith('poison_'))
+    num_clean = len(valid_idx) + sum(v for (k, v) in counter.items() if not k.startswith('poison_'))
 
     false_positive = len(false_pos)
     true_positive = len(true_pos)
@@ -38,7 +39,7 @@ def get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity: S
     false_negative = num_attacks - true_positive
 
     per_class = {attack: results[attack] / counter[attack]
-                 for attack in set(dataset_probe_identity) - {'train'} if 'clean' not in attack}
+                 for attack in set(dataset_probe_identity) - {'train'} if attack.startswith('poison_')}
 
     if verbose:
         print(f"FPR: {false_positive / (false_positive + true_negative)}")

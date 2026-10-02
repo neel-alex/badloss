@@ -88,8 +88,8 @@ def run(exp):
     args = exp.args
     exp.wandb_prefix = "retraining_"
     freq_probes = {
-        'clean': exp.train_probe['clean'].cpu().numpy(),
-        'backdoor': copy.deepcopy(exp.train_probe['clean'].cpu().numpy()),
+        'clean': exp.probe_imgs.images.cpu().numpy(),
+        'backdoor': copy.deepcopy(exp.probe_imgs.images.cpu().numpy()),
     }
     for i in range(freq_probes['backdoor'].shape[0]):
         freq_probes['backdoor'][i] = apply_random_transform(freq_probes['backdoor'][i])

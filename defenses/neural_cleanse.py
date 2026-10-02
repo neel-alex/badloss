@@ -99,7 +99,7 @@ def run(exp):
     attacked_classes = attacked_classes[(norms[attacked_classes] <= median).nonzero()[:, 0]]
 
     clean_activations, clean_indices, _, _ = exp.last_layer_activations(model, exp.new_idx_loader_wo_aug)
-    clean_probe_indices = np.array(exp.train_probe['clean_idx'])
+    clean_probe_indices = np.array(exp.probe_imgs.idx)
     indices_to_check = torch.isin(clean_indices, torch.tensor(clean_probe_indices)).nonzero()[:, 0]
 
     poison_acts_by_class = []

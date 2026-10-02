@@ -1,5 +1,7 @@
 import os
 import collections
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import torch
@@ -9,15 +11,36 @@ import cv2
 import dist_utils
 
 
-RANDOM_BACKDOOR_ALPHA = 0.075
-FIXED_BACKDOOR_ALPHA = 0.025
-SINUSOID_BACKDOOR_ALPHA = 0.075
-SINUSOID_BACKDOOR_FREQ = 6
+BLEND_R_ALPHA = 0.075
+BLEND_P_ALPHA = 0.025
+SINUSOID_ALPHA = 0.075
+SINUSOID_FREQ = 6
 IMAGENETTE_ALPHA = 0.15
 
-BLENDING_ATTACKS = {'random', 'fixed', 'sinusoid', 'narcissus', 'frequency'}
-BOOSTING_RATIO = 2
+BLENDING_ATTACKS = {'blend_r', 'blend_p', 'sinusoid', 'narcissus', 'frequency'}
+BOOSTING_RATIO = 2  # Trigger strength multiplier for the additional "_boosted" ASR evaluation
 CLEAN_LABEL_ATTACKS = {'sinusoid', 'narcissus'}
+
+
+@dataclass
+class ImageSet:
+    """A set of (possibly triggered) images with their training labels.
+
+    idx: positions of the source images in their dataset; original/diff: the untriggered images and the
+    trigger's effect (original - triggered), kept for plotting.
+    """
+    images: torch.Tensor
+    labels: torch.Tensor
+    idx: Optional[np.ndarray] = None
+    original: Optional[torch.Tensor] = None
+    diff: Optional[torch.Tensor] = None
+
+    def __len__(self):
+        return len(self.images)
+
+    def to(self, device):
+        self.images, self.labels = self.images.to(device), self.labels.to(device)
+        return self
 
 
 class BackdoorPatch(object):
@@ -114,8 +137,8 @@ class FrequencyAttack(object):
 
 def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
     pattern = None
-    if attack_name == "random":
-        pattern_file = os.path.join(output_dir, "random_pattern.png")
+    if attack_name == "blend_r":
+        pattern_file = os.path.join(output_dir, "blend_r_pattern.png")
         if main_proc:
             pattern = np.clip(np.random.rand(*img_size) * 255, 0, 255)
             print("Random pattern shape:", pattern.shape)
@@ -127,14 +150,14 @@ def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
         pattern = transforms.ToTensor()(pattern_img)
         print(f"Random Pattern / Loaded shape: {pattern_img.shape} / Tensor shape: {pattern.shape} / "
               f"Min: {pattern.min()} / Max: {pattern.max()}")
-    elif attack_name == "fixed":
+    elif attack_name == "blend_p":
         pattern = np.zeros(img_size, dtype=np.float32)
         pattern[::2, ::2, :] = 1
         pattern = transforms.ToTensor()(pattern)
     elif attack_name == "sinusoid":
         pattern = np.zeros(img_size, dtype=np.float32)
         for col in range(pattern.shape[1]):
-            pattern[:, col, :] = 1 - np.cos(2 * np.pi * col * SINUSOID_BACKDOOR_FREQ / pattern.shape[1])
+            pattern[:, col, :] = 1 - np.cos(2 * np.pi * col * SINUSOID_FREQ / pattern.shape[1])
         pattern = transforms.ToTensor()(pattern)
     elif attack_name == "narcissus":
         pattern = np.load(f'data/{attack_name}_noise_{dataset}.npy')
@@ -150,7 +173,7 @@ class Identity(object):
 
 def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, pattern=None, alpha_boost=1):
     """Returns (transform applying the attack's trigger, trigger pattern). `pattern` reuses an existing
-    random pattern (so test-time triggers match the poisoned training images)."""
+    blend_r pattern (so test-time triggers match the poisoned training images)."""
     if pattern is None:
         pattern = get_pattern(attack_name, img_size, dataset, output_dir, main_proc)
 
@@ -158,9 +181,8 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
         backdoor = BackdoorPatch(imagenette=(dataset == 'imagenette'))
     elif attack_name == "single_pix":
         backdoor = BackdoorPatch(single_pixel_backdoor=True, imagenette=(dataset == 'imagenette'))
-    elif attack_name in {"random", "fixed", "sinusoid"}:
-        alpha = {"random": RANDOM_BACKDOOR_ALPHA, "fixed": FIXED_BACKDOOR_ALPHA,
-                 "sinusoid": SINUSOID_BACKDOOR_ALPHA}[attack_name]
+    elif attack_name in {"blend_r", "blend_p", "sinusoid"}:
+        alpha = {"blend_r": BLEND_R_ALPHA, "blend_p": BLEND_P_ALPHA, "sinusoid": SINUSOID_ALPHA}[attack_name]
         if dataset == "imagenette":
             alpha = IMAGENETTE_ALPHA  # Stronger on imagenette
         backdoor = BackdoorPatch(pattern=pattern, alpha=alpha*alpha_boost)
@@ -177,123 +199,116 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
     return backdoor_transform, pattern
 
 
-def add_probe_data(probe_dict, key, indices, dataset, labels, transform=None, track_idx=True, compute_diffs=False):
-    if track_idx:
-        probe_dict[f"{key}_idx"] = indices
-    if transform is not None:
-        if track_idx:
-            probe_dict[f"{key}_original"] = torch.stack([dataset[i][0] for i in indices], dim=0)
-        probe_dict[f"{key}"] = torch.stack([transform(dataset[i][0]) for i in indices], dim=0)
+def make_image_set(indices, dataset, labels, transform=None, track_idx=True):
+    """Stack dataset[i] for the given indices, optionally applying a trigger transform."""
+    originals = torch.stack([dataset[i][0] for i in indices], dim=0) if transform is None or track_idx else None
+    if transform is None:
+        images = originals
     else:
-        probe_dict[f"{key}"] = torch.stack([dataset[i][0] for i in indices], dim=0)
-    probe_dict[f"{key}_labels"] = torch.from_numpy(labels)
-    if compute_diffs and transform is not None and track_idx:
-        probe_dict[f"{key}_diff"] = probe_dict[f"{key}_original"] - probe_dict[f"{key}"]
+        images = torch.stack([transform(dataset[i][0]) for i in indices], dim=0)
+    image_set = ImageSet(images, torch.from_numpy(labels), idx=indices if track_idx else None)
+    if transform is not None and track_idx:
+        image_set.original = originals
+        image_set.diff = originals - images
+    return image_set
 
 
-def make_train_probes(num_classes, dataset, train_set_wo_aug, num_train_probes, train_probe_attack, output_dir,
-                      main_proc, img_size, val_probe_indices):
-    probes = {}
-    attack_target = np.random.choice(np.arange(num_classes))
-    print("Chosen train probe target:", attack_target)
-    train_indices = list(range(len(train_set_wo_aug)))
-    valid_indices = [i for i in train_indices if i not in val_probe_indices]
-    probe_indices = np.random.choice(valid_indices, size=2 * num_train_probes, replace=False)
+def make_probe_imgs(num_classes, dataset, train_set_wo_aug, num_probes, output_dir, main_proc, img_size,
+                    poison_indices):
+    """The defender's bona fide clean probes: num_probes clean training examples (not used by any poison).
 
-    probe_transform, _ = make_probe_transform(train_probe_attack, img_size, dataset, output_dir, main_proc)
-    backdoor_idx = probe_indices[:num_train_probes]
-    if train_probe_attack == 'clean':
-        attack_labels = np.array([train_set_wo_aug[i][1] for i in backdoor_idx])
-    else:
-        attack_labels = np.array([attack_target for i in backdoor_idx])
-    add_probe_data(probes, "backdoor", backdoor_idx, train_set_wo_aug, attack_labels,
-                   transform=probe_transform, compute_diffs=True)
+    Returns (probe_imgs, unused_probe_imgs). The latter is a second, unused set of clean examples left over from
+    MAP-D's backdoor probes; it is kept for now because removing it changes the RNG stream.
+    """
+    np.random.choice(np.arange(num_classes))  # Vestigial target class draw, kept so the RNG stream is unchanged
+    valid_indices = [i for i in range(len(train_set_wo_aug)) if i not in poison_indices]
+    probe_indices = np.random.choice(valid_indices, size=2 * num_probes, replace=False)
 
-    clean_idx = probe_indices[num_train_probes:]
+    identity, _ = make_probe_transform('clean', img_size, dataset, output_dir, main_proc)
+    unused_idx = probe_indices[:num_probes]
+    unused_labels = np.array([train_set_wo_aug[i][1] for i in unused_idx])
+    unused_probe_imgs = make_image_set(unused_idx, train_set_wo_aug, unused_labels, transform=identity)
+
+    clean_idx = probe_indices[num_probes:]
     clean_labels = np.array([train_set_wo_aug[i][1] for i in clean_idx])
-    add_probe_data(probes, "clean", clean_idx, train_set_wo_aug, clean_labels)
-
-    probes['all_backdoor_idx'] = np.concatenate((probes['backdoor_idx'], probes['clean_idx']))
-    return probes, attack_target
+    probe_imgs = make_image_set(clean_idx, train_set_wo_aug, clean_labels)
+    return probe_imgs, unused_probe_imgs
 
 
-def make_val_probes(num_classes, dataset, train_set_wo_aug, num_val_probes, val_probe_attacks, output_dir,
-                    main_proc, img_size):
-    val_probes = {}
-    attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in val_probe_attacks}
-    if 'sinusoid' in val_probe_attacks and dataset == "gtsrb":
+def make_poison_imgs(num_classes, dataset, train_set_wo_aug, poison_ratios, attacks, output_dir, main_proc,
+                     img_size):
+    """Poisoned training images for each attack (no image is attacked twice).
+
+    Returns (poison_imgs: attack -> ImageSet, attack_targets: attack -> target class, blend_r pattern).
+    """
+    poison_imgs = {}
+    attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in attacks}
+    if 'sinusoid' in attacks and dataset == "gtsrb":
         class_counts = collections.Counter(train_set_wo_aug.targets)
         while class_counts[attack_targets['sinusoid']] < 1000:
             attack_targets['sinusoid'] = np.random.choice(np.arange(num_classes))
-    if 'narcissus' in val_probe_attacks:
+    if 'narcissus' in attacks:
         attack_targets['narcissus'] = narcissus_classes[dataset]
-    print("Chosen val attack targets:", attack_targets)
-    attack_numbers = {attack: int(len(train_set_wo_aug) * num_val_probes[attack]) for attack in val_probe_attacks}
+    print("Chosen attack targets:", attack_targets)
+    attack_numbers = {attack: int(len(train_set_wo_aug) * poison_ratios[attack]) for attack in attacks}
     print("Making attack image quantities:", attack_numbers, "(clean label attacks may be incorrect)")
     train_indices = list(range(len(train_set_wo_aug)))
-    random_pattern = None
+    blend_r_pattern = None
     chosen_indices = np.array([], dtype=int)
 
-    for attack in val_probe_attacks:
+    for attack in attacks:
         target = attack_targets[attack]
         num = attack_numbers[attack]
-        # For clean attacks, get clean indices to choose from.
         indices_to_choose_from = train_indices
         if attack in CLEAN_LABEL_ATTACKS:
+            # Clean-label attacks poison a fraction of the target class
             indices_to_choose_from = np.where(np.array(train_set_wo_aug.targets) == target)[0]
-            # Clean label attacks are expressed as a fraction of the target class! Adjust attack number appropriately.
-            num = int(num_val_probes[attack] * len(indices_to_choose_from))
+            num = int(poison_ratios[attack] * len(indices_to_choose_from))
             if dataset == "gtsrb":
                 num = max(num, 300)
 
-        # don't let multiple attacks hit the same image, including train probe images.
         indices_to_choose_from = [i for i in indices_to_choose_from if i not in chosen_indices]
-
-        attack_idx = np.random.choice(indices_to_choose_from, size=min(num, len(indices_to_choose_from)), replace=False)
+        attack_idx = np.random.choice(indices_to_choose_from, size=min(num, len(indices_to_choose_from)),
+                                      replace=False)
         attack_labels = np.array([target for _ in attack_idx])
-        probe_transform, pattern = make_probe_transform(attack, img_size, dataset, output_dir, main_proc)
-        add_probe_data(val_probes, f"backdoor_{attack}", attack_idx, train_set_wo_aug, attack_labels,
-                       transform=probe_transform, compute_diffs=True)
+        poison_transform, pattern = make_probe_transform(attack, img_size, dataset, output_dir, main_proc)
+        poison_imgs[attack] = make_image_set(attack_idx, train_set_wo_aug, attack_labels, transform=poison_transform)
+        print(f"Poison ({attack}) shape:", poison_imgs[attack].images.shape)
 
-        print(f"Backdoor ({attack}) probe shape:", val_probes[f"backdoor_{attack}"].shape)
-
-        if attack == "random":
-            random_pattern = pattern
-
-        # update chosen_indices:
+        if attack == "blend_r":
+            blend_r_pattern = pattern
         chosen_indices = np.concatenate((chosen_indices, attack_idx))
 
-    val_probes["all_backdoor_idx"] = chosen_indices
-
-    return val_probes, attack_targets, random_pattern
+    return poison_imgs, attack_targets, blend_r_pattern
 
 
-def make_test_probes(test_set, dataset, num_test_probes, val_probe_attacks, attack_targets, random_pattern,
-                     output_dir, main_proc, img_size):
-    test_probes = {}
+def all_poison_indices(poison_imgs):
+    return np.concatenate([np.array([], dtype=int)] + [s.idx for s in poison_imgs.values()])
 
-    for attack in val_probe_attacks:
+
+def make_poison_imgs_test(test_set, dataset, num_test_images, attacks, attack_targets, blend_r_pattern,
+                          output_dir, main_proc, img_size):
+    """Triggered test images (excluding each attack's target class), labeled with the attack's target, for
+    measuring attack success rates. Blending attacks also get a "_boosted" set with a stronger trigger."""
+    poison_imgs_test = {}
+    for attack in attacks:
         target = attack_targets[attack]
+        pattern = blend_r_pattern if attack == "blend_r" else None
+        poison_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc, pattern=pattern)
 
-        pattern = random_pattern if attack == "random" else None
-        probe_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc, pattern=pattern)
-
-        # Don't use any clean indices -- this way, the attack success rate should start at 0.
-        #   (though practically there will be some randomly classified training images with low test acc.)
-        non_clean_test_indices = np.where(np.array(test_set.targets) != target)[0]
-        test_indices = np.random.choice(non_clean_test_indices, size=min(len(non_clean_test_indices), num_test_probes),
+        non_target_indices = np.where(np.array(test_set.targets) != target)[0]
+        test_indices = np.random.choice(non_target_indices, size=min(len(non_target_indices), num_test_images),
                                         replace=False)
         test_labels = np.array([target for _ in test_indices])
 
-        add_probe_data(test_probes, f"backdoor_{attack}", test_indices, test_set, test_labels,
-                       transform=probe_transform, track_idx=False)
+        poison_imgs_test[attack] = make_image_set(test_indices, test_set, test_labels, transform=poison_transform,
+                                                  track_idx=False)
         if attack in BLENDING_ATTACKS:
             boosted_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc,
                                                         pattern=pattern, alpha_boost=BOOSTING_RATIO)
-            add_probe_data(test_probes, f"backdoor_{attack}_boosted", test_indices, test_set, test_labels,
-                           transform=boosted_transform, track_idx=False)
-
-    return test_probes
+            poison_imgs_test[f"{attack}_boosted"] = make_image_set(test_indices, test_set, test_labels,
+                                                                   transform=boosted_transform, track_idx=False)
+    return poison_imgs_test
 
 
 narcissus_classes = {

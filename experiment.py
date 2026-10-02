@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 import dist_utils
 import utils
-from backdoors import make_train_probes, make_val_probes, make_test_probes
+from backdoors import make_probe_imgs, make_poison_imgs, make_poison_imgs_test, all_poison_indices
 from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, get_loader
 from detection_metrics import get_confusion_stats, get_auc
 from plot_utils import plot_probe_examples
@@ -106,38 +106,34 @@ class Experiment:
         assert self.num_classes == expected_classes, self.num_classes
         print(args.dataset, self.num_classes)
 
-        if args.defense == "badloss":
-            self.attack_types = ["backdoor"] + [f"backdoor_{attack}" for attack in self.attacks]
-        else:
-            self.attack_types = [f"backdoor_{attack}" for attack in self.attacks]
-
-        self.val_probes, self.attack_targets, random_pattern = make_val_probes(
+        self.poison_imgs, self.attack_targets, blend_r_pattern = make_poison_imgs(
             self.num_classes, args.dataset, self.train_set_wo_aug, args.poison_ratios, self.attacks,
             self.output_dir, self.main_proc, self.img_size)
-        self.train_probe, _ = make_train_probes(self.num_classes, args.dataset, self.train_set_wo_aug,
-                                                args.num_train_probes, 'clean', self.output_dir, self.main_proc,
-                                                self.img_size, val_probe_indices=self.val_probes["all_backdoor_idx"])
-        self.train_probes_idx = self.train_probe["all_backdoor_idx"]
-        self.test_probes = make_test_probes(self.test_set, args.dataset, args.num_test_probes, self.attacks,
-                                            self.attack_targets, random_pattern, self.output_dir, self.main_proc,
-                                            self.img_size)
+        self.probe_imgs, unused_probe_imgs = make_probe_imgs(
+            self.num_classes, args.dataset, self.train_set_wo_aug, args.num_train_probes, self.output_dir,
+            self.main_proc, self.img_size, poison_indices=all_poison_indices(self.poison_imgs))
+        self.poison_imgs_test = make_poison_imgs_test(self.test_set, args.dataset, args.num_test_probes, self.attacks,
+                                                      self.attack_targets, blend_r_pattern, self.output_dir,
+                                                      self.main_proc, self.img_size)
 
         # BaDLoss adds its probes to the training set (as separate examples); other defenses don't
+        self.probe_sets = []
         if args.defense == "badloss":
-            self.probes = {**self.train_probe, **self.val_probes}
-            self.probes['all_backdoor_idx'] = np.concatenate((self.train_probe['all_backdoor_idx'],
-                                                              self.val_probes['all_backdoor_idx']))
-            plot_probe_examples(self.probes, args.dataset, self.train_set, self.attack_types, self.rank,
-                                self.output_dir, log_wandb=self.log_wandb)
-        else:
-            self.probes = self.val_probes
+            self.probe_sets = [('unused_probe', unused_probe_imgs), ('probe', self.probe_imgs)]
+            plot_probe_examples(self.probe_imgs, {'unused_probe': unused_probe_imgs, **self.poison_imgs},
+                                args.dataset, self.train_set, self.rank, self.output_dir, log_wandb=self.log_wandb)
+        # Image sets in the training set, evaluated during training
+        self.train_eval_sets = {**dict(self.probe_sets[:1]), **self.poison_imgs, **dict(self.probe_sets[1:])}
+        # Original training-set positions of the probes added to the training set
+        self.probe_original_idx = np.concatenate([image_set.idx for _, image_set in self.probe_sets]
+                                                 ) if self.probe_sets else np.array([], dtype=int)
 
         self.num_epochs = args.num_epochs
         self.batch_size = args.batch_size
 
         (self.comb_train_set, self.comb_train_indices, self.dataset_probe_identity,
-         discarded_idx) = make_probe_dataset(self.probes, self.train_set, args.dataset, args.defense,
-                                             self.train_transform, self.attacks, self.output_dir)
+         discarded_idx) = make_probe_dataset(self.train_set, args.dataset, self.train_transform, self.probe_sets,
+                                             self.poison_imgs, self.output_dir)
         self.valid_idx = [i for i in range(len(self.train_set)) if i not in discarded_idx]
 
         # Created for every defense (even those that train their own models) to keep the RNG stream fixed
@@ -148,14 +144,12 @@ class Experiment:
             make_index_dataset(self.comb_train_set, self.comb_train_indices, self.test_set, self.no_transform,
                                self.batch_size, self.distributed, args.num_workers, self.seed)
 
-        # Probe sets are small: keep them on the GPU (test probes too, except for large images)
-        to_device = self.attack_types + (['clean'] if args.defense == 'badloss' else [])
-        for key in to_device:
-            self.probes[key] = self.probes[key].to(device)
-            self.probes[f'{key}_labels'] = self.probes[f'{key}_labels'].to(device)
+        # Probe/poison sets are small: keep them on the GPU (the test ones too, except for large images)
+        for image_set in self.train_eval_sets.values():
+            image_set.to(device)
         if args.dataset not in {"gtsrb", "imagenette", "imagenet"}:
-            for key in self.test_probes:
-                self.test_probes[key] = self.test_probes[key].to(device)
+            for image_set in self.poison_imgs_test.values():
+                image_set.to(device)
 
         self.model_dir = os.path.join(self.model_collection_dir, f"models_{args.dataset}")
         if self.main_proc:
@@ -185,23 +179,19 @@ class Experiment:
                               set_name="Train")
         self.wandb_log({self.wandb_prefix + "test": test_stats, self.wandb_prefix + "train": train_stats})
 
-        atks = self.attack_types + ["clean"] if self.args.defense == "badloss" else self.attack_types
-        for attack_type in atks:
-            suffix = '' if attack_type in {'clean', 'backdoor'} else ' (val)'
-            stats = test_tensor(model, self.device, criterion, self.probes[attack_type],
-                                self.probes[f"{attack_type}_labels"],
-                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
+        for name, image_set in self.train_eval_sets.items():
+            stats = test_tensor(model, self.device, criterion, image_set.images, image_set.labels,
+                                msg=f"{name.capitalize().replace('_', ' ')} (train)",
                                 batch_size=self.args.eval_batch_size)
-            self.wandb_log({self.wandb_prefix + attack_type: stats})
+            self.wandb_log({self.wandb_prefix + name: stats})
         return test_stats
 
     def evaluate_asr(self, model, criterion):
         """Attack success rate of each attack on triggered test images (non-target classes)."""
         output_dict = {}
-        for attack in [x for x in self.test_probes.keys() if not x.endswith("_labels")]:
-            stats = test_tensor(model, self.device, criterion, self.test_probes[attack],
-                                self.test_probes[f"{attack}_labels"],
-                                msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
+        for attack, image_set in self.poison_imgs_test.items():
+            stats = test_tensor(model, self.device, criterion, image_set.images, image_set.labels,
+                                msg=f"{attack.capitalize().replace('_', ' ')} ASR (test)",
                                 batch_size=self.args.eval_batch_size)
             output_dict[attack] = {'accuracy': stats['acc'], 'total': stats['total'], 'correct': stats['correct']}
         self.wandb_log({"unseen_probes": output_dict})

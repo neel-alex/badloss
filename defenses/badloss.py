@@ -86,7 +86,7 @@ def run(exp):
 
     losses = stats['losses'] if args.badloss_metric == 'loss' else stats['probs']
     dataset_probe_identity = np.array(exp.dataset_probe_identity)
-    clean_idx = np.where(dataset_probe_identity == 'clean')[0]
+    clean_idx = np.where(dataset_probe_identity == 'probe')[0]
     print("Training the trajectory classifier...")
 
     # Rows that were never visited: original positions of examples replaced by their probe/poison copies
@@ -104,7 +104,8 @@ def run(exp):
     ranks = np.zeros(len(probs))
     ranks[probs.argsort()] = np.linspace(0, 1, len(probs))
 
-    x, y, _ = roc_curve(np.array([1 if 'val' in x else 0 for x in dataset_probe_identity])[available_ex], ranks)
+    is_poison = np.array([x.startswith('poison_') for x in dataset_probe_identity])
+    x, y, _ = roc_curve(is_poison[available_ex].astype(int), ranks)
     print("AUC:", auc(x, y))
     exp.record_detection(auc=auc(x, y))
     poison_scores = np.zeros(len(losses), dtype=ranks.dtype)
@@ -112,10 +113,10 @@ def run(exp):
     poison_scores[missing_vals] = 1.1  # Always removed
 
     print("!! Including training probe examples with their clean labels for retraining...")
-    probe_new_idx = [i for i, x in enumerate(dataset_probe_identity) if x in {"backdoor", "clean"}]
-    assert len(probe_new_idx) == len(exp.train_probes_idx), f"{len(probe_new_idx)} == {len(exp.train_probes_idx)}"
+    probe_new_idx = [i for i, x in enumerate(dataset_probe_identity) if x in {"unused_probe", "probe"}]
+    assert len(probe_new_idx) == len(exp.probe_original_idx)
     # Retrain on the probes' original training-set positions; remove their probe-set copies
-    poison_scores[exp.train_probes_idx] = 0.
+    poison_scores[exp.probe_original_idx] = 0.
     poison_scores[probe_new_idx] = 1.1
 
     threshold = 1 - args.badloss_reject_frac

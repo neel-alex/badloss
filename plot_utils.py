@@ -63,17 +63,18 @@ def plot(x, y=None, class_names=None, output_dir=None, output_file=None, diff_im
     plt.close('all')
 
 
-def plot_probe_examples(probes, dataset, train_set, attack_types, rank, output_dir, log_wandb=False):
+def plot_probe_examples(probe_imgs, triggered_sets, dataset, train_set, rank, output_dir, log_wandb=False):
+    """Plot the clean probes and, for each triggered set (name -> ImageSet), its images and trigger diffs."""
     print("Backdoor examples")
-    for attack_type in attack_types:
-        plot(probes[f"{attack_type}"], probes[f"{attack_type}_labels"], class_names=train_set.classes,
-             output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_{rank}.png")
-        plot(probes[f"{attack_type}_diff"], probes[f"{attack_type}_labels"], class_names=train_set.classes,
-             output_dir=output_dir, output_file=f"backdoor_{dataset}_{attack_type}_diff_{rank}.png", diff_image=True)
+    for name, image_set in triggered_sets.items():
+        plot(image_set.images, image_set.labels, class_names=train_set.classes,
+             output_dir=output_dir, output_file=f"backdoor_{dataset}_{name}_{rank}.png")
+        plot(image_set.diff, image_set.labels, class_names=train_set.classes,
+             output_dir=output_dir, output_file=f"backdoor_{dataset}_{name}_diff_{rank}.png", diff_image=True)
 
     print("Clean examples")
     output_file = f"clean_{dataset}_{rank}.png"
-    plot(probes["clean"], probes["clean_labels"], class_names=train_set.classes,
+    plot(probe_imgs.images, probe_imgs.labels, class_names=train_set.classes,
          output_file=output_file, output_dir=output_dir)
     if log_wandb:
         log_wandb_img(os.path.join(output_dir, output_file))

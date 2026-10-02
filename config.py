@@ -3,7 +3,7 @@ from typing import List, Dict, Optional
 
 
 DATASETS = ['cifar10', 'gtsrb', 'imagenette', 'imagenet']
-ATTACKS = ['patch', 'single_pix', 'random', 'fixed', 'sinusoid', 'narcissus', 'frequency']
+ATTACKS = ['patch', 'single_pix', 'blend_r', 'blend_p', 'sinusoid', 'narcissus', 'frequency']
 DEFENSES = ['badloss', 'nc', 'ac', 'ss', 'freq', 'abl', 'cd', 'cbd', 'pss']
 
 
@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Defense arguments
     parser.add_argument('--num_train_probes', default=250, type=int,
-                        help="Number of bona fide clean examples available to the defender")
+                        help="Number of bona fide clean examples (probes) available to the defender")
 
     # BaDLoss
     parser.add_argument('--badloss_pretrain_epochs', default=30, type=int)
@@ -131,13 +131,13 @@ def dataset_defaults(dataset: str, batch_size: int) -> Dict:
 def get_attacks(attack: str, dataset: str) -> List[str]:
     if attack == 'all':
         if dataset == 'cifar10':
-            return ['patch', 'single_pix', 'random', 'fixed',
+            return ['patch', 'single_pix', 'blend_r', 'blend_p',
                     'sinusoid', 'frequency', 'narcissus']
         elif dataset == 'gtsrb':
-            return ['patch', 'single_pix', 'random', 'fixed',
+            return ['patch', 'single_pix', 'blend_r', 'blend_p',
                     'sinusoid', 'frequency']
         elif dataset == 'imagenette' or dataset == 'imagenet':
-            return ['patch', 'random', 'fixed', 'sinusoid', 'frequency']
+            return ['patch', 'blend_r', 'blend_p', 'sinusoid', 'frequency']
     else:
         return [attack]
 
@@ -149,9 +149,9 @@ def get_default_poisoning_ratio(dataset: str) -> Dict[str, float]:
                                'imagenet': 0.001},
                      "single_pix": {'default': 0.01,
                                     'gtsrb': 0.04},
-                     "random": {'default': 0.01,
+                     "blend_r": {'default': 0.01,
                                 'imagenet': 0.001},
-                     "fixed": {'default': 0.01,
+                     "blend_p": {'default': 0.01,
                                'imagenet': 0.001},
                      "sinusoid": {'default': 0.1},  # frac. target class
                      "narcissus": {'default': 0.005},  # frac. target class

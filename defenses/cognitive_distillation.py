@@ -81,7 +81,7 @@ def run(exp):
 
     mask_norms = torch.norm(masks, dim=(1, 2), p=1)
     valid_mask_idx = torch.where(mask_norms != 0)[0]
-    base_idx = np.intersect1d(exp.train_probe['clean_idx'], valid_mask_idx.numpy())
+    base_idx = np.intersect1d(exp.probe_imgs.idx, valid_mask_idx.numpy())
     print("Num training examples for cognitive distillation", len(base_idx))
 
     # Standardize by the clean probes' statistics (only needed for CD's own thresholded detection)
