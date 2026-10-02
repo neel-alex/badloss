@@ -99,6 +99,9 @@ def run(exp):
     attacked_classes = attacked_classes[(norms[attacked_classes] <= median).nonzero()[:, 0]]
 
     clean_activations, clean_indices, _, _ = exp.last_layer_activations(model, exp.new_idx_loader_wo_aug)
+    clean_order = clean_indices.argsort()
+    clean_activations, clean_indices = clean_activations[clean_order], clean_indices[clean_order]
+    # Positions of the clean probes (they are ordinary training examples for this defense)
     clean_probe_indices = np.array(exp.probe_imgs.idx)
     indices_to_check = torch.isin(clean_indices, torch.tensor(clean_probe_indices)).nonzero()[:, 0]
 
@@ -110,9 +113,7 @@ def run(exp):
         attack_success = (dirty_predictions == atk_class).sum()
         print(f"Anomalous class {atk_class.item()} with index {anomaly_index[atk_class].item():.3f} "
               f"has mask magnitude {norms[atk_class].item():.3f} which classifies {attack_success.item()} as {atk_class.item()}")
-        # Align clean and triggered activations by example (the loader shuffles)
-        clean_order = clean_indices.argsort()
-        clean_activations, clean_indices = clean_activations[clean_order], clean_indices[clean_order]
+        # Align triggered activations with the clean ones by example
         dirty_order = dirty_indices.argsort()
         dirty_activations, dirty_indices = dirty_activations[dirty_order], dirty_indices[dirty_order]
 

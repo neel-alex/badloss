@@ -36,8 +36,8 @@ def run(exp):
         indices_to_pick = np.where(predictions.cpu() == i)[0]
         activation_by_predicted_class[i] = (activations[indices_to_pick], indices[indices_to_pick])
 
-    dim_reducer = sklearn.decomposition.FastICA(n_components=args.ac_ica_components)
-    clusterer = sklearn.cluster.KMeans(n_clusters=2)
+    dim_reducer = sklearn.decomposition.FastICA(n_components=args.ac_ica_components, random_state=exp.seed)
+    clusterer = sklearn.cluster.KMeans(n_clusters=2, random_state=exp.seed)
 
     clusterings, rsc_scores, sil_scores = [], [], []
     for cls in range(exp.num_classes):
