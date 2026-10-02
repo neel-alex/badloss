@@ -135,7 +135,7 @@ class FrequencyAttack(object):
         return x
 
 
-def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
+def get_pattern(attack_name, img_size, dataset, output_dir, main_proc, data_root='./data'):
     pattern = None
     if attack_name == "blend_r":
         pattern_file = os.path.join(output_dir, "blend_r_pattern.png")
@@ -160,7 +160,7 @@ def get_pattern(attack_name, img_size, dataset, output_dir, main_proc):
             pattern[:, col, :] = 1 - np.cos(2 * np.pi * col * SINUSOID_FREQ / pattern.shape[1])
         pattern = transforms.ToTensor()(pattern)
     elif attack_name == "narcissus":
-        pattern = np.load(f'data/{attack_name}_noise_{dataset}.npy')
+        pattern = np.load(os.path.join(data_root, f'{attack_name}_noise_{dataset}.npy'))
         pattern = torch.tensor(pattern[0])
 
     return pattern
@@ -171,25 +171,26 @@ class Identity(object):
         return x
 
 
-def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, pattern=None, alpha_boost=1):
+def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, pattern=None, alpha_boost=1,
+                         data_root='./data'):
     """Returns (transform applying the attack's trigger, trigger pattern). `pattern` reuses an existing
     blend_r pattern (so test-time triggers match the poisoned training images)."""
     if pattern is None:
-        pattern = get_pattern(attack_name, img_size, dataset, output_dir, main_proc)
+        pattern = get_pattern(attack_name, img_size, dataset, output_dir, main_proc, data_root=data_root)
 
     if attack_name == "patch":
-        backdoor = BackdoorPatch(imagenette=(dataset == 'imagenette'))
+        backdoor = BackdoorPatch(imagenette=(dataset in {'imagenette', 'imagenet'}))
     elif attack_name == "single_pix":
         backdoor = BackdoorPatch(single_pixel_backdoor=True, imagenette=(dataset == 'imagenette'))
     elif attack_name in {"blend_r", "blend_p", "sinusoid"}:
         alpha = {"blend_r": BLEND_R_ALPHA, "blend_p": BLEND_P_ALPHA, "sinusoid": SINUSOID_ALPHA}[attack_name]
-        if dataset == "imagenette":
-            alpha = IMAGENETTE_ALPHA  # Stronger on imagenette
+        if dataset in {"imagenette", "imagenet"}:
+            alpha = IMAGENETTE_ALPHA  # Stronger on large images
         backdoor = BackdoorPatch(pattern=pattern, alpha=alpha*alpha_boost)
     elif attack_name == "narcissus":
         backdoor = BackdoorPatch(pattern=pattern, alpha=1*alpha_boost, mode='add')
     elif attack_name == "frequency":
-        magnitude = 90 if dataset == "imagenette" else 30  # Stronger on imagenette
+        magnitude = 90 if dataset in {"imagenette", "imagenet"} else 30  # Stronger on large images
         backdoor = FrequencyAttack(boost=alpha_boost, magnitude=magnitude)
     elif attack_name == "clean":
         backdoor = Identity()
@@ -236,7 +237,7 @@ def make_probe_imgs(num_classes, dataset, train_set_wo_aug, num_probes, output_d
 
 
 def make_poison_imgs(num_classes, dataset, train_set_wo_aug, poison_ratios, attacks, output_dir, main_proc,
-                     img_size):
+                     img_size, data_root='./data'):
     """Poisoned training images for each attack (no image is attacked twice).
 
     Returns (poison_imgs: attack -> ImageSet, attack_targets: attack -> target class, blend_r pattern).
@@ -271,7 +272,8 @@ def make_poison_imgs(num_classes, dataset, train_set_wo_aug, poison_ratios, atta
         attack_idx = np.random.choice(indices_to_choose_from, size=min(num, len(indices_to_choose_from)),
                                       replace=False)
         attack_labels = np.array([target for _ in attack_idx])
-        poison_transform, pattern = make_probe_transform(attack, img_size, dataset, output_dir, main_proc)
+        poison_transform, pattern = make_probe_transform(attack, img_size, dataset, output_dir, main_proc,
+                                                         data_root=data_root)
         poison_imgs[attack] = make_image_set(attack_idx, train_set_wo_aug, attack_labels, transform=poison_transform)
         print(f"Poison ({attack}) shape:", poison_imgs[attack].images.shape)
 
@@ -287,14 +289,15 @@ def all_poison_indices(poison_imgs):
 
 
 def make_poison_imgs_test(test_set, dataset, num_test_images, attacks, attack_targets, blend_r_pattern,
-                          output_dir, main_proc, img_size):
+                          output_dir, main_proc, img_size, data_root='./data'):
     """Triggered test images (excluding each attack's target class), labeled with the attack's target, for
     measuring attack success rates. Blending attacks also get a "_boosted" set with a stronger trigger."""
     poison_imgs_test = {}
     for attack in attacks:
         target = attack_targets[attack]
         pattern = blend_r_pattern if attack == "blend_r" else None
-        poison_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc, pattern=pattern)
+        poison_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc, pattern=pattern,
+                                                   data_root=data_root)
 
         non_target_indices = np.where(np.array(test_set.targets) != target)[0]
         test_indices = np.random.choice(non_target_indices, size=min(len(non_target_indices), num_test_images),
@@ -305,7 +308,8 @@ def make_poison_imgs_test(test_set, dataset, num_test_images, attacks, attack_ta
                                                   track_idx=False)
         if attack in BLENDING_ATTACKS:
             boosted_transform, _ = make_probe_transform(attack, img_size, dataset, output_dir, main_proc,
-                                                        pattern=pattern, alpha_boost=BOOSTING_RATIO)
+                                                        pattern=pattern, alpha_boost=BOOSTING_RATIO,
+                                                        data_root=data_root)
             poison_imgs_test[f"{attack}_boosted"] = make_image_set(test_indices, test_set, test_labels,
                                                                    transform=boosted_transform, track_idx=False)
     return poison_imgs_test

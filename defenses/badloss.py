@@ -130,14 +130,14 @@ def run(exp):
 
     retrain_loader = exp.loader(clean_indices)
     clean_model = exp.new_model()
-    criterion, optimizer, lr_scheduler = exp.new_optimizer(clean_model, exp.num_epochs)
+    criterion, optimizer, lr_scheduler = exp.new_optimizer(clean_model, args.badloss_retrain_epochs)
     output_checkpoint_dir = os.path.join(exp.output_dir, "model_ft")
     os.makedirs(output_checkpoint_dir, exist_ok=True)
     output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_cleaned_thresh_{threshold:.2f}.pth")
     print("Selected output checkpoint:", output_checkpoint)
     if not os.path.exists(output_checkpoint):
         print("!! Output checkpoint not found. Training model from scratch...")
-        for _ in range(exp.num_epochs):
+        for _ in range(args.badloss_retrain_epochs):
             train(clean_model, exp.device, retrain_loader, optimizer, criterion)
             lr_scheduler.step()
         torch.save(clean_model.state_dict(), output_checkpoint)

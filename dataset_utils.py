@@ -43,8 +43,8 @@ def load_class_mapping(dataset):
     return label2name, name2label
 
 
-def get_settings_for_dataset(dataset, use_augmentations=True):
-    data_dir = f"./data/{dataset}/"
+def get_settings_for_dataset(dataset, data_root, use_augmentations=True):
+    data_dir = os.path.join(data_root, dataset)
     if dataset == "gtsrb":
         use_augmentations = False
     if dataset == "cifar10":
@@ -65,8 +65,8 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
         img_size = (224, 224, 3)
         if dataset == "gtsrb":  # specifically for GTSRB
             rand_crop_scale = (0.8, 1.0)
-        else:  # imagenet default
-            rand_crop_scale = (0.08, 1.0)
+        else:  # imagenet, imagenette (milder than the usual (0.08, 1.0))
+            rand_crop_scale = (0.8, 1.0)
 
         if use_augmentations:
             print("Training w/ augmentations...")
@@ -92,10 +92,9 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
             train_set_wo_aug.targets = [label for (img, label) in train_set_wo_aug]
             test_set.targets = [label for (img, label) in test_set]
         elif dataset == "imagenet":
-            data_dir = "/ds/images/imagenet/"  # TODO: Configure dataset path
             train_set = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(train_transform))
             train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
-            test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=transforms.Compose(test_transform))
+            test_set = ImageFolder(os.path.join(data_dir, "val"), transform=transforms.Compose(test_transform))
 
             # Replace train_set.classes with real names
             train_set.original_classes = train_set.classes

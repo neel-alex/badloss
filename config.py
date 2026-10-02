@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # BaDLoss
     parser.add_argument('--badloss_pretrain_epochs', default=30, type=int)
+    parser.add_argument('--badloss_retrain_epochs', default=None, type=int,
+                        help="Epochs for retraining on the filtered set; default --num_epochs (50 for imagenet)")
     parser.add_argument('--badloss_metric', default='loss', type=str, choices=['loss', 'prob'],
                         help="Per-example quantity tracked over training: loss or correct-class probability")
     parser.add_argument('--badloss_k', default=50, type=int, help="Nearest clean trajectories used for scoring")
@@ -109,6 +111,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parses arguments and fills in dataset-dependent defaults, attack list and poisoning ratios."""
     args = build_parser().parse_args(argv)
     defaults = dataset_defaults(args.dataset, args.batch_size)
+    if args.num_epochs is not None:  # An explicit epoch count also applies to BaDLoss retraining
+        defaults['badloss_retrain_epochs'] = args.num_epochs
     for key, value in defaults.items():
         if getattr(args, key) is None:
             setattr(args, key, value)
@@ -123,8 +127,9 @@ def dataset_defaults(dataset: str, batch_size: int) -> Dict:
     num_epochs = {'cifar10': 100, 'gtsrb': 100, 'imagenette': 250, 'imagenet': 100}[dataset]
     return {
         'num_epochs': num_epochs,
+        'badloss_retrain_epochs': 50 if dataset == 'imagenet' else num_epochs,
         'eval_batch_size': 128 if dataset == 'cifar10' else batch_size,
-        'num_test_probes': 10000,
+        'num_test_probes': 2000 if dataset == 'imagenet' else 10000,
     }
 
 
@@ -150,9 +155,9 @@ def get_default_poisoning_ratio(dataset: str) -> Dict[str, float]:
                      "single_pix": {'default': 0.01,
                                     'gtsrb': 0.04},
                      "blend_r": {'default': 0.01,
-                                'imagenet': 0.001},
+                                 'imagenet': 0.0005},
                      "blend_p": {'default': 0.01,
-                               'imagenet': 0.001},
+                                 'imagenet': 0.0002},
                      "sinusoid": {'default': 0.1},  # frac. target class
                      "narcissus": {'default': 0.005},  # frac. target class
                      "frequency": {'default': 0.01,
