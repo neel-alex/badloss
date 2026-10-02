@@ -11,9 +11,9 @@ from experiment import Experiment
 
 
 def main():
-    # Required for determinism
+    # Bitwise-reproducible runs: deterministic kernels only (raises if an op has no deterministic implementation)
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.use_deterministic_algorithms(True)
 
     args = config.parse_args()
     exp = Experiment(args)
