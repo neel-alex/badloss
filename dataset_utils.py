@@ -223,9 +223,12 @@ def make_index_dataset(comb_train_set, comb_train_indices, test_set,
     # Convert into a dataset which returns indices
     idx_dataset = IdxDataset(comb_train_set)
 
-    # Update dataset transform for evaluation | idx dataset -> concate dataset -> actual training dataset
+    # Un-augmented copy | idx dataset -> concat dataset -> [training set, (probes), poisons]. The probe and poison
+    # parts hold already-preprocessed tensors, so they get no transform at all.
     idx_dataset_wo_aug = copy.deepcopy(idx_dataset)
     idx_dataset_wo_aug.dataset.datasets[0].transform = transforms.Compose(no_transform)
+    for part in idx_dataset_wo_aug.dataset.datasets[1:]:
+        part.transform = None
 
     new_idx_loader = get_loader(idx_dataset, distributed, num_workers, seed,
                                 indices=comb_train_indices, batch_size=batch_size)
