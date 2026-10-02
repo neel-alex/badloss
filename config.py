@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--output_root', default='./outputs', type=str,
                         help="Run outputs go to <output_root>/<dataset>_<attack>_<defense>_s<seed>/; cached attacked "
                              "models and BaDLoss trajectories (keyed by code + settings) to <output_root>/cache/")
+    parser.add_argument('--cache_dir', default=None, type=str, help="Default: <output_root>/cache")
     parser.add_argument('--no_cache', action='store_true', help="Never read or write cached artifacts")
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--num_epochs', default=None, type=int,

@@ -42,7 +42,7 @@ def _code_hash():
 
 # Arguments that cannot affect the poisoned training set or the attacked model
 _DEFENSE_ARG_PREFIXES = ('badloss_', 'nc_', 'ac_', 'ss_', 'freq_', 'abl_', 'cd_', 'cbd_', 'pss_')
-_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'no_cache'}
+_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'cache_dir', 'no_cache'}
 
 
 def _jsonable(x):
@@ -190,7 +190,8 @@ class Experiment:
                     if k not in _NON_SEMANTIC_ARGS and not k.startswith(_DEFENSE_ARG_PREFIXES)}
         key = json.dumps({"kind": kind, "code": self.code_hash, "args": key_args, "extra": extra},
                          sort_keys=True, default=str)
-        return os.path.join(self.args.output_root, "cache", f"{kind}_{hashlib.sha256(key.encode()).hexdigest()[:16]}")
+        cache_root = self.args.cache_dir or os.path.join(self.args.output_root, "cache")
+        return os.path.join(cache_root, f"{kind}_{hashlib.sha256(key.encode()).hexdigest()[:16]}")
 
     def save_cached(self, cache_dir, **items):
         """Atomically write torch-serializable items into cache_dir (with the key's description)."""
