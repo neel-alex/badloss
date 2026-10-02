@@ -1,4 +1,5 @@
 import os
+import random
 import urllib
 import natsort
 import copy
@@ -183,19 +184,28 @@ class ProbeDataset(torch.utils.data.Dataset):
         return self.dataset[idx], self.iden2label[self.probe_identity[idx]]
 
 
-def get_loader(dataset, distributed, num_workers, indices=None, batch_size=16, shuffle=False):
+def seed_worker(worker_id: int) -> None:
+    # Torch seeds each worker from the loader's generator; propagate that to numpy/random.
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def get_loader(dataset, distributed, num_workers, seed: int, indices=None, batch_size=16, shuffle=False):
+    # Each loader owns its RNG, so data order doesn't depend on unrelated global RNG draws.
+    generator = torch.Generator().manual_seed(seed)
     sampler = None
     if indices is not None:
-        sampler = torch.utils.data.SubsetRandomSampler(indices)
+        sampler = torch.utils.data.SubsetRandomSampler(indices, generator=generator)
     if distributed:
         if sampler is not None:
             print("Using distributed sampler on top of previous sampler...")
             sampler = DistributedSamplerWrapper(sampler)
         else:
-            sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+            sampler = torch.utils.data.distributed.DistributedSampler(dataset, seed=seed)
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                                          sampler=sampler, num_workers=num_workers, prefetch_factor=4,
-                                         pin_memory=True)
+                                         pin_memory=True, worker_init_fn=seed_worker, generator=generator)
     return loader
 
 
@@ -290,7 +300,7 @@ class IdxDataset(torch.utils.data.Dataset):
 
 
 def make_index_dataset(comb_train_set, comb_train_indices, test_set,
-                       no_transform, batch_size, distributed, num_workers):
+                       no_transform, batch_size, distributed, num_workers, seed: int):
     # Convert into a dataset which returns indices
     idx_dataset = IdxDataset(comb_train_set)
 
@@ -298,11 +308,11 @@ def make_index_dataset(comb_train_set, comb_train_indices, test_set,
     idx_dataset_wo_aug = copy.deepcopy(idx_dataset)
     idx_dataset_wo_aug.dataset.datasets[0].transform = transforms.Compose(no_transform)
 
-    new_idx_loader = get_loader(idx_dataset, distributed, num_workers,
+    new_idx_loader = get_loader(idx_dataset, distributed, num_workers, seed,
                                 indices=comb_train_indices, batch_size=batch_size)
-    new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers,
+    new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers, seed,
                                        indices=comb_train_indices, batch_size=batch_size)
-    test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, batch_size=batch_size)
+    test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, seed, batch_size=batch_size)
 
     return new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
 

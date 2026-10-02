@@ -203,7 +203,7 @@ criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, mo
 
 new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
     make_index_dataset(comb_train_set, comb_train_indices, test_set,
-                       no_transform, batch_size, distributed, num_workers)
+                       no_transform, batch_size, distributed, num_workers, seed)
 
 # Load train probes onto gpu -- inexpensive and saves time.
 # ...could load entire train set onto gpu (15GB tops in GTSRB), but that's a pain, code-wise.
@@ -558,7 +558,7 @@ if args.defense == "badloss":
             if train_type == "original":
                 # Use the training set w/o attacks
                 assert threshold is None, threshold
-                new_train_set_dl = get_loader(IdxDataset(train_set_wo_aug), distributed=distributed,
+                new_train_set_dl = get_loader(IdxDataset(train_set_wo_aug), seed=seed, distributed=distributed,
                                               num_workers=num_workers, batch_size=batch_size)
                 title = "Retraining on the original train set (w/o backdoors)"
             else:
@@ -573,7 +573,7 @@ if args.defense == "badloss":
                     probe_identity_discarded_samples = [dataset_probe_identity[i] for i in discarded_indices]
                     print("!! Discarded example identities:", Counter(probe_identity_discarded_samples))
                     
-                    new_train_set_dl = get_loader(idx_dataset, indices=clean_indices, distributed=distributed,
+                    new_train_set_dl = get_loader(idx_dataset, seed=seed, indices=clean_indices, distributed=distributed,
                                                   num_workers=num_workers, batch_size=batch_size)
                     selected_indices = clean_indices
                 else:
@@ -585,7 +585,7 @@ if args.defense == "badloss":
                 title = f"{'Random' if train_type == 'random' else 'Clean'} idx retraining (thresh={threshold:.1f}) [Total={len(is_clean)} / Selected: {len(selected_indices)}]"
                 print(
                     f"!! Train type: {train_type} / Threshold: {threshold} / Total examples: {num_avail_ex} / # selected indices: {len(selected_indices)}")
-                new_train_set_dl = get_loader(idx_dataset, indices=selected_indices, distributed=distributed,
+                new_train_set_dl = get_loader(idx_dataset, seed=seed, indices=selected_indices, distributed=distributed,
                                               num_workers=num_workers, batch_size=batch_size)
 
             clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
@@ -726,7 +726,7 @@ def retrain_model(identified_indices, comb_train_indices, idx_dataset, distribut
     print(f"Retraining with {identified_indices.shape[0]} elements removed.")
     retrain_indices = [x for x in comb_train_indices if x not in identified_indices]
 
-    retrain_set_dl = get_loader(idx_dataset, distributed=distributed, num_workers=num_workers,
+    retrain_set_dl = get_loader(idx_dataset, seed=seed, distributed=distributed, num_workers=num_workers,
                                   indices=retrain_indices, batch_size=batch_size)
 
     clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
@@ -1170,7 +1170,8 @@ if args.defense == "freq":
                                 torch.ones(freq_probes['backdoor'].shape[0], dtype=torch.long)))
 
     freq_dataset = TensorDataset(freq_train_set, freq_labels)
-    freq_dataloader = DataLoader(freq_dataset, batch_size=32, shuffle=True)
+    freq_dataloader = DataLoader(freq_dataset, batch_size=32, shuffle=True,
+                                 generator=torch.Generator().manual_seed(seed))
 
     freq_model = FreqCNN(freq_train_set[0].shape).to(device)
 
@@ -1304,9 +1305,9 @@ if args.defense == "abl":
             f"Selected indices / Clean indices: {len(remaining_indices)} / Backdoored indices: {len(indices_to_maximize)}")
 
         # Step # 03: generate dataloaders based on the clean and backdoor indices
-        clean_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=remaining_indices,
+        clean_dl = get_loader(new_idx_loader.dataset, seed=seed, distributed=distributed, indices=remaining_indices,
                               num_workers=num_workers, batch_size=batch_size)
-        detected_backdoors_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=indices_to_maximize,
+        detected_backdoors_dl = get_loader(new_idx_loader.dataset, seed=seed, distributed=distributed, indices=indices_to_maximize,
                                            num_workers=num_workers, batch_size=batch_size)
 
         # Step # 04: finetune the model only on clean data
@@ -1509,9 +1510,9 @@ if args.defense == "pss":
     clean_idx = torch.where((fcts > 0) & (fcts < lower_limit))[0]
     pois_idx = torch.where(fcts >= upper_limit)[0]
 
-    clean_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=clean_idx,
+    clean_dl = get_loader(new_idx_loader.dataset, seed=seed, distributed=distributed, indices=clean_idx,
                           num_workers=num_workers, batch_size=batch_size)
-    pois_dl = get_loader(new_idx_loader.dataset, distributed=distributed, indices=pois_idx,
+    pois_dl = get_loader(new_idx_loader.dataset, seed=seed, distributed=distributed, indices=pois_idx,
                          num_workers=num_workers, batch_size=batch_size)
 
 

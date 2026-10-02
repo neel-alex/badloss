@@ -4,7 +4,10 @@ import numpy as np
 import torch
 from torchvision import models
 from tqdm import tqdm
-from catalyst.data import DistributedSamplerWrapper
+try:
+    from catalyst.data import DistributedSamplerWrapper
+except ImportError:  # Only needed for distributed runs
+    DistributedSamplerWrapper = None
 
 import dist_utils
 
@@ -28,34 +31,34 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='res
     else:
         if arch == 'resnet50':
             # Create ResNet-50
-            model = models.resnet50(pretrained=False, num_classes=num_classes)
+            model = models.resnet50(weights=None, num_classes=num_classes)
             if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
                 model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
                 model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
             model = model.to(device)
         elif arch == 'resnet18':
-            model = models.resnet18(pretrained=False, num_classes=num_classes)
+            model = models.resnet18(weights=None, num_classes=num_classes)
             if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
                 model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
                 model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
             model = model.to(device)
         elif arch == 'resnet34':
-            model = models.resnet34(pretrained=False, num_classes=num_classes)
+            model = models.resnet34(weights=None, num_classes=num_classes)
             if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
                 model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
                 model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
             model = model.to(device)
         elif arch == 'vgg16':
-            model = models.vgg16_bn(pretrained=False, num_classes=num_classes)
+            model = models.vgg16_bn(weights=None, num_classes=num_classes)
             model = model.to(device)
         elif arch == 'densenet':
-            model = models.densenet121(pretrained=False, num_classes=num_classes)
+            model = models.densenet121(weights=None, num_classes=num_classes)
             model = model.to(device)
         elif arch == 'squeezenet':
-            model = models.squeezenet1_0(pretrained=False, num_classes=num_classes)
+            model = models.squeezenet1_0(weights=None, num_classes=num_classes)
             model = model.to(device)
         elif arch == 'efficientnet':
-            model = models.efficientnet_b7(pretrained=False, num_classes=num_classes)
+            model = models.efficientnet_b7(weights=None, num_classes=num_classes)
             model = model.to(device)
     if verbose:
         print(model)
@@ -201,7 +204,7 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
 
     if isinstance(test_loader.sampler, torch.utils.data.distributed.DistributedSampler):
         num_dataset_ex = len(test_loader.sampler.dataset)
-    elif isinstance(test_loader.sampler, DistributedSamplerWrapper):
+    elif DistributedSamplerWrapper is not None and isinstance(test_loader.sampler, DistributedSamplerWrapper):
         num_dataset_ex = len(test_loader.sampler.sampler.dataset)
     elif isinstance(test_loader.sampler, torch.utils.data.SubsetRandomSampler):
         num_dataset_ex = len(test_loader.sampler)

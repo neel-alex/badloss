@@ -4,3 +4,4 @@
 **/*exp*/
 .idea
 data
+.venv/
