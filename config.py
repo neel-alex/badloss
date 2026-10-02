@@ -175,10 +175,3 @@ def get_poisoning_ratio(dataset: str,
     combined_ratios = {**default_ratios, **config_ratios}
     return combined_ratios
 
-
-# Deprecated aliases for mapd_backdoors.py (removed once main.py replaces it)
-config = build_parser
-
-
-def get_num_epochs(dataset: str) -> int:
-    return dataset_defaults(dataset, 0)['num_epochs']
