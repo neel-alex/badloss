@@ -42,8 +42,23 @@ def config() -> argparse.ArgumentParser:
     parser.add_argument('--badloss_metric', default='loss', type=str,
                         choices=['loss', 'prob'])
 
+    # Neural Cleanse
+    parser.add_argument('--nc_cleanse_epochs', default=15, type=int)
+
+    # Cognitive Distillation
+    parser.add_argument('--cd_num_steps', default=100, type=int)
+
+    # ABL
+    parser.add_argument('--abl_pretrain_epochs', default=10, type=int)
+
     # CBD
     parser.add_argument('--cbd_ce_gamma', default=1.0, type=float)
+    parser.add_argument('--cbd_pretrain_epochs', default=5, type=int)
+
+    # PSS
+    parser.add_argument('--pss_pretrain_epochs', default=2, type=int)
+    parser.add_argument('--pss_intraclass_epochs', default=3, type=int)
+    parser.add_argument('--pss_unlearn_epochs', default=20, type=int)
 
     return parser
 

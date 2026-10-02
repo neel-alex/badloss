@@ -580,7 +580,6 @@ if args.defense == "badloss":
     # In[ ]:
     thresh_list = [0.6]  # if attack == "all" else [0.15, 0.3]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
     print("Threshold list:", thresh_list)
-    num_epochs = 100 if args.dataset != "imagenette" else 250
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
     if not os.path.exists(output_checkpoint_dir):
@@ -875,7 +874,7 @@ if args.defense == "nc":
         rejected_indices = torch.hstack(rejected_indices).unique()
         return clean_indices[rejected_indices.cpu()].numpy() if clean_indices is not None else np.array([], dtype=int)
 
-    cleanse_epochs = 15
+    cleanse_epochs = args.nc_cleanse_epochs
 
     masks, norms, triggers = [], [], []
 
@@ -1294,7 +1293,7 @@ if args.defense == "abl":
         identified_indices = [int(ex_idx[i]) for i in identified_indices]
         return np.array(identified_indices)
 
-    num_pretrain_epochs = 10
+    num_pretrain_epochs = args.abl_pretrain_epochs
     flooding_threshold = 0.5
 
     model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
@@ -1428,7 +1427,7 @@ if args.defense == "abl":
         test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
 
 if args.defense == "cd":
-    cd = CognitiveDistillation()
+    cd = CognitiveDistillation(num_steps=args.cd_num_steps)
     masks = torch.zeros(len(new_idx_loader_wo_aug.dataset), *img_size[:-1])
     pbar = tqdm(new_idx_loader_wo_aug)
     for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
@@ -1460,7 +1459,7 @@ if args.defense == "cd":
                   detection_thresh, probes, log_predictions, test_probes, args.defense)
 
 if args.defense == "cbd":
-    num_pretrain_epochs = 5
+    num_pretrain_epochs = args.cbd_pretrain_epochs
 
     backdoor_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
 
@@ -1523,8 +1522,8 @@ if args.defense == "cbd":
 
 if args.defense == "pss":
     # Train from clean for 2 epochs w/o aug || train_attack_noTrans.py
-    num_pretrain_epochs = 2
-    num_intraclass_epochs = 3
+    num_pretrain_epochs = args.pss_pretrain_epochs
+    num_intraclass_epochs = args.pss_intraclass_epochs
 
     backdoor_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
     optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=0.01, momentum=0.9,
@@ -1598,7 +1597,7 @@ if args.defense == "pss":
 
 
     # Train backdoored model for 20 epochs of alternating learning and unlearning || unlearn_relearn.py    
-    retrain_epochs = 20
+    retrain_epochs = args.pss_unlearn_epochs
     optimizer = torch.optim.SGD(model.parameters(), lr=0.0001, momentum=0.9,
                                 weight_decay=5e-4)
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
