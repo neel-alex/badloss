@@ -146,7 +146,7 @@ def convert_state_dict(state_dict, require_module=None):
 def convert_to_distributed(model, local_rank, sync_bn=False):
     # Convert the model to dist
     if torch.distributed.is_initialized():
-        dist_print(f"Using DDP...")
+        dist_print("Using DDP...")
         if sync_bn:
             dist_print("Using synced BN!")
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
