@@ -868,6 +868,8 @@ if args.defense == "nc":
             # Set a threshold that rejects no more than fpr_thresh of clean probe examples.
             reject_thresh = poison_acts[indices_to_check].sort()[0][-upper_limit]
             rejected_indices.append((poison_acts > reject_thresh).nonzero()[:, 0])
+        if not rejected_indices:  # No anomalous classes detected
+            return np.array([], dtype=int)
         rejected_indices = torch.hstack(rejected_indices).unique()
         return clean_indices[rejected_indices.cpu()].numpy() if clean_indices is not None else np.array([], dtype=int)
 
