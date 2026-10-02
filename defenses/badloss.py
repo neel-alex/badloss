@@ -20,6 +20,7 @@ def collect_trajectories(exp):
     """Train the attacked model for --badloss_pretrain_epochs, recording per-example loss and correct-class
     probability on the (un-augmented) combined training set after every epoch."""
     args = exp.args
+    exp.init_attacked_model()
     model_file = os.path.join(exp.model_dir, f"model_{args.dataset}.pth")
     data_file = os.path.join(exp.model_collection_dir, f"stats_{args.dataset}.pkl")
 

@@ -37,7 +37,6 @@ class FreqCNN(torch.nn.Module):
 def apply_random_transform(probe):
     """Synthetic backdoor-like corruption: a white or random-noise patch near a random corner.
     (The original detector also used noise, shadow and blending corruptions; restricted to patches here.)"""
-    np.random.randint(0, 5)  # Vestigial draw, kept so the RNG stream is unchanged
     patch_x = np.random.randint(2, 8)
     patch_y = np.random.randint(2, 8)
     loc = np.random.randint(0, 6)

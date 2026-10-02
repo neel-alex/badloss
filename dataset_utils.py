@@ -183,8 +183,7 @@ def make_probe_dataset(train_set, dataset, train_transform, probe_sets, poison_i
         probe_labels = torch.cat([image_set.labels for _, image_set in probe_sets], dim=0)
         print(f"Probe | Images: {probe_images.shape} | Labels: {probe_labels.shape}")
         probe_dataset = _image_set_dataset(probe_images, probe_labels, train_transform)
-        # NB: indexing [0] applies the random train transform, which consumes global torch RNG
-        print("Probe dataset:", len(probe_dataset), probe_dataset[0][0].shape, probe_dataset[0][1])
+        print("Probe dataset:", len(probe_dataset))
         plot(probe_images, probe_labels, class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png",
              output_dir=output_dir)
         parts.append(probe_dataset)
@@ -193,8 +192,7 @@ def make_probe_dataset(train_set, dataset, train_transform, probe_sets, poison_i
     poison_images = torch.cat([image_set.images for image_set in poison_imgs.values()], dim=0)
     poison_labels = torch.cat([image_set.labels for image_set in poison_imgs.values()], dim=0)
     poison_dataset = _image_set_dataset(poison_images, poison_labels, train_transform)
-    # NB: as above, this consumes global torch RNG
-    print("Poison dataset:", len(poison_dataset), poison_dataset[0][0].shape, poison_dataset[0][1])
+    print("Poison dataset:", len(poison_dataset))
     parts.append(poison_dataset)
     identities += list(itertools.chain(*([f"poison_{attack}"] * len(image_set)
                                          for attack, image_set in poison_imgs.items())))

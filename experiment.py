@@ -136,9 +136,9 @@ class Experiment:
                                              self.poison_imgs, self.output_dir)
         self.valid_idx = [i for i in range(len(self.train_set)) if i not in discarded_idx]
 
-        # Created for every defense (even those that train their own models) to keep the RNG stream fixed
-        self.model = self.new_model()
-        self.criterion, self.optimizer, self.lr_scheduler = self.new_optimizer(self.model, self.num_epochs)
+        # The attacked model (trained on the poisoned set) is created by init_attacked_model(), for defenses using it
+        self.model = None
+        self.criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
 
         self.new_idx_loader, self.new_idx_loader_wo_aug, self.test_idx_loader, self.idx_dataset = \
             make_index_dataset(self.comb_train_set, self.comb_train_indices, self.test_set, self.no_transform,
@@ -156,6 +156,10 @@ class Experiment:
             os.makedirs(self.model_dir, exist_ok=True)
 
     # --- Building blocks ---
+
+    def init_attacked_model(self):
+        self.model = self.new_model()
+        self.criterion, self.optimizer, self.lr_scheduler = self.new_optimizer(self.model, self.num_epochs)
 
     def new_model(self):
         return get_model(self.args.dataset, self.num_classes, self.device, self.local_rank, arch=self.args.arch)
@@ -244,8 +248,9 @@ class Experiment:
     # --- Training ---
 
     def pretrain(self):
-        """Train self.model on the poisoned training set (the attacked model inspected by most defenses)."""
+        """Train the attacked model on the poisoned training set (the model inspected by most defenses)."""
         args = self.args
+        self.init_attacked_model()
         model_file = os.path.join(self.model_dir, f"model_{args.dataset}_dynamics.pth")
         if not os.path.exists(model_file):
             for epoch in range(self.num_epochs):
