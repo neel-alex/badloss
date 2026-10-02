@@ -183,25 +183,22 @@ if args.defense == "badloss":
 else:
     attack_types = [f"backdoor_{attack}" for attack in attacks]
 
-val_probes, attack_targets, random_pattern, warping_grids = make_val_probes(num_classes, args.dataset, train_set_wo_aug,
-                                                                            poison_ratios, attacks,
-                                                                            experiment_output_dir, main_proc, img_size,
-                                                                            device,)
+val_probes, attack_targets, random_pattern = make_val_probes(num_classes, args.dataset, train_set_wo_aug,
+                                                              poison_ratios, attacks, experiment_output_dir,
+                                                              main_proc, img_size)
 
 include_val_probe_examples = False
 
 train_probe_attack = 'clean'
-train_probe, attack_target, aux_data = make_train_probes(num_classes, args.dataset, train_set_wo_aug,
-                                                         args.num_train_probes, train_probe_attack,
-                                                         experiment_output_dir, main_proc, img_size, device,
-                                                         val_probe_indices=val_probes["all_backdoor_idx"],
-                                                         include_val_probe_examples=include_val_probe_examples)
+train_probe, attack_target = make_train_probes(num_classes, args.dataset, train_set_wo_aug, args.num_train_probes,
+                                               train_probe_attack, experiment_output_dir, main_proc, img_size,
+                                               val_probe_indices=val_probes["all_backdoor_idx"])
 
 train_probes_idx = train_probe["all_backdoor_idx"]
 
 num_test_probes = 10000
 test_probes = make_test_probes(test_set, args.dataset, num_test_probes, attacks, attack_targets,
-                               random_pattern, warping_grids, experiment_output_dir, main_proc, img_size, device)
+                               random_pattern, experiment_output_dir, main_proc, img_size)
 
 
 # Merge probe dicts
@@ -209,7 +206,6 @@ if args.defense == "badloss":
     probes = {**train_probe, **val_probes}
     unified_backdoor_idx = np.concatenate((train_probe['all_backdoor_idx'], val_probes['all_backdoor_idx']))
     probes['all_backdoor_idx'] = unified_backdoor_idx
-    chosen_attack_targets = {**{'backdoor': attack_target}, **attack_targets}
     plot_probe_examples(probes, args.dataset, train_set, attack_types, rank, experiment_output_dir, log_wandb=log_wandb)
 else:
     probes = val_probes

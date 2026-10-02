@@ -15,7 +15,7 @@ except ImportError:
     print("catalyst not found for DistributedSamplerWrapper!")
 
 from plot_utils import plot
-from backdoors import BackdoorPatch, WarpingAttack, ClampRangeTransform
+
 
 
 def load_class_mapping(dataset):
