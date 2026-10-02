@@ -1,22 +1,19 @@
 import os
 import random
 import urllib
-import natsort
 import copy
 import itertools
 
 import numpy as np
 import torch
 from torchvision import transforms
-from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder, Imagenette
+from torchvision.datasets import CIFAR10, GTSRB, ImageFolder, Imagenette
 try:
     from catalyst.data import DistributedSamplerWrapper
 except ImportError:
     print("catalyst not found for DistributedSamplerWrapper!")
 
 from plot_utils import plot
-
-
 
 def load_class_mapping(dataset):
     if dataset == "imagenet":
@@ -42,18 +39,6 @@ def load_class_mapping(dataset):
     elif dataset == "cifar10":
         classes = ["airplane", "automobile", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck"]
         label2name = {k: v for k, v in enumerate(classes)}
-    elif dataset == "cifar100":
-        classes = ["beaver", "dolphin", "otter", "seal", "whale", "aquarium fish", "flatfish", "ray", "shark", "trout",
-                   "orchids", "poppies", "roses", "sunflowers", "tulips", "bottles", "bowls", "cans", "cups", "plates",
-                   "apples", "mushrooms", "oranges", "pears", "sweet peppers", "clock", "computer keyboard", "lamp",
-                   "telephone", "television", "bed", "chair", "couch", "table", "wardrobe", "bee", "beetle", "butterfly",
-                   "caterpillar", "cockroach", "bear", "leopard", "lion", "tiger", "wolf", "bridge", "castle", "house",
-                   "road", "skyscraper", "cloud", "forest", "mountain", "plain", "sea", "camel", "cattle", "chimpanzee",
-                   "elephant", "kangaroo", "fox", "porcupine", "possum", "raccoon", "skunk", "crab", "lobster", "snail",
-                   "spider", "worm", "baby", "boy", "girl", "man", "woman", "crocodile", "dinosaur", "lizard", "snake",
-                   "turtle", "hamster", "mouse", "rabbit", "shrew", "squirrel", "maple", "oak", "palm", "pine", "willow",
-                   "bicycle", "bus", "motorcycle", "pickup truck", "train", "lawn-mower", "rocket", "streetcar", "tank", "tractor"]
-        label2name = {k: v for k, v in enumerate(classes)}
     else:
         raise RuntimeError(f"Unknown dataset: {dataset}")
     name2label = {label2name[key]: key for key in label2name.keys()}
@@ -62,21 +47,10 @@ def load_class_mapping(dataset):
 
 
 def get_settings_for_dataset(dataset, use_augmentations=True):
-    # data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
-    data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
-    # data_dir = f"./rds/user/sma92/hpc-work/mapd_data/{dataset}/"
+    data_dir = f"./data/{dataset}/"
     if dataset == "gtsrb":
         use_augmentations = False
-    if "mnist" in dataset:
-        img_size = (28, 28, 1)
-        train_transform = [transforms.ToTensor()]
-        test_transform = [transforms.ToTensor()]
-        no_transform = test_transform
-
-        train_set = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
-        train_set_wo_aug = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
-        test_set = MNIST(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
-    elif "cifar" in dataset:
+    if dataset == "cifar10":
         img_size = (32, 32, 3)
         train_transform = [transforms.RandomHorizontalFlip(),
                            transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
@@ -86,12 +60,9 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
             train_transform = test_transform
         no_transform = test_transform
 
-        DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
-        assert DatasetCls is not None
-
-        train_set = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
-        train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
-        test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
+        train_set = CIFAR10(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
+        train_set_wo_aug = CIFAR10(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
+        test_set = CIFAR10(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
     else:
         assert dataset == "imagenet" or dataset == "gtsrb" or dataset == "imagenette"
         img_size = (224, 224, 3)
@@ -163,27 +134,6 @@ class CustomTensorDataset(torch.utils.data.Dataset):
         return self.x.size(0)
 
 
-class ProbeDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, probe_identity, remove_val_in_name=True):
-        self.dataset = dataset
-        if remove_val_in_name:
-            probe_identity = [x.replace("_val", "") for x in probe_identity]
-            print("Validation tag in probe identity removed for probe dataset...")
-        self.probe_identity = probe_identity
-        self.class_names = natsort.natsorted(np.unique(probe_identity))
-        self.iden2label = {iden: i for i, iden in enumerate(self.class_names)}
-        print("Probe to idx map:", self.iden2label)
-
-    def get_probe_map(self):
-        return self.iden2label
-
-    def get_class_names(self):
-        return self.class_names
-
-    def __getitem__(self, idx):
-        return self.dataset[idx], self.iden2label[self.probe_identity[idx]]
-
-
 def seed_worker(worker_id: int) -> None:
     # Torch seeds each worker from the loader's generator; propagate that to numpy/random.
     worker_seed = torch.initial_seed() % 2**32
@@ -209,19 +159,14 @@ def get_loader(dataset, distributed, num_workers, seed: int, indices=None, batch
     return loader
 
 
-def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
-                       train_transform, val_probe_attacks, output_dir, device,
-                       include_val_probe_examples=True):
+def make_probe_dataset(probes, train_set, dataset, defense, train_transform, val_probe_attacks, output_dir):
     discarded_idx = set(probes['all_backdoor_idx'])
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
 
     if defense == "badloss":
-        if include_val_probe_examples:
-            probes_to_be_used = ["backdoor", "clean", "backdoor_val", "clean_val"]
-        else:
-            probes_to_be_used = ["backdoor", "clean"]
+        probes_to_be_used = ["backdoor", "clean"]
         print("Selected probes to be used:", probes_to_be_used)
 
         probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
@@ -233,22 +178,13 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
 
         assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
 
-        # Shuffle
-        shuffle = False
-        if shuffle:
-            perm = np.random.choice(range(len(probe_images)), size=len(probe_images), replace=False)
-            probe_images = torch.stack([probe_images[i] for i in perm], dim=0).to(device)
-            probe_labels = torch.stack([probe_labels[i] for i in perm], dim=0).to(device)
-            probe_identity = [probe_identity[i] for i in perm]
-        else:
-            print("Skipping shuffling training probes.")  # Since dataloader shuffles...
-
         print(f"Probe | Images: {probe_images.shape} | Labels: {probe_labels.shape}")
 
         probe_dataset = torch.utils.data.TensorDataset(probe_images, probe_labels)
         probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"),
                                                      [int(x) for x in probe_labels.to("cpu").numpy().tolist()],
                                                      transform=transforms.Compose(train_transform[:-1]))  # Cut off ToTensor transform
+        # NB: indexing [0] applies the random train transform, which consumes global torch RNG
         print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape,
               probe_dataset_standard[0][1])
         print("Curated probe dataset")
@@ -265,6 +201,7 @@ def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
     val_probe_dataset_standard = CustomTensorDataset(val_probe_images.to("cpu"),
                                                      [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()],
                                                      transform=transforms.Compose(train_transform[:-1]))
+    # NB: as above, this consumes global torch RNG
     print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape,
           val_probe_dataset_standard[0][1])
 

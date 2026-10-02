@@ -1,5 +1,3 @@
-from collections import OrderedDict
-
 import numpy as np
 import torch
 from torchvision import models
@@ -13,53 +11,22 @@ import dist_utils
 
 
 def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='resnet50'):
-    if dataset == "mnist":
-        # Create BadNet architecture (https://arxiv.org/abs/1708.06733)
-        model = torch.nn.Sequential(OrderedDict([
-            ('conv1', torch.nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5, stride=1, padding=0)),
-            ('act1', torch.nn.ReLU(inplace=True)),
-            ('pool1', torch.nn.AvgPool2d(kernel_size=2, stride=2, padding=0)),
-            ('conv2', torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5, stride=1, padding=0)),
-            ('act2', torch.nn.ReLU(inplace=True)),
-            ('pool2', torch.nn.AvgPool2d(kernel_size=2, stride=2, padding=0)),
-            ('flatten', torch.nn.Flatten()),
-            ('fc1', torch.nn.Linear(in_features=32 * 4 * 4, out_features=512)),
-            ('fc1_act', torch.nn.ReLU(inplace=True)),
-            ('fc', torch.nn.Linear(in_features=512, out_features=10)),
-        ]))
-        model = model.to(device)
+    if arch in {'resnet18', 'resnet34', 'resnet50'}:
+        model = getattr(models, arch)(weights=None, num_classes=num_classes)
+        if dataset == "cifar10":  # Small-image stem: 3x3 conv, stride 1 (and a fresh classifier head)
+            model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+    elif arch == 'vgg16':
+        model = models.vgg16_bn(weights=None, num_classes=num_classes)
+    elif arch == 'densenet':
+        model = models.densenet121(weights=None, num_classes=num_classes)
+    elif arch == 'squeezenet':
+        model = models.squeezenet1_0(weights=None, num_classes=num_classes)
+    elif arch == 'efficientnet':
+        model = models.efficientnet_b7(weights=None, num_classes=num_classes)
     else:
-        if arch == 'resnet50':
-            # Create ResNet-50
-            model = models.resnet50(weights=None, num_classes=num_classes)
-            if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
-                model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-                model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
-            model = model.to(device)
-        elif arch == 'resnet18':
-            model = models.resnet18(weights=None, num_classes=num_classes)
-            if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
-                model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-                model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
-            model = model.to(device)
-        elif arch == 'resnet34':
-            model = models.resnet34(weights=None, num_classes=num_classes)
-            if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
-                model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-                model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
-            model = model.to(device)
-        elif arch == 'vgg16':
-            model = models.vgg16_bn(weights=None, num_classes=num_classes)
-            model = model.to(device)
-        elif arch == 'densenet':
-            model = models.densenet121(weights=None, num_classes=num_classes)
-            model = model.to(device)
-        elif arch == 'squeezenet':
-            model = models.squeezenet1_0(weights=None, num_classes=num_classes)
-            model = model.to(device)
-        elif arch == 'efficientnet':
-            model = models.efficientnet_b7(weights=None, num_classes=num_classes)
-            model = model.to(device)
+        raise ValueError(f"Unknown architecture: {arch}")
+    model = model.to(device)
     if verbose:
         print(model)
     model = dist_utils.convert_to_distributed(model, local_rank=local_rank, sync_bn=True)
@@ -82,92 +49,36 @@ def get_optimizer(model, device, lr, momentum, wd, num_epochs, optimizer_name='a
     return criterion, optimizer, lr_scheduler, scaler
 
 
-def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, log_predictions=False,
-          use_autocast=False, flooding_threshold=None, loss_max_indices=None, gradient_ascent=False,
-          flooding_type='flooding', grad_clip=None):
-    assert flooding_type in ['lga', 'flooding']
-    assert grad_clip is None or (not use_autocast and isinstance(grad_clip, float))
-    
+def train(model, device, train_loader, optimizer, criterion, scaler, log_interval=10, flooding_threshold=None):
+    """One epoch of training. criterion must use reduction='none'. flooding_threshold enables loss flooding (ABL)."""
     model.train()
     optimizer.zero_grad()
-
-    example_idx = []
-    predictions = []
-    targets = []
-    loss_values = []
 
     pbar = tqdm(train_loader)
     for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
-        with torch.cuda.amp.autocast(enabled=use_autocast):
-            output = model(data)
-            loss = criterion(output, target)
-            loss = torch.clamp(loss, max=100)
-            if flooding_threshold is not None:
-                if flooding_type == 'lga':
-                    loss = torch.sign(loss - flooding_threshold) * loss
-                else:
-                    assert flooding_type == 'flooding', flooding_type
-                    loss = (loss - flooding_threshold).abs() + flooding_threshold
-            
-            if loss_max_indices is not None:
-                multipliers = torch.ones(loss.shape, dtype=torch.float32, device=loss.device)
-                for i, idx in enumerate(ex_idx):
-                    if idx in loss_max_indices:
-                        multipliers[i] = -1
-                loss = loss * multipliers
-
-        loss_values.append(loss.detach().clone())
+        output = model(data)
+        loss = criterion(output, target)
+        loss = torch.clamp(loss, max=100)
+        if flooding_threshold is not None:
+            loss = (loss - flooding_threshold).abs() + flooding_threshold
 
         assert loss.shape == (len(data),)
         loss = loss.mean()  # Reduction has been disabled -- do explicit reduction
-        if gradient_ascent:
-            loss = -loss
 
-        if use_autocast:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            if grad_clip is not None:
-                assert isinstance(grad_clip, float), grad_clip
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-
-        if log_predictions:
-            predictions.append(output.argmax(dim=1).detach())
-            example_idx.append(ex_idx.clone())
-            targets.append(target.clone())
+        loss.backward()
+        optimizer.step()
 
         if batch_idx % log_interval == 0:
-            pbar.set_description(f"Loss: {float(loss):.4f}")
-        torch.cuda.synchronize()
+            pbar.set_description(f"Loss: {float(loss.detach()):.4f}")
     pbar.close()
 
-    output_dict = {}
-    if log_predictions:
-        # Collect the statistics from all the GPUs
-        example_idx = torch.cat(dist_utils.gather_tensor(torch.cat(example_idx, dim=0)), dim=0).detach().cpu().numpy()
-        predictions = torch.cat(dist_utils.gather_tensor(torch.cat(predictions, dim=0)), dim=0).detach().cpu().numpy()
-        targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
-        loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
-        output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
 
-    return output_dict
-
-
-# In[ ]:
-
-
-def test(model, device, criterion, test_loader, distributed, rank, set_name="Test", log_predictions=False,
-         use_eval_mode=True, max_loss_val_bound=None):
-    if use_eval_mode:
-        model.eval()
-    else:
-        model.train()
+def test(model, device, criterion, test_loader, distributed, rank, set_name="Test", log_predictions=False):
+    """Evaluate in eval mode. With log_predictions, also returns per-example losses/predictions."""
+    model.eval()
 
     correct = torch.tensor([0]).to(device)
     test_loss = torch.tensor([0.0]).to(device)
@@ -231,8 +142,6 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
         predictions = torch.cat(dist_utils.gather_tensor(torch.cat(predictions, dim=0)), dim=0).detach().cpu().numpy()
         targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
-        if max_loss_val_bound is not None:
-            loss_values = np.clip(loss_values, 0, max_loss_val_bound)
         pred_output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
     return output_dict, pred_output_dict
 
@@ -240,15 +149,12 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
 # In[ ]:
 
 
-def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False, batch_size=None,
-                use_eval_mode=True, max_loss_val_bound=None):
+def test_tensor(model, device, criterion, data, target, msg=None, batch_size=None):
+    """Evaluate (eval mode) on an in-memory tensor dataset; returns a stats dict."""
     assert torch.is_tensor(data) and torch.is_tensor(target)
     if len(data) == 0:
-        return {}, {}
-    if use_eval_mode:
-        model.eval()
-    else:
-        model.train()
+        return {}
+    model.eval()
     data = data.to(device)
     target = target.to(device)
     with torch.no_grad():
@@ -264,22 +170,19 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
             total = 0
             correct = 0
             loss_vals_list = []
-            pred_list = []
-            
+
             num_batches = int(np.ceil(len(data) / float(batch_size)))
             for i in range(num_batches):
                 start, end = i * batch_size, (i+1) * batch_size
                 output = model(data[start:end])
                 loss_vals = criterion(output, target[start:end])
                 loss_vals_list.append(loss_vals.detach())
-                
+
                 pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-                pred_list.append(pred.detach())
                 correct += pred.eq(target[start:end].view_as(pred)).sum().item()
                 total += len(output)
-            
+
             loss_vals = torch.cat(loss_vals_list, dim=0)
-            pred = torch.cat(pred_list, dim=0)
             test_loss = float(loss_vals.mean())
 
     test_acc = 100. * correct / total
@@ -290,20 +193,10 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
     output_dict["loss_var"] = np.var(loss_vals)
     output_dict["loss_std"] = np.std(loss_vals)
 
-    pred_dict = None
-    if log_predictions:
-        pred_dict = {}
-        pred_dict["ex_idx"] = np.arange(len(loss_vals))
-        if max_loss_val_bound is not None:
-            loss_vals = np.clip(loss_vals, 0, max_loss_val_bound)
-        pred_dict["loss_vals"] = loss_vals
-        pred_dict["preds"] = pred.detach().cpu().numpy()
-        pred_dict["targets"] = target.detach().cpu().numpy()
-
     header = "Test set" if msg is None else msg
     print(f"{header} | Loss mean: {output_dict['loss_mean']:.4f} | Loss std: {output_dict['loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
 
-    return output_dict, pred_dict
+    return output_dict
 
 
 class FreqCNN(torch.nn.Module):

@@ -63,9 +63,7 @@ def config() -> argparse.ArgumentParser:
 
 
 def get_num_epochs(dataset):
-    if dataset == 'mnist':
-        return 25
-    elif dataset == 'cifar10':
+    if dataset == 'cifar10':
         return 100
     elif dataset == 'gtsrb':
         return 100

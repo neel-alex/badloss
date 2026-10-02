@@ -156,10 +156,8 @@ print(args.dataset, len(train_set), len(test_set))
 # ## Setup probes
 
 num_classes = len(train_set.classes)
-if args.dataset in ["mnist", "cifar10", "imagenette"]:
+if args.dataset in ["cifar10", "imagenette"]:
     assert num_classes == 10
-elif args.dataset == "cifar100":
-    assert num_classes == 100
 elif args.dataset == "gtsrb":
     assert num_classes == 43
 else:
@@ -211,8 +209,7 @@ augment_in_pretraining = False if args.defense == "badloss" else True
 
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
-    make_probe_dataset(probes, train_set, args.dataset, args.num_train_probes, args.defense,
-                       train_transform, attacks, experiment_output_dir)
+    make_probe_dataset(probes, train_set, args.dataset, args.defense, train_transform, attacks, experiment_output_dir)
 valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
 
 model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
@@ -255,7 +252,7 @@ def log_results_and_update_stats_and_preds(log_predictions, model, device, crite
     atks = attack_types + ["clean"] if defense == "badloss" else attack_types
     for attack_type in atks:
         suffix = '' if attack_type in {'clean', 'backdoor'} else ' (val)'
-        stats, _ = test_tensor(model, device, criterion, probes[attack_type], probes[f"{attack_type}_labels"],
+        stats = test_tensor(model, device, criterion, probes[attack_type], probes[f"{attack_type}_labels"],
                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
                                batch_size=tensor_batch_size)
         if log_wandb:
@@ -267,10 +264,9 @@ def test_unseen_probes(log_predictions, model, device, criterion, test_probes, a
     output_dict = {}
     all_attacks = [x for x in test_probes.keys() if not x.endswith("_labels")]
     for attack in all_attacks:
-        stats, _ = test_tensor(model, device, criterion, test_probes[attack],
-                               test_probes[f"{attack}_labels"],
-                               msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
-                               log_predictions=log_predictions, batch_size=tensor_batch_size)
+        stats = test_tensor(model, device, criterion, test_probes[attack], test_probes[f"{attack}_labels"],
+                            msg=f"{attack.capitalize().replace('_', ' ')} probe (test; unseen)",
+                            batch_size=tensor_batch_size)
         output_dict[attack] = {}
         output_dict[attack]['accuracy'] = stats['acc']
         output_dict[attack]['total'] = stats['total']
