@@ -13,7 +13,7 @@ from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 
-from defenses.feature_extractor import FeatureExtractor
+from defenses.feature_extractor import FeatureExtractor, classifier_layer
 from torch_utils import train
 
 
@@ -159,7 +159,7 @@ def run(exp):
         backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=exp.device))
 
     clean_model = exp.new_model()
-    feature_dim = clean_model.fc.in_features  # ResNet penultimate (avgpool) features
+    feature_dim = classifier_layer(clean_model).in_features
     discriminator = DisenEstimator(feature_dim, feature_dim, dropout=0.2)
     adv_optimizer = torch.optim.Adam(discriminator.parameters(), lr=args.cbd_adv_lr)
     adv_scheduler = torch.optim.lr_scheduler.StepLR(adv_optimizer, step_size=20, gamma=0.1)

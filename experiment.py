@@ -12,6 +12,7 @@ import dist_utils
 import utils
 from backdoors import make_probe_imgs, make_poison_imgs, make_poison_imgs_test, all_poison_indices
 from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, get_loader
+from defenses.feature_extractor import FeatureExtractor
 from detection_metrics import get_confusion_stats, get_auc
 from plot_utils import plot_probe_examples
 from torch_utils import get_model, get_optimizer, train, test, test_tensor
@@ -303,26 +304,18 @@ class Experiment:
         masking_op: optional transform applied to each batch first (used by Neural Cleanse).
         Returns tensors: activations (N x D), example indices, true classes, predicted classes.
         """
-        activations = {}
-
-        def hook(module, input, output):
-            activations['out'] = output.detach()
-
-        # NB: assumes the second-to-last child is the feature layer (true for the ResNets)
-        _, layer = list(model.named_children())[-2]
-        handle = layer.register_forward_hook(hook)
-
+        fe = FeatureExtractor(model)
         all_acts, example_indices, classes, class_preds = [], [], [], []
         for (data, target), ex_idx in tqdm(loader):
             data = data.to(self.device)
             if masking_op is not None:
                 data = masking_op(data)
-            output = model(data)
-            all_acts.append(activations['out'].squeeze())  # Remove size 1 dimensions
+            output, features = fe(data)
+            all_acts.append(features.detach())
             example_indices.append(ex_idx)
             classes.append(target)
             class_preds.append(torch.argmax(output, 1))
 
-        handle.remove()
+        fe.remove()
         return (torch.vstack(all_acts), torch.hstack(example_indices),
                 torch.hstack(classes), torch.hstack(class_preds))

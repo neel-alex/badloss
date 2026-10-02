@@ -12,7 +12,11 @@ def get_indices_for_eps(eps_thresh, num_classes, taus, cls_idx, indices):
     for cls in range(num_classes):
         tau = taus[cls]
         num_to_remove = int(len(tau) * eps_thresh * 1.5)
+        if num_to_remove == 0:  # (a [-0:] slice would select the whole class)
+            continue
         rejected_indices.append(cls_idx[cls][tau.argsort()[-num_to_remove:].cpu()])
+    if not rejected_indices:
+        return np.array([], dtype=int)
     rejected_indices = torch.hstack(rejected_indices).unique()
     return indices[rejected_indices.cpu()].numpy()
 
