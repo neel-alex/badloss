@@ -3,10 +3,7 @@
 Train briefly with loss flooding, then flag the examples with the lowest loss. As in the paper, the lowest 15%
 are removed and the model is retrained from scratch (ABL's unlearning step was unstable in testing).
 """
-import os
-
 import numpy as np
-import torch
 from tqdm import tqdm
 
 from torch_utils import train, test
@@ -23,18 +20,11 @@ def run(exp):
     model = exp.new_model()
 
     print("!! Performing initial pretraining with all examples (using loss flooding)...")
-    output_checkpoint_file = os.path.join(exp.output_dir, "model_pretrain.pth")
-    criterion = exp.criterion
-    if not os.path.exists(output_checkpoint_file):
-        criterion, optimizer, _ = exp.new_optimizer(model, args.abl_pretrain_epochs)
-        for epoch in tqdm(range(args.abl_pretrain_epochs)):
-            train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding)
-            if epoch % 5 == 4:
-                exp.evaluate(model, criterion)
-        torch.save(model.state_dict(), output_checkpoint_file)
-    else:
-        print("!! Loading pretrained checkpoint file:", output_checkpoint_file)
-        model.load_state_dict(torch.load(output_checkpoint_file, map_location=exp.device))
+    criterion, optimizer, _ = exp.new_optimizer(model, args.abl_pretrain_epochs)
+    for epoch in tqdm(range(args.abl_pretrain_epochs)):
+        train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding)
+        if epoch % 5 == 4:
+            exp.evaluate(model, criterion)
 
     # Per-example losses over the training set (NB: computed on the augmented loader)
     _, pred_output_dict = test(model, exp.device, criterion, exp.new_idx_loader, exp.distributed, exp.rank,
@@ -48,4 +38,4 @@ def run(exp):
 
     identified_indices = get_indices_from_losses(args.abl_remove_frac, num_train, loss_idx, ex_idx)
     exp.report_detection(identified_indices)
-    exp.retrain(identified_indices, checkpoint_tag=args.abl_remove_frac)
+    exp.retrain(identified_indices)

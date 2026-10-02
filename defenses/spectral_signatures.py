@@ -42,5 +42,5 @@ def run(exp):
 
     identified_indices = get_indices_for_eps(args.ss_eps, exp.num_classes, taus, cls_idx, indices)
     exp.report_detection(identified_indices)
-    exp.retrain(identified_indices, checkpoint_tag=args.ss_eps)
+    exp.retrain(identified_indices)
     print("Done with ss")

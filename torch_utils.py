@@ -103,14 +103,8 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
 
     if isinstance(test_loader.sampler, DistributedSamplerWrapper):
         num_dataset_ex = len(test_loader.sampler.sampler)
-    elif isinstance(test_loader.sampler, torch.utils.data.distributed.DistributedSampler):
-        num_dataset_ex = len(test_loader.sampler.dataset)
-
-    elif isinstance(test_loader.sampler, torch.utils.data.SubsetRandomSampler):
-        num_dataset_ex = len(test_loader.sampler)
     else:
-        # assert test_loader.sampler is None, test_loader.sampler
-        num_dataset_ex = len(test_loader.dataset)
+        num_dataset_ex = len(test_loader.sampler)
 
     if not distributed:
         assert total == num_dataset_ex, f"{total} != {num_dataset_ex}"

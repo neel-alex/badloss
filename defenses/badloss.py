@@ -5,7 +5,6 @@ distance to the nearest trajectories of the defender's bona fide clean probes, d
 and retrain from scratch.
 """
 import os
-import pickle
 from collections import Counter
 
 import numpy as np
@@ -18,18 +17,17 @@ from torch_utils import train, test, collect_losses
 
 def collect_trajectories(exp):
     """Train the attacked model for --badloss_pretrain_epochs, recording per-example loss and correct-class
-    probability on the (un-augmented) combined training set after every epoch."""
+    probability on the (un-augmented) combined training set after every epoch. Cached."""
     args = exp.args
     exp.init_attacked_model()
-    model_file = os.path.join(exp.model_dir, f"model_{args.dataset}.pth")
-    data_file = os.path.join(exp.model_collection_dir, f"stats_{args.dataset}.pkl")
-
-    if os.path.exists(model_file):
-        assert os.path.exists(data_file)
-        print("Data files already found. Loading data from saved checkpoints.")
-        exp.model.load_state_dict(torch.load(model_file, map_location=exp.device))
-        with open(data_file, "rb") as f:
-            return pickle.load(f)
+    cache_dir = exp.cache_dir("badloss_trajectories", probes_in_training_set=True,
+                              pretrain_epochs=args.badloss_pretrain_epochs,
+                              pretrain_augment=args.badloss_pretrain_augment)
+    cached = exp.load_cached(cache_dir, "model", "stats")
+    if cached is not None:
+        exp.model.load_state_dict(cached[0])
+        exp.reset_rngs()
+        return cached[1]
 
     num_examples = len(exp.new_idx_loader.dataset)
     losses = torch.zeros((num_examples, args.badloss_pretrain_epochs))
@@ -46,10 +44,11 @@ def collect_trajectories(exp):
 
     exp.evaluate_asr(exp.model, exp.criterion)
     stats = {'losses': losses, 'probs': correct_class_probs, 'probe_id': exp.dataset_probe_identity}
+    exp.save_cached(cache_dir, model=exp.model.state_dict(), stats=stats)
+    # Also kept with the run's outputs (for analysis)
     if exp.main_proc:
-        torch.save(exp.model.state_dict(), model_file)
-        with open(data_file, "wb") as f:
-            pickle.dump(stats, f, protocol=pickle.HIGHEST_PROTOCOL)
+        torch.save(stats, os.path.join(exp.output_dir, "trajectories.pt"))
+    exp.reset_rngs()
     return stats
 
 
@@ -132,20 +131,10 @@ def run(exp):
     retrain_loader = exp.loader(clean_indices)
     clean_model = exp.new_model()
     criterion, optimizer, lr_scheduler = exp.new_optimizer(clean_model, args.badloss_retrain_epochs)
-    output_checkpoint_dir = os.path.join(exp.output_dir, "model_ft")
-    os.makedirs(output_checkpoint_dir, exist_ok=True)
-    output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_cleaned_thresh_{threshold:.2f}.pth")
-    print("Selected output checkpoint:", output_checkpoint)
-    if not os.path.exists(output_checkpoint):
-        print("!! Output checkpoint not found. Training model from scratch...")
-        for _ in range(args.badloss_retrain_epochs):
-            train(clean_model, exp.device, retrain_loader, optimizer, criterion)
-            lr_scheduler.step()
-        torch.save(clean_model.state_dict(), output_checkpoint)
-        print("!! Final checkpoint written to file:", output_checkpoint)
-    else:
-        print("!! Loading model from pretrained checkpoint:", output_checkpoint)
-        clean_model.load_state_dict(torch.load(output_checkpoint, map_location=exp.device))
+    for _ in range(args.badloss_retrain_epochs):
+        train(clean_model, exp.device, retrain_loader, optimizer, criterion)
+        lr_scheduler.step()
+    exp.save_model(clean_model, "retrained_model.pth")
 
     asr = exp.evaluate_asr(clean_model, criterion)
     test_stats, _ = test(clean_model, exp.device, criterion, exp.test_idx_loader, exp.distributed, exp.rank)

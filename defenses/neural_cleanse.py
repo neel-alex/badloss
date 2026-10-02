@@ -131,5 +131,5 @@ def run(exp):
     identified_indices = get_indices_for_thresh(fpr_thresh, clean_probe_indices, attacked_classes,
                                                 poison_acts_by_class, indices_to_check, clean_indices)
     exp.report_detection(identified_indices)
-    exp.retrain(identified_indices, checkpoint_tag=fpr_thresh)
+    exp.retrain(identified_indices)
     print("Done with nc")

@@ -137,20 +137,21 @@ def seed_worker(worker_id: int) -> None:
     random.seed(worker_seed)
 
 
-def get_loader(dataset, distributed, num_workers, seed: int, indices=None, batch_size=16, shuffle=False):
-    # Each loader owns its RNG, so data order doesn't depend on unrelated global RNG draws.
+def get_loader(dataset, distributed, num_workers, seed: int, indices=None, batch_size=16, shuffle=True):
+    """Loader over the given indices (default: all), in random order if shuffle, else in the given order.
+
+    Each loader owns its RNG, so data order doesn't depend on unrelated global RNG draws.
+    """
     generator = torch.Generator().manual_seed(seed)
-    sampler = None
-    if indices is not None:
+    if indices is None:
+        indices = range(len(dataset))
+    if shuffle:
         sampler = torch.utils.data.SubsetRandomSampler(indices, generator=generator)
+    else:
+        sampler = list(indices)
     if distributed:
-        if sampler is not None:
-            print("Using distributed sampler on top of previous sampler...")
-            sampler = DistributedSamplerWrapper(sampler)
-        else:
-            sampler = torch.utils.data.distributed.DistributedSampler(dataset, seed=seed)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                                         sampler=sampler, num_workers=num_workers, prefetch_factor=4,
+        sampler = DistributedSamplerWrapper(sampler, shuffle=shuffle)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, prefetch_factor=4,
                                          pin_memory=True, worker_init_fn=seed_worker, generator=generator)
     return loader
 
@@ -228,9 +229,11 @@ def make_index_dataset(comb_train_set, comb_train_indices, test_set,
 
     new_idx_loader = get_loader(idx_dataset, distributed, num_workers, seed,
                                 indices=comb_train_indices, batch_size=batch_size)
+    # Evaluation loaders iterate in a fixed order, so their results never depend on how often they were used
     new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers, seed,
-                                       indices=comb_train_indices, batch_size=batch_size)
-    test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, seed, batch_size=batch_size)
+                                       indices=comb_train_indices, batch_size=batch_size, shuffle=False)
+    test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, seed, batch_size=batch_size,
+                                 shuffle=False)
 
     return new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
 

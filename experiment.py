@@ -1,4 +1,6 @@
 """Shared experiment state and steps: data, probes and poisons, loaders, (re)training and evaluation."""
+import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -26,6 +28,23 @@ def _git_sha():
         return None
 
 
+def _code_hash():
+    """Hash of all source files, so cached artifacts are never reused across code changes."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    files = sorted(glob.glob(os.path.join(root, "*.py")) + glob.glob(os.path.join(root, "defenses", "*.py")))
+    h = hashlib.sha256()
+    for f in files:
+        h.update(os.path.relpath(f, root).encode())
+        with open(f, "rb") as fh:
+            h.update(fh.read())
+    return h.hexdigest()
+
+
+# Arguments that cannot affect the poisoned training set or the attacked model
+_DEFENSE_ARG_PREFIXES = ('badloss_', 'nc_', 'ac_', 'ss_', 'freq_', 'abl_', 'cd_', 'cbd_', 'pss_')
+_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'no_cache'}
+
+
 def _jsonable(x):
     if torch.is_tensor(x):
         return x.tolist()
@@ -48,11 +67,10 @@ class Experiment:
         print("Seed:", self.seed)
         utils.seed_all(self.seed)
 
-        project_id = "exp68"
-        ratio_tag = '_' + str(args.poisoning_ratio)
-        self.output_dir = f"./backdoor_{project_id}_{args.dataset}_{args.defense}_{args.attack}{ratio_tag}"
-        self.model_collection_dir = (f"./backdoor_{project_id}_model_{args.dataset}_{args.attack}"
-                                     f"{'_' + args.defense if args.defense == 'badloss' else ''}{ratio_tag}")
+        ratio_tag = ''.join(f"_{r}" for r in args.poisoning_ratio)
+        self.output_dir = os.path.join(args.output_root,
+                                       f"{args.dataset}_{args.attack}_{args.defense}_s{args.seed}{ratio_tag}")
+        self.code_hash = _code_hash()
 
         self.log_wandb = False
         if args.wandb and dist_utils.is_main_proc():
@@ -65,11 +83,10 @@ class Experiment:
 
         self._init_distributed()
         if self.main_proc:
-            os.makedirs(self.model_collection_dir, exist_ok=True)
             os.makedirs(self.output_dir, exist_ok=True)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Current device:", self.device)
-        self.results = {"args": vars(args), "git_sha": _git_sha()}
+        self.results = {"args": dict(vars(args)), "git_sha": _git_sha(), "code_hash": self.code_hash}
 
         self._setup_data()
 
@@ -151,9 +168,6 @@ class Experiment:
             for image_set in self.poison_imgs_test.values():
                 image_set.to(device)
 
-        self.model_dir = os.path.join(self.model_collection_dir, f"models_{args.dataset}")
-        if self.main_proc:
-            os.makedirs(self.model_dir, exist_ok=True)
 
     # --- Building blocks ---
 
@@ -166,6 +180,43 @@ class Experiment:
 
     def new_optimizer(self, model, num_epochs):
         return get_optimizer(model, self.device, self.args.lr, self.args.weight_decay, num_epochs)
+
+    def cache_dir(self, kind, **extra):
+        """Directory for a cached artifact (or None if caching is disabled), keyed by the source code, the
+        arguments that can affect it and `extra`. Artifacts are reused only if all of these match."""
+        if self.args.no_cache:
+            return None
+        key_args = {k: v for k, v in vars(self.args).items()
+                    if k not in _NON_SEMANTIC_ARGS and not k.startswith(_DEFENSE_ARG_PREFIXES)}
+        key = json.dumps({"kind": kind, "code": self.code_hash, "args": key_args, "extra": extra},
+                         sort_keys=True, default=str)
+        return os.path.join(self.args.output_root, "cache", f"{kind}_{hashlib.sha256(key.encode()).hexdigest()[:16]}")
+
+    def save_cached(self, cache_dir, **items):
+        """Atomically write torch-serializable items into cache_dir (with the key's description)."""
+        if cache_dir is None or not self.main_proc:
+            return
+        os.makedirs(cache_dir, exist_ok=True)
+        for name, value in items.items():
+            tmp = os.path.join(cache_dir, f".{name}.tmp{os.getpid()}")
+            torch.save(value, tmp)
+            os.replace(tmp, os.path.join(cache_dir, f"{name}.pt"))
+        with open(os.path.join(cache_dir, "args.json"), "w") as f:
+            json.dump(self.results["args"], f, indent=2, default=str)
+
+    def load_cached(self, cache_dir, *names):
+        """The cached items, or None if any is missing (or caching is disabled)."""
+        if cache_dir is None or not all(os.path.exists(os.path.join(cache_dir, f"{n}.pt")) for n in names):
+            return None
+        print(f"Loading cached {', '.join(names)} from {cache_dir}")
+        return [torch.load(os.path.join(cache_dir, f"{n}.pt"), map_location=self.device, weights_only=False)
+                for n in names]
+
+    def reset_rngs(self):
+        """Reseed the global RNGs and the training loader after a cacheable phase, so whatever follows is the same
+        whether that phase was computed or loaded from the cache."""
+        utils.seed_all(self.seed + 1)
+        self.new_idx_loader = self.loader(self.comb_train_indices)
 
     def loader(self, indices, dataset=None):
         """Shuffled loader over the given indices of the combined training set (with training augmentation)."""
@@ -240,6 +291,10 @@ class Experiment:
                                        per_class_out=per_class_det)
         self.record_detection(fpr=fpr, tpr=tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
 
+    def save_model(self, model, name):
+        if self.main_proc:
+            torch.save(model.state_dict(), os.path.join(self.output_dir, name))
+
     def finish(self):
         if self.log_wandb:
             import wandb
@@ -248,11 +303,14 @@ class Experiment:
     # --- Training ---
 
     def pretrain(self):
-        """Train the attacked model on the poisoned training set (the model inspected by most defenses)."""
-        args = self.args
+        """Train the attacked model on the poisoned training set (the model inspected by most defenses).
+        Cached across defenses."""
         self.init_attacked_model()
-        model_file = os.path.join(self.model_dir, f"model_{args.dataset}_dynamics.pth")
-        if not os.path.exists(model_file):
+        cache_dir = self.cache_dir("attacked_model")
+        cached = self.load_cached(cache_dir, "model")
+        if cached is not None:
+            self.model.load_state_dict(cached[0])
+        else:
             for epoch in range(self.num_epochs):
                 train(self.model, self.device, self.new_idx_loader, self.optimizer, self.criterion)
                 if (epoch + 1) % 5 == 0:
@@ -260,13 +318,10 @@ class Experiment:
                     self.evaluate(self.model, self.criterion)
                     self.evaluate_asr(self.model, self.criterion)
                 self.lr_scheduler.step()
-            if self.main_proc:
-                torch.save(self.model.state_dict(), model_file)
-        else:
-            print("Data files already found. Loading data from saved checkpoints.")
-            self.model.load_state_dict(torch.load(model_file, map_location=self.device))
+            self.save_cached(cache_dir, model=self.model.state_dict())
+        self.reset_rngs()
 
-    def retrain(self, identified_indices, checkpoint_tag):
+    def retrain(self, identified_indices):
         """Train a fresh model on the combined training set minus the identified examples; report its metrics."""
         print(f"Retraining with {identified_indices.shape[0]} elements removed.")
         retrain_indices = [x for x in self.comb_train_indices if x not in identified_indices]
@@ -275,24 +330,13 @@ class Experiment:
         clean_model = self.new_model()
         clean_criterion, clean_optimizer, clean_lr_scheduler = self.new_optimizer(clean_model, self.num_epochs)
 
-        output_checkpoint_dir = os.path.join(self.output_dir, "model_ft")
-        if self.main_proc:
-            os.makedirs(output_checkpoint_dir, exist_ok=True)
-        output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_{checkpoint_tag:.1f}.pth")
-
-        print("Selected output checkpoint:", output_checkpoint)
-        if not os.path.exists(output_checkpoint):
-            print("!! Output checkpoint not found. Training model from scratch...")
-            for epoch in range(self.num_epochs):
-                train(clean_model, self.device, retrain_set_dl, clean_optimizer, clean_criterion)
-                if (epoch + 1) % 5 == 0:
-                    print(f"Stats for epoch {epoch + 1}")
-                    self.evaluate(clean_model, clean_criterion)
-                clean_lr_scheduler.step()
-            torch.save(clean_model.state_dict(), output_checkpoint)
-        else:
-            print("!! Loading model from pretrained checkpoint:", output_checkpoint)
-            clean_model.load_state_dict(torch.load(output_checkpoint, map_location=self.device))
+        for epoch in range(self.num_epochs):
+            train(clean_model, self.device, retrain_set_dl, clean_optimizer, clean_criterion)
+            if (epoch + 1) % 5 == 0:
+                print(f"Stats for epoch {epoch + 1}")
+                self.evaluate(clean_model, clean_criterion)
+            clean_lr_scheduler.step()
+        self.save_model(clean_model, "retrained_model.pth")
 
         print("Retrained model performance:")
         test_stats = self.evaluate(clean_model, clean_criterion, train_loader=retrain_set_dl)

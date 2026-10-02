@@ -21,6 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--seed', default=3, type=int)
     parser.add_argument('--wandb', action='store_true', help="Log to Weights & Biases (off by default)")
     parser.add_argument('--data_dir', default='./data', type=str)
+    parser.add_argument('--output_root', default='./outputs', type=str,
+                        help="Run outputs go to <output_root>/<dataset>_<attack>_<defense>_s<seed>/; cached attacked "
+                             "models and BaDLoss trajectories (keyed by code + settings) to <output_root>/cache/")
+    parser.add_argument('--no_cache', action='store_true', help="Never read or write cached artifacts")
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--num_epochs', default=None, type=int,
                         help="Epochs for (re)training models; default depends on the dataset")

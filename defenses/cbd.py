@@ -6,8 +6,6 @@ minimization), with examples reweighted towards those the backdoored model finds
 
 The discriminator code is from https://github.com/zaixizhang/CBD/blob/main/utils/util.py.
 """
-import os
-
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -145,18 +143,11 @@ def run(exp):
     backdoor_model = exp.new_model()
 
     print("!! Performing CBD initial pretraining...")
-    output_checkpoint_file = os.path.join(exp.output_dir, "cbd_model_pretrain.pth")
-    criterion = exp.criterion
-    if not os.path.exists(output_checkpoint_file):
-        criterion, optimizer, _ = exp.new_optimizer(backdoor_model, args.cbd_pretrain_epochs)
-        for epoch in tqdm(range(args.cbd_pretrain_epochs)):
-            train(backdoor_model, exp.device, exp.new_idx_loader, optimizer, criterion)
-            if epoch % 5 == 4:
-                exp.evaluate(backdoor_model, criterion)
-        torch.save(backdoor_model.state_dict(), output_checkpoint_file)
-    else:
-        print("!! Loading pretrained checkpoint file:", output_checkpoint_file)
-        backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=exp.device))
+    criterion, optimizer, _ = exp.new_optimizer(backdoor_model, args.cbd_pretrain_epochs)
+    for epoch in tqdm(range(args.cbd_pretrain_epochs)):
+        train(backdoor_model, exp.device, exp.new_idx_loader, optimizer, criterion)
+        if epoch % 5 == 4:
+            exp.evaluate(backdoor_model, criterion)
 
     clean_model = exp.new_model()
     feature_dim = classifier_layer(clean_model).in_features
@@ -166,24 +157,19 @@ def run(exp):
     optimizer = torch.optim.SGD(clean_model.parameters(), lr=args.cbd_lr, momentum=0.9, weight_decay=1e-4,
                                 nesterov=True)
 
-    output_checkpoint_file = os.path.join(exp.output_dir, "cbd_model.pth")
-    if not os.path.exists(output_checkpoint_file):
-        criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 70], gamma=0.1)
-        for epoch in range(exp.num_epochs):
-            train_cbd(clean_model, backdoor_model, discriminator, exp.device, exp.new_idx_loader, optimizer,
-                      adv_optimizer, criterion, args.cbd_ce_gamma)
-            if epoch % 5 == 4:
-                print(f"Evaluation at epoch {epoch+1}")
-                exp.evaluate(clean_model, criterion)
-            if epoch % 50 == 49:
-                exp.evaluate_asr(clean_model, criterion)
-            scheduler.step()
-            adv_scheduler.step()
-        torch.save(clean_model.state_dict(), output_checkpoint_file)
-    else:
-        print("!! Loading pretrained checkpoint file:", output_checkpoint_file)
-        clean_model.load_state_dict(torch.load(output_checkpoint_file, map_location=exp.device))
+    criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 70], gamma=0.1)
+    for epoch in range(exp.num_epochs):
+        train_cbd(clean_model, backdoor_model, discriminator, exp.device, exp.new_idx_loader, optimizer,
+                  adv_optimizer, criterion, args.cbd_ce_gamma)
+        if epoch % 5 == 4:
+            print(f"Evaluation at epoch {epoch+1}")
+            exp.evaluate(clean_model, criterion)
+        if epoch % 50 == 49:
+            exp.evaluate_asr(clean_model, criterion)
+        scheduler.step()
+        adv_scheduler.step()
+    exp.save_model(clean_model, "retrained_model.pth")
 
     print("Retrained model performance:")
     test_stats = exp.evaluate(clean_model, criterion)

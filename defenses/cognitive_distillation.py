@@ -91,4 +91,4 @@ def run(exp):
 
     identified_indices = mask_norms.argsort()[:int(args.cd_remove_frac * len(mask_norms))]
     exp.report_detection(identified_indices)
-    exp.retrain(identified_indices, checkpoint_tag=args.cd_remove_frac)
+    exp.retrain(identified_indices)

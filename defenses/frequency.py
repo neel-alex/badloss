@@ -126,4 +126,4 @@ def run(exp):
 
     identified_indices = get_indices_for_thresh_from_loader(exp, args.freq_threshold, freq_model)
     exp.report_detection(identified_indices)
-    exp.retrain(identified_indices, checkpoint_tag=args.freq_threshold)
+    exp.retrain(identified_indices)

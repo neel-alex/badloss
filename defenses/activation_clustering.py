@@ -66,5 +66,4 @@ def run(exp):
     identified_indices = get_indices_for_class_clusters(detected_classes(args.ac_threshold), clusterings,
                                                         activation_by_predicted_class)
     exp.report_detection(identified_indices)
-    # (Checkpoint tag kept as before: the last AUC threshold)
-    exp.retrain(identified_indices, checkpoint_tag=auc_threshes[-1])
+    exp.retrain(identified_indices)

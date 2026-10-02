@@ -5,8 +5,6 @@ then measure each example's feature consistency under random rotation/translatio
 treated as clean, high-consistency ones as poisoned; the attacked model is then alternately unlearned on the
 poisoned and relearned on the clean split.
 """
-import os
-
 import torch
 from torchvision import transforms
 from tqdm import tqdm
@@ -96,34 +94,21 @@ def run(exp):
     optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=args.pss_lr, momentum=0.9, weight_decay=5e-4)
 
     print("!! Performing PSS initial pretraining...")
-    output_checkpoint_file = os.path.join(exp.output_dir, "pss_model_pretrain.pth")
-    criterion = exp.criterion
-    if not os.path.exists(output_checkpoint_file):
-        criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
-        for epoch in tqdm(range(args.pss_pretrain_epochs)):
-            train(backdoor_model, exp.device, exp.new_idx_loader_wo_aug, optimizer, criterion)
-            if epoch % 2 == 1:
-                exp.evaluate(backdoor_model, criterion)
-        torch.save(backdoor_model.state_dict(), output_checkpoint_file)
-    else:
-        print("!! Loading pretrained checkpoint file:", output_checkpoint_file)
-        backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=exp.device))
+    criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
+    for epoch in tqdm(range(args.pss_pretrain_epochs)):
+        train(backdoor_model, exp.device, exp.new_idx_loader_wo_aug, optimizer, criterion)
+        if epoch % 2 == 1:
+            exp.evaluate(backdoor_model, criterion)
 
     # Step 2: intra-class finetuning without augmentation
     optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=args.pss_lr, momentum=0.9, weight_decay=5e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
-    output_checkpoint_file = os.path.join(exp.output_dir, "pss_model_intraclass.pth")
     print("!! Performing intraclass training...")
-    if not os.path.exists(output_checkpoint_file):
-        for epoch in tqdm(range(args.pss_intraclass_epochs)):
-            train_intraclass(backdoor_model, exp.device, exp.new_idx_loader_wo_aug, optimizer, exp.num_classes)
-            scheduler.step()
-            if epoch % 5 == 4:
-                exp.evaluate(backdoor_model, criterion)
-        torch.save(backdoor_model.state_dict(), output_checkpoint_file)
-    else:
-        print("!! Loading intraclass trained checkpoint file:", output_checkpoint_file)
-        backdoor_model.load_state_dict(torch.load(output_checkpoint_file, map_location=exp.device))
+    for epoch in tqdm(range(args.pss_intraclass_epochs)):
+        train_intraclass(backdoor_model, exp.device, exp.new_idx_loader_wo_aug, optimizer, exp.num_classes)
+        scheduler.step()
+        if epoch % 5 == 4:
+            exp.evaluate(backdoor_model, criterion)
 
     # Step 3: split the training set by feature consistency
     print("!! Calculating FCT metric...")
@@ -139,16 +124,11 @@ def run(exp):
     optimizer = torch.optim.SGD(model.parameters(), lr=args.pss_unlearn_lr, momentum=0.9, weight_decay=5e-4)
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
     print("!! Performing PSS backdoor defense...")
-    output_checkpoint_file = os.path.join(exp.output_dir, "pss_model.pth")
-    if not os.path.exists(output_checkpoint_file):
-        for epoch in tqdm(range(args.pss_unlearn_epochs)):
-            pss_unlearn(model, exp.device, clean_dl, pois_dl, optimizer, criterion)
-            if epoch % 5 == 4:
-                exp.evaluate(model, criterion)
-        torch.save(model.state_dict(), output_checkpoint_file)
-    else:
-        print("!! Loading PSS-trained checkpoint file:", output_checkpoint_file)
-        model.load_state_dict(torch.load(output_checkpoint_file, map_location=exp.device))
+    for epoch in tqdm(range(args.pss_unlearn_epochs)):
+        pss_unlearn(model, exp.device, clean_dl, pois_dl, optimizer, criterion)
+        if epoch % 5 == 4:
+            exp.evaluate(model, criterion)
+    exp.save_model(model, "retrained_model.pth")
 
     print("Retrained model performance:")
     test_stats, _ = test(model, exp.device, criterion, exp.test_idx_loader, exp.distributed, exp.rank)
