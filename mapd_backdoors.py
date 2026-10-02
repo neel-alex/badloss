@@ -60,9 +60,9 @@ model_collection_dir = f"./backdoor_{project_id}_model_{args.dataset}_{args.atta
 num_workers = 8  # TODO: Warning that the number of workers requested isn't right?
 surface_examples = False
 
-# Initalize W&B -- assumes wandb is already logged in
+# Initalize W&B (opt-in) -- assumes wandb is already logged in
 log_wandb = False
-if dist_utils.is_main_proc():
+if args.wandb and dist_utils.is_main_proc():
     print("Initializing w&b")
     wandb_project = f"mapd_backdoors_{args.dataset}"
     wandb_run_name = f"attack_{args.attack}_defense_{args.defense}{'_poisoning_ratio' + str(args.poisoning_ratio) if args.poisoning_ratio is not None else ''}_run_{project_id}"
