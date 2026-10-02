@@ -24,7 +24,6 @@ def config() -> argparse.ArgumentParser:
     parser.add_argument('--seed', default=3, type=int)
     parser.add_argument('--wandb', action='store_true',
                         help="Log to Weights & Biases (off by default)")
-    parser.add_argument('--retrain', default=False, type=bool)
     parser.add_argument('--num_epochs', default=None, type=int)
     parser.add_argument('--batch_size', default=256, type=int)
     parser.add_argument('--arch', default='resnet50', type=str,

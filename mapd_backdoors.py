@@ -59,9 +59,7 @@ log_predictions = True
 project_id = "exp68"
 experiment_output_dir = f"./backdoor_{project_id}_{args.dataset}_{args.defense}_{args.attack}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not [] else ''}"
 model_collection_dir = f"./backdoor_{project_id}_model_{args.dataset}_{args.attack}{'_' + args.defense if args.defense in {'badloss'} else ''}{'_' + str(args.poisoning_ratio) if args.poisoning_ratio is not [] else ''}"
-# model_collection_dir = experiment_output_dir
-num_workers = 8  # TODO: Warning that the number of workers requested isn't right?
-surface_examples = False
+num_workers = 8
 
 # Initalize W&B (opt-in) -- assumes wandb is already logged in
 log_wandb = False
@@ -104,17 +102,9 @@ dist_utils.setup_for_distributed(main_proc)
 warnings.filterwarnings("ignore", "Warning: Leaking Caffe2 thread-pool after fork. (function pthreadpool)", UserWarning)
 
 
-recompute_results = False
 if main_proc:
-    if not os.path.exists(model_collection_dir):
-        os.makedirs(model_collection_dir)
-    if recompute_results:
-        if os.path.exists(experiment_output_dir):
-            shutil.rmtree(experiment_output_dir)
-        os.makedirs(experiment_output_dir)
-    else:
-        if not os.path.exists(experiment_output_dir):
-            os.makedirs(experiment_output_dir)
+    os.makedirs(model_collection_dir, exist_ok=True)
+    os.makedirs(experiment_output_dir, exist_ok=True)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -187,8 +177,6 @@ val_probes, attack_targets, random_pattern = make_val_probes(num_classes, args.d
                                                               poison_ratios, attacks, experiment_output_dir,
                                                               main_proc, img_size)
 
-include_val_probe_examples = False
-
 train_probe_attack = 'clean'
 train_probe, attack_target = make_train_probes(num_classes, args.dataset, train_set_wo_aug, args.num_train_probes,
                                                train_probe_attack, experiment_output_dir, main_proc, img_size,
@@ -219,17 +207,12 @@ tensor_batch_size = batch_size if args.dataset in {"gtsrb", "imagenette", "image
 lr = 0.1
 momentum = 0.9
 wd = 0.0001
-moving_avg_weight = None
 augment_in_pretraining = False if args.defense == "badloss" else True
-augment_in_retraining = True
-if augment_in_retraining == False:
-    raise NotImplementedError("Set augment = False in dataset_utils instead, good luck.")
 
 
 comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx = \
     make_probe_dataset(probes, train_set, args.dataset, args.num_train_probes, args.defense,
-                       train_transform, attacks, experiment_output_dir,
-                       device, include_val_probe_examples=include_val_probe_examples)
+                       train_transform, attacks, experiment_output_dir)
 valid_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
 
 model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
@@ -243,10 +226,7 @@ new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset = \
 # ...could load entire train set onto gpu (15GB tops in GTSRB), but that's a pain, code-wise.
 to_cuda = copy.deepcopy(attack_types)
 if args.defense == 'badloss':
-    if include_val_probe_examples:
-        to_cuda += ['backdoor_val', 'clean', 'clean_val']
-    else:
-        to_cuda += ['clean']
+    to_cuda += ['clean']
 
 for key in to_cuda:
     probes[key] = probes[key].to(device)
@@ -259,98 +239,28 @@ if args.dataset != "gtsrb" and args.dataset != "imagenette" and args.dataset != 
 
 model_dir = os.path.join(model_collection_dir, f"models_{args.dataset}")
 model_file = os.path.join(model_dir, f"model_{args.dataset}_dynamics.pth")
-data_file = os.path.join(model_collection_dir, f"stats_{args.dataset}_dynamics.pkl")
-data_statistics_file = os.path.join(model_collection_dir, f"stats_{args.dataset}_data_statistics.pkl")
-
-
-# In[ ]:
-
 
 if main_proc and not os.path.exists(model_dir):
     os.mkdir(model_dir)
 
-
-# In[ ]:
-
-
-ref_probe_classes = ["backdoor", "clean"]
-
-# In[ ]:
-
 def log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader, distributed,
                                            rank, new_idx_loader_wo_aug, attack_types, probes, val_probes, defense,
-                                           tensor_batch_size, epoch, statistics=None, predictions=None, use_eval_mode=True,
-                                           max_loss_val_bound=None):
-    test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
-                                  log_predictions=log_predictions)
-    ret_test_stats = test_stats
-    if statistics is not None:
-        statistics["test"].append(test_stats)
-        if log_wandb:
-            wandb.log({wandb_prefix+"test": test_stats})
+                                           tensor_batch_size, epoch):
+    """Evaluate on the test set, the (un-augmented) training set and each probe set; returns test stats."""
+    test_stats, _ = test(model, device, criterion, test_idx_loader, distributed, rank)
+    train_stats, _ = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank, set_name="Train")
+    if log_wandb:
+        wandb.log({wandb_prefix+"test": test_stats, wandb_prefix+"train": train_stats})
 
-    if log_predictions:
-        # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
-        train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, distributed, rank,
-                                        set_name="Train", log_predictions=log_predictions, use_eval_mode=use_eval_mode,
-                                        max_loss_val_bound=max_loss_val_bound)
-        if statistics is not None:
-            statistics["train"].append(train_stats)
-            if log_wandb:
-                wandb.log({wandb_prefix+"train": train_stats})
-
-        # Add predictions from all the different sets / probes
-        if predictions is not None:
-            predictions[epoch] = {}  # Dict of dict
-            predictions[epoch]["train"] = train_preds
-            predictions[epoch]["test"] = test_preds
-
-    # Collect probe statistics
-    if defense == "badloss":
-        atks = attack_types + ["clean"]
-    else:
-        atks = attack_types
-
+    atks = attack_types + ["clean"] if defense == "badloss" else attack_types
     for attack_type in atks:
-        if attack_type in {'clean', 'backdoor'}:
-            stats, preds = test_tensor(model, device, criterion, probes[attack_type],
-                                       probes[f"{attack_type}_labels"],
-                                       msg=f"{attack_type.capitalize().replace('_', ' ')} probe",
-                                       log_predictions=log_predictions, batch_size=tensor_batch_size,
-                                       use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
-            val_stats, val_preds = None, None
-            if attack_type+"_val" in probes:
-                val_stats, val_preds = test_tensor(model, device, criterion, probes[attack_type+"_val"],
-                                                probes[f"{attack_type}_val_labels"],
-                                                msg=f"{attack_type.capitalize().replace('_', ' ')} probe (val)",
-                                                log_predictions=log_predictions, batch_size=tensor_batch_size,
-                                                use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
-            if predictions is not None:
-                predictions[epoch][attack_type] = preds
-                if val_preds is not None:
-                    predictions[epoch][attack_type+"_val"] = val_preds
-            if statistics is not None:
-                statistics[attack_type].append(stats)
-                if log_wandb:
-                    wandb.log({wandb_prefix+attack_type: stats})
-                if val_stats is not None:
-                    statistics[attack_type+"_val"].append(val_stats)
-                    if log_wandb:
-                        wandb.log({wandb_prefix+attack_type+"_val": val_stats})
-        else:
-            suffix = ' (val)'
-            stats, preds = test_tensor(model, device, criterion, probes[attack_type],
-                                       probes[f"{attack_type}_labels"],
-                                       msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
-                                       log_predictions=log_predictions, batch_size=tensor_batch_size,
-                                       use_eval_mode=use_eval_mode, max_loss_val_bound=max_loss_val_bound)
-            if predictions is not None:
-                predictions[epoch][attack_type] = preds
-            if statistics is not None:
-                statistics[attack_type].append(stats)
-            if log_wandb:
-                wandb.log({wandb_prefix+attack_type: stats})
-    return ret_test_stats
+        suffix = '' if attack_type in {'clean', 'backdoor'} else ' (val)'
+        stats, _ = test_tensor(model, device, criterion, probes[attack_type], probes[f"{attack_type}_labels"],
+                               msg=f"{attack_type.capitalize().replace('_', ' ')} probe{suffix}",
+                               batch_size=tensor_batch_size)
+        if log_wandb:
+            wandb.log({wandb_prefix+attack_type: stats})
+    return test_stats
 
 
 def test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size):
@@ -383,11 +293,6 @@ if args.defense in {"nc", "ac", "ss", "cd", "pss"}:
                                                        val_probes, args.defense, tensor_batch_size, epoch)
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks,
                                    tensor_batch_size)
-                if main_proc:
-                    # Save the model
-                    model_file_base, model_file_ext = os.path.splitext(model_file)
-                    current_model_file = f"{model_file_base}_ep_{epoch}{model_file_ext}"
-                    # torch.save(model.state_dict(), current_model_file)
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -410,7 +315,6 @@ elif args.defense == "badloss":
         assert os.path.exists(data_file)
         print("Data files already found. Loading data from saved checkpoints.")
         model.load_state_dict(torch.load(model_file, map_location=device))
-        assert os.path.exists(data_file)
         with open(data_file, "rb") as f:
             stats = pickle.load(f)
 
@@ -418,16 +322,13 @@ elif args.defense == "badloss":
         losses = torch.zeros((len(new_idx_loader.dataset), args.badloss_pretrain_epochs))
         correct_class_probs = torch.zeros((len(new_idx_loader.dataset), args.badloss_pretrain_epochs))
 
-        collect_losses_in_training = False  # TODO: Implement
-        use_eval_mode = True  # eval mode BN
         loader = new_idx_loader if augment_in_pretraining else new_idx_loader_wo_aug
-        
+
         for epoch in range(args.badloss_pretrain_epochs):
-            output_dict = train(model, device, loader, optimizer, criterion, scaler) # TODO
-            if not collect_losses_in_training:
-                loss_array, probs_array = collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler)
-                losses[:, epoch] = loss_array
-                correct_class_probs[:, epoch] = probs_array
+            train(model, device, loader, optimizer, criterion, scaler)
+            loss_array, probs_array = collect_losses(model, device, new_idx_loader_wo_aug, criterion, scaler)
+            losses[:, epoch] = loss_array
+            correct_class_probs[:, epoch] = probs_array
 
             if epoch % 5 == 4:
                 test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks,
@@ -472,17 +373,9 @@ if args.defense == "badloss":
 
     print("Training the trajectory classifier...")
 
-    # Create the one-class classifier
     clean_trajectories = losses[clean_idx]
-    clean_labels = np.array([0 for _ in range(len(clean_trajectories))])
-    oc_clf_neighbors = len(clean_trajectories)  # TODO: Change to lower number?
-    oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
-    oc_clf.fit(clean_trajectories, clean_labels)
+    clean_labels = np.zeros(len(clean_trajectories), dtype=int)
 
-    # Evaluate AUCs
-    # TODO...
-
-    # TODO: Refactor this
     def train_model(clean_model, loader, optimizer, criterion, scaler, lr_scheduler, output_checkpoint):
         for _ in range(num_epochs):
             train(clean_model, device, loader, optimizer, criterion, scaler)
@@ -491,51 +384,36 @@ if args.defense == "badloss":
         torch.save(clean_model.state_dict(), output_checkpoint)
         print("!! Final checkpoint written to file:", output_checkpoint)
 
-    def add_clean_to_output_dict(output_dict, model, device, criterion, test_loader, distributed, rank,
-                                    log_predictions):
-        out, _ = test(model, device, criterion, test_loader, distributed, rank, log_predictions=log_predictions)
-        output_dict['clean'] = {}
-        output_dict['clean']['accuracy'] = out['acc']
-        output_dict['clean']['total'] = out['total']
-        output_dict['clean']['correct'] = out['correct']
-
-    # TODO: Move to config
-    take_weighted_average = True
-    use_one_class = True
     use_exp_weighting = True
     use_filtering = True
     oc_eps = 0.01
     n_neighbors = 50
-    take_weighted_average = False
+    threshold = 0.6
 
     print("!! Collecting clean training indices...")
-    missing_vals = (losses == 0).all(dim=1)  # Identify probe examples
+    missing_vals = (losses == 0).all(dim=1)  # Original positions of examples replaced by probe/poison copies
     missing_vals_idx = torch.nonzero(missing_vals).squeeze()
     available_ex = ~missing_vals
     num_missing_vals = sum(missing_vals)
     print(f"!! Total loss traj len: {len(losses)} / Modified examples identified: {num_missing_vals}")
-    
-    fit_data = oc_clf._fit_X
-    # TODO: Do this earlier?
-    print("using avail")
-    epoch_avg_loss = losses[available_ex].mean(axis=0)  # TODO: clean_idx or available_ex?
-    final_avgs = epoch_avg_loss[:3].tolist()
-    epochs_to_keep = [0, 1, 2]
-    for i in range(3, len(epoch_avg_loss)):
-        if epoch_avg_loss[i] < 2 * sum(final_avgs[-3:])/3: # If less than twice the average of the previous 3 VALID losses
-            epochs_to_keep.append(i)
-            final_avgs.append(epoch_avg_loss[i])
-
-    print(epochs_to_keep, final_avgs)
-    filtered_fit_data = fit_data[:, epochs_to_keep]
-    filtered_losses_np = losses[:, epochs_to_keep]
-    filtered_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf.n_neighbors)
-    filtered_clf.fit(filtered_fit_data, clean_labels)
 
     if use_filtering:
-        losses_np = filtered_losses_np
-        clf = filtered_clf
-    
+        # Drop epochs whose average loss spikes above twice the average of the previous 3 kept epochs
+        epoch_avg_loss = losses[available_ex].mean(axis=0)
+        final_avgs = epoch_avg_loss[:3].tolist()
+        epochs_to_keep = [0, 1, 2]
+        for i in range(3, len(epoch_avg_loss)):
+            if epoch_avg_loss[i] < 2 * sum(final_avgs[-3:])/3:
+                epochs_to_keep.append(i)
+                final_avgs.append(epoch_avg_loss[i])
+        print(epochs_to_keep, final_avgs)
+        clean_trajectories = clean_trajectories[:, epochs_to_keep]
+        losses_np = losses[:, epochs_to_keep]
+    else:
+        losses_np = losses
+    clf = sklearn.neighbors.KNeighborsClassifier(len(clean_trajectories))
+    clf.fit(clean_trajectories, clean_labels)
+
     dists = clf.kneighbors(losses_np[available_ex], n_neighbors=n_neighbors)[0]
     if use_exp_weighting:
         exp_weighted_dists = np.log(oc_eps + dists.mean(axis=1))
@@ -544,119 +422,54 @@ if args.defense == "badloss":
     else:
         probs = (dists - dists.min()) / (dists - dists.min()).max()  # Min 0, max 1 -- extremely naive.
 
-    avail_ex_probs = np.array([probs, 1-probs]).T
-    prob_values = np.linspace(0, 1, len(avail_ex_probs[:, 0]))
-    final_probs = np.zeros((len(avail_ex_probs[:, 0])))
-    final_probs[avail_ex_probs[:, 0].argsort()] = prob_values
-    avail_ex_probs = np.array([final_probs, 1-final_probs]).T
+    # Convert scores to ranks in [0, 1] (so the threshold is a rejection fraction)
+    final_probs = np.zeros(len(probs))
+    final_probs[probs.argsort()] = np.linspace(0, 1, len(probs))
 
-    x, y, _ = roc_curve(np.array([1 if 'val' in x else 0 for x in dataset_probe_identity])[available_ex], avail_ex_probs[:, 0])
+    x, y, _ = roc_curve(np.array([1 if 'val' in x else 0 for x in dataset_probe_identity])[available_ex], final_probs)
     print("AUC:", auc(x, y))
     record_detection(auc=auc(x, y))
-    # TODO: Get rid of second row?
-    all_ex_probs = np.zeros((len(losses_np), 2), dtype=avail_ex_probs.dtype)
-    all_ex_probs[available_ex] = avail_ex_probs
-    all_ex_probs[missing_vals] = 1.1  # Always marked as probes and removed
+    poison_scores = np.zeros(len(losses_np), dtype=final_probs.dtype)
+    poison_scores[available_ex] = final_probs
+    poison_scores[missing_vals] = 1.1  # Always removed
 
-    evaluate_classifier_on_training_probes = False
-    if not evaluate_classifier_on_training_probes:
-        print("!! Including training probe examples with their clean labels for retraining...")
-        all_probe_original_idx = train_probes_idx
-        train_probe_names = ["backdoor", "clean", "backdoor_val", "clean_val"]
-
-        selected_idx = [(i, x) for i, x in enumerate(dataset_probe_identity) if x in train_probe_names]
-        assert len(selected_idx) == len(all_probe_original_idx), f"{len(selected_idx)} == {len(all_probe_original_idx)}"
-        all_probe_new_idx = [x[0] for x in selected_idx]
-
-        # Include all probe idx -- remove their corrupted conunterparts as part of probe examples
-        all_ex_probs[all_probe_original_idx] = 0.  # Always marked as clean and included
-        all_ex_probs[all_probe_new_idx] = 1.1  # Always marked as probes and removed
-
-    assert all_ex_probs.shape == (len(losses_np), 2), all_ex_probs.shape
-    print("Output probs shape:", all_ex_probs.shape)
-    # In[ ]:
-    thresh_list = [0.6]  # if attack == "all" else [0.15, 0.3]  # [0.25] if dataset == "imagenet" else [0.1, 0.25, 0.5, 0.75, 0.9]
-    print("Threshold list:", thresh_list)
+    print("!! Including training probe examples with their clean labels for retraining...")
+    probe_new_idx = [i for i, x in enumerate(dataset_probe_identity) if x in {"backdoor", "clean"}]
+    assert len(probe_new_idx) == len(train_probes_idx), f"{len(probe_new_idx)} == {len(train_probes_idx)}"
+    # Retrain on the probes' original training-set positions; remove their probe-set copies
+    poison_scores[train_probes_idx] = 0.
+    poison_scores[probe_new_idx] = 1.1
 
     output_checkpoint_dir = os.path.join(experiment_output_dir, "model_ft")
-    if not os.path.exists(output_checkpoint_dir):
-        os.makedirs(output_checkpoint_dir)
-        print("!! Checkpoint output directory created:", output_checkpoint_dir)
+    os.makedirs(output_checkpoint_dir, exist_ok=True)
 
-    # train_types = ["original", "cleaned", "random"]
-    train_types = ["cleaned"]
-    # breakpoint()
-    for train_type in train_types:
-        print("=" * 100)
-        print(f"!! Using {train_type} training set....")
+    wandb_prefix = f"cleaned_thresh_{threshold}_"
+    clean_indices = np.where(poison_scores <= threshold)[0]
+    print(f"!! [Dataset cleansing] Total examples: {len(poison_scores)} / # clean indices: {len(clean_indices)}")
+    discarded_indices = [i for i in range(len(poison_scores)) if i not in clean_indices and i not in missing_vals_idx]
+    probe_identity_discarded_samples = [dataset_probe_identity[i] for i in discarded_indices]
+    print("!! Discarded example identities:", Counter(probe_identity_discarded_samples))
+    record_detection(num_removed=len(discarded_indices),
+                     removed_identities=dict(Counter(probe_identity_discarded_samples)))
+    new_train_set_dl = get_loader(idx_dataset, seed=seed, indices=clean_indices, distributed=distributed,
+                                  num_workers=num_workers, batch_size=batch_size)
 
-        current_thresh_list = [None] if train_type == "original" else thresh_list
-        for threshold in current_thresh_list:
-            wandb_prefix = f"{train_type}_thresh_{threshold}_"
-            if train_type == "original":
-                # Use the training set w/o attacks
-                assert threshold is None, threshold
-                new_train_set_dl = get_loader(IdxDataset(train_set_wo_aug), seed=seed, distributed=distributed,
-                                              num_workers=num_workers, batch_size=batch_size)
-                title = "Retraining on the original train set (w/o backdoors)"
-            else:
-                assert threshold is not None, threshold
-                is_clean = all_ex_probs[:, 0] <= threshold  # probability of an example being the backdoor is less than thresh
-                clean_indices = np.where(is_clean)[0]
+    clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
+    criterion, optimizer, lr_scheduler, scaler = get_optimizer(clean_model, device, lr, momentum, wd, num_epochs)
+    output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_cleaned_thresh_{threshold:.2f}.pth")
+    print("Selected output checkpoint:", output_checkpoint)
+    if not os.path.exists(output_checkpoint):  # Train the model
+        print("!! Output checkpoint not found. Training model from scratch...")
+        train_model(clean_model, new_train_set_dl, optimizer, criterion, scaler, lr_scheduler, output_checkpoint)
+    else:  # Load the model
+        print("!! Loading model from pretrained checkpoint:", output_checkpoint)
+        clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
 
-                if train_type == "cleaned":  # Remove examples marked as backdoors
-                    print(f"!! [Dataset cleansing] Total examples: {len(is_clean)} / # clean indices: {len(clean_indices)}")
-                    discarded_indices = [i for i in range(len(all_ex_probs)) if i not in clean_indices and
-                                         i not in missing_vals_idx]
-                    probe_identity_discarded_samples = [dataset_probe_identity[i] for i in discarded_indices]
-                    print("!! Discarded example identities:", Counter(probe_identity_discarded_samples))
-                    record_detection(num_removed=len(discarded_indices),
-                                     removed_identities=dict(Counter(probe_identity_discarded_samples)))
-                    
-                    new_train_set_dl = get_loader(idx_dataset, seed=seed, indices=clean_indices, distributed=distributed,
-                                                  num_workers=num_workers, batch_size=batch_size)
-                    selected_indices = clean_indices
-                else:
-                    assert train_type == "random", train_type
-                    selected_indices = np.random.choice(np.arange(len(idx_dataset)), size=(len(clean_indices),),
-                                                        replace=False)
-
-                num_avail_ex = len(is_clean) - num_missing_vals
-                title = f"{'Random' if train_type == 'random' else 'Clean'} idx retraining (thresh={threshold:.1f}) [Total={len(is_clean)} / Selected: {len(selected_indices)}]"
-                print(
-                    f"!! Train type: {train_type} / Threshold: {threshold} / Total examples: {num_avail_ex} / # selected indices: {len(selected_indices)}")
-                new_train_set_dl = get_loader(idx_dataset, seed=seed, indices=selected_indices, distributed=distributed,
-                                              num_workers=num_workers, batch_size=batch_size)
-
-            clean_model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
-
-            criterion, optimizer, lr_scheduler, scaler = get_optimizer(clean_model, device, lr, momentum, wd,
-                                                                       num_epochs)
-            postfix = ""
-            if threshold is not None:
-                postfix = f"_thresh_{threshold:.2f}"
-            output_checkpoint = os.path.join(output_checkpoint_dir, f"model_ft_{train_type}{postfix}.pth")
-            print("Selected output checkpoint:", output_checkpoint)
-            if not os.path.exists(output_checkpoint):  # Train the model
-                print("!! Output checkpoint not found. Training model from scratch...")
-                train_model(clean_model, new_train_set_dl, optimizer, criterion, scaler, lr_scheduler,
-                            output_checkpoint)
-            else:  # Load the model
-                print("!! Loading model from pretrained checkpoint:", output_checkpoint)
-                clean_model.load_state_dict(torch.load(output_checkpoint, map_location=device))
-
-            # Evaluate the attack success rate for the model trained on clean data
-            output_dict = test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes,
-                                             attacks, tensor_batch_size)
-
-            add_clean_to_output_dict(output_dict, clean_model, device, criterion, test_idx_loader, distributed, rank,
-                                     log_predictions)
-            results["retrained"] = {"clean_acc": output_dict["clean"]["accuracy"],
-                                    "asr": {k: v["accuracy"] for k, v in output_dict.items() if k != "clean"}}
-            save_results()
-            output_file = os.path.join(experiment_output_dir, f"attack_success_{train_type}{postfix}.png")
-            print("~" * 100)
-        print("=" * 100)
+    # Evaluate the attack success rate for the model trained on clean data
+    retrained_asr = test_unseen_probes(log_predictions, clean_model, device, criterion, test_probes, attacks,
+                                       tensor_batch_size)
+    retrained_test_stats, _ = test(clean_model, device, criterion, test_idx_loader, distributed, rank)
+    record_model_metrics("retrained", retrained_test_stats, retrained_asr)
 
 
 def get_last_layer_activations(model, loader, masking_op=None):
@@ -1139,51 +952,28 @@ if args.defense == "freq":
     }
 
     def apply_random_transform(probe):
-        attack = np.random.randint(0, 5)
+        # Synthetic backdoor-like corruption: a white or random-noise patch near a random corner.
+        # (The original detector also used noise, shadow and blending corruptions; restricted to patches here.)
+        np.random.randint(0, 5)  # Vestigial draw, kept so the RNG stream is unchanged
         patch_x = np.random.randint(2, 8)
         patch_y = np.random.randint(2, 8)
         loc = np.random.randint(0, 6)
         corner = np.random.randint(0, 4)
 
         attack = np.random.randint(0, 2)
+        if attack == 0:
+            block = np.ones((3, patch_x, patch_y))
+        else:
+            block = np.random.rand(3, patch_x, patch_y)
 
-        if attack < 2:
-            if attack == 0:
-                block = np.ones((3, patch_x, patch_y))
-            elif attack == 1:
-                block = np.random.rand(3, patch_x, patch_y)
-
-            if corner == 0:
-                probe[:, loc:loc+patch_x, loc:loc+patch_y] = block
-            elif corner == 1:
-                probe[:, loc:loc+patch_x, -(loc+patch_y):-loc or None] = block
-            elif corner == 2:
-                probe[:, -(loc+patch_x):-loc or None, loc:loc+patch_y] = block
-            elif corner == 3:
-                probe[:, -(loc+patch_x):-loc or None, -(loc+patch_y):-loc or None] = block
-
-        elif attack == 2:
-            mean = 25
-            var = np.random.uniform(10, 70)
-            noise = np.random.randn(*probe.shape) * var + mean
-            probe += noise / 255
-        elif attack == 3:
-            # very simplified version, thanks claude -- TODO?
-            h, w = probe.shape[1:]
-            top_y = np.random.randint(0, h)
-            bottom_y = np.random.randint(top_y + 1, h + 1)
-            left_x = np.random.randint(0, w)
-            right_x = np.random.randint(left_x + 1, w + 1)
-
-            shadow_mask = np.ones(probe.shape)
-            shadow_mask[top_y:bottom_y, left_x:right_x] = 0.5  # 50% darkness
-
-            # Apply shadow
-            probe = probe * shadow_mask
-        elif attack == 4:
-            randind = np.random.randint(freq_probes['clean'].shape[0])
-            blend_im = freq_probes['clean'][randind]
-            probe = probe + 0.3 * blend_im
+        if corner == 0:
+            probe[:, loc:loc+patch_x, loc:loc+patch_y] = block
+        elif corner == 1:
+            probe[:, loc:loc+patch_x, -(loc+patch_y):-loc or None] = block
+        elif corner == 2:
+            probe[:, -(loc+patch_x):-loc or None, loc:loc+patch_y] = block
+        elif corner == 3:
+            probe[:, -(loc+patch_x):-loc or None, -(loc+patch_y):-loc or None] = block
 
         return np.clip(probe, 0, 1)
 
@@ -1297,11 +1087,8 @@ if args.defense == "abl":
 
     model = get_model(args.dataset, num_classes, device, local_rank, verbose=False, arch=args.arch)
 
-    finetune_and_unlearn = False  # If this is true, then normal ABL is done.
-    if finetune_and_unlearn:
-        selection_threshold = 0.01  # 1% of the total examples, even though the poisoning ratio is 10%
-    else:
-        selection_threshold = 0.15  # Comparable to spectral signatures...
+    # The paper removes the lowest-loss 15% and retrains, rather than ABL's 1% + unlearning (unstable in testing)
+    selection_threshold = 0.15
 
     # Step # 01: Regular pretraining
     print("!! Performing initial pretraining with all examples (using loss flooding)...")
@@ -1340,90 +1127,14 @@ if args.defense == "abl":
     # Retrain model using default threshold
     indices_to_maximize = get_indices_from_losses(selection_threshold, train_set, loss_idx, ex_idx)
 
-    # Identify the maximum indices
-    total_ex = len(new_idx_loader.dataset)
-    missing_vals = [x for x in range(total_ex) if x not in ex_idx]
-    print(
-        f"Ex idx stats / # vals: {total_ex} / Total: {len(ex_idx)} / Unique vals: {len(np.unique(ex_idx))} / Missing vals: {len(missing_vals)} / max idx: {np.max(ex_idx)}")
-    print(f"Indices to maximize / Len: {len(indices_to_maximize)} / Indices: {indices_to_maximize}")
-
-    ground_truth_probes = [i for i in range(len(ex_idx), total_ex)]
-    backdoor_probe_idx = [i for i in ground_truth_probes if "clean" not in dataset_probe_identity[i]]
-
-    backdoor_probes_detected = [i for i in indices_to_maximize if i in backdoor_probe_idx]
-    print(f"Backdoor probe examples flagged: {len(backdoor_probes_detected)} / {backdoor_probes_detected}")
-    print(f"Ground truth probes: {len(ground_truth_probes)} / {ground_truth_probes}")
-
-    if not finetune_and_unlearn:
-        identified_indices = np.array(indices_to_maximize)
-        # Retrain with selected indices like normal
-        per_class_det = {}
-        det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
-                                               args.num_train_probes, per_class_out=per_class_det)
-        record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
-        retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
-                      num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
-                      selection_threshold, probes, log_predictions, test_probes, args.defense)
-
-    else:  # Finetune and unlearn
-        clean_finetuning_epochs = 60
-        unlearning_epochs = 5
-        use_gt_backdoors = True  # Note: this is important to set.
-
-        if use_gt_backdoors:
-            print(f"[WARNING] Using the ground-truth backdoors for anti-backdoor learning")
-            indices_to_maximize = backdoor_probe_idx[:int(len(train_set) * selection_threshold)]
-            print(f"Total probe idx: {len(ground_truth_probes)} / Backdoor idx: {len(backdoor_probe_idx)}")
-        remaining_indices = [i for i in range(total_ex) if i not in indices_to_maximize and i not in missing_vals]
-        print(
-            f"Selected indices / Clean indices: {len(remaining_indices)} / Backdoored indices: {len(indices_to_maximize)}")
-
-        # Step # 03: generate dataloaders based on the clean and backdoor indices
-        clean_dl = get_loader(new_idx_loader.dataset, seed=seed, distributed=distributed, indices=remaining_indices,
-                              num_workers=num_workers, batch_size=batch_size)
-        detected_backdoors_dl = get_loader(new_idx_loader.dataset, seed=seed, distributed=distributed, indices=indices_to_maximize,
-                                           num_workers=num_workers, batch_size=batch_size)
-
-        # Step # 04: finetune the model only on clean data
-        print("!! Starting finetuning phase on the clean examples...")
-        model_postfix = "_gt_backdoors" if use_gt_backdoors else ""
-        output_checkpoint_file = os.path.join(experiment_output_dir, f"model_clean_ft{model_postfix}.pth")
-        if not os.path.exists(output_checkpoint_file):
-            lr = 0.1
-            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd,
-                                                                       clean_finetuning_epochs)
-            for epoch in tqdm(range(clean_finetuning_epochs)):
-                output_dict = train(model, device, clean_dl, optimizer, criterion, scaler)
-                if epoch % 5 == 4:
-                    log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
-                                                           distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, args.defense, tensor_batch_size, epoch)
-            torch.save(model.state_dict(), output_checkpoint_file)
-        else:
-            print(f"!! Loading clean finetuned checkpoint file:", output_checkpoint_file)
-            model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
-
-        # Step # 05: perform unlearning step on the identified backdoored examples
-        print("!! Starting unlearning phase on the identified backdoor examples...")
-        output_checkpoint_file = os.path.join(experiment_output_dir, f"model_unlearned{model_postfix}.pth")
-        if not os.path.exists(output_checkpoint_file):
-            lr = 5e-4
-            criterion, optimizer, lr_scheduler, scaler = get_optimizer(model, device, lr, momentum, wd, unlearning_epochs)
-            for epoch in tqdm(range(unlearning_epochs)):
-                output_dict = train(model, device, detected_backdoors_dl, optimizer, criterion, scaler,
-                                    gradient_ascent=True)
-                if epoch % 5 == 4:
-                    log_results_and_update_stats_and_preds(log_predictions, model, device, criterion, test_idx_loader,
-                                                           distributed, rank, new_idx_loader_wo_aug, attack_types, probes,
-                                                           val_probes, args.defense, tensor_batch_size, epoch)
-            torch.save(model.state_dict(), output_checkpoint_file)
-        else:
-            print(f"!! Loading unlearned checkpoint file:", output_checkpoint_file)
-            model.load_state_dict(torch.load(output_checkpoint_file, map_location=device))
-
-        test_stats, test_preds = test(model, device, criterion, test_idx_loader, distributed, rank,
-                                      log_predictions=log_predictions)
-        test_unseen_probes(log_predictions, model, device, criterion, test_probes, attacks, tensor_batch_size)
+    identified_indices = np.array(indices_to_maximize)
+    per_class_det = {}
+    det_fpr, det_tpr = get_confusion_stats(identified_indices, valid_idx, dataset_probe_identity,
+                                           args.num_train_probes, per_class_out=per_class_det)
+    record_detection(fpr=det_fpr, tpr=det_tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
+    retrain_model(identified_indices, comb_train_indices, idx_dataset, distributed, num_workers, batch_size,
+                  num_classes, device, local_rank, lr, momentum, wd, num_epochs, experiment_output_dir,
+                  selection_threshold, probes, log_predictions, test_probes, args.defense)
 
 if args.defense == "cd":
     cd = CognitiveDistillation(num_steps=args.cd_num_steps)
