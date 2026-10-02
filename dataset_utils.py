@@ -8,11 +8,8 @@ import numpy as np
 import torch
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, GTSRB, ImageFolder, Imagenette
-try:
-    from catalyst.data import DistributedSamplerWrapper
-except ImportError:
-    print("catalyst not found for DistributedSamplerWrapper!")
 
+from dist_utils import DistributedSamplerWrapper
 from plot_utils import plot
 
 def load_class_mapping(dataset):

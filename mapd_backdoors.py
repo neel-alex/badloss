@@ -19,7 +19,7 @@ import sklearn.cluster
 import sklearn.decomposition
 import sklearn.metrics
 from sklearn.metrics import roc_curve, auc
-from scipy.fftpack import dct
+from scipy.fft import dct
 
 
 import config

@@ -2,12 +2,8 @@ import numpy as np
 import torch
 from torchvision import models
 from tqdm import tqdm
-try:
-    from catalyst.data import DistributedSamplerWrapper
-except ImportError:  # Only needed for distributed runs
-    DistributedSamplerWrapper = None
-
 import dist_utils
+from dist_utils import DistributedSamplerWrapper
 
 
 def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='resnet50'):
@@ -105,10 +101,11 @@ def test(model, device, criterion, test_loader, distributed, rank, set_name="Tes
     test_loss = float(dist_utils.reduce_tensor(test_loss.data))
     total = int(dist_utils.reduce_tensor(total.data))
 
-    if isinstance(test_loader.sampler, torch.utils.data.distributed.DistributedSampler):
+    if isinstance(test_loader.sampler, DistributedSamplerWrapper):
+        num_dataset_ex = len(test_loader.sampler.sampler)
+    elif isinstance(test_loader.sampler, torch.utils.data.distributed.DistributedSampler):
         num_dataset_ex = len(test_loader.sampler.dataset)
-    elif DistributedSamplerWrapper is not None and isinstance(test_loader.sampler, DistributedSamplerWrapper):
-        num_dataset_ex = len(test_loader.sampler.sampler.dataset)
+
     elif isinstance(test_loader.sampler, torch.utils.data.SubsetRandomSampler):
         num_dataset_ex = len(test_loader.sampler)
     else:

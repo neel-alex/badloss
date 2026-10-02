@@ -1,5 +1,6 @@
 import pickle
 from collections import OrderedDict
+from operator import itemgetter
 
 import torch
 
@@ -153,3 +154,26 @@ def convert_to_distributed(model, local_rank, sync_bn=False):
         dist_print("Wrapping the model into DDP!")
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
     return model
+
+
+class _DatasetFromSampler(torch.utils.data.Dataset):
+    def __init__(self, sampler):
+        self.sampler_list = list(sampler)
+
+    def __getitem__(self, index):
+        return self.sampler_list[index]
+
+    def __len__(self):
+        return len(self.sampler_list)
+
+
+class DistributedSamplerWrapper(torch.utils.data.distributed.DistributedSampler):
+    """Shards the indices produced by another sampler across processes (as catalyst's wrapper)."""
+    def __init__(self, sampler, num_replicas=None, rank=None, shuffle=True):
+        super().__init__(_DatasetFromSampler(sampler), num_replicas=num_replicas, rank=rank, shuffle=shuffle)
+        self.sampler = sampler
+
+    def __iter__(self):
+        self.dataset = _DatasetFromSampler(self.sampler)
+        indices_of_indices = list(super().__iter__())
+        return iter(itemgetter(*indices_of_indices)(self.dataset)) if indices_of_indices else iter([])
