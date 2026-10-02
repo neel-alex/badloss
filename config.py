@@ -24,7 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--num_epochs', default=None, type=int,
                         help="Epochs for (re)training models; default depends on the dataset")
-    parser.add_argument('--batch_size', default=256, type=int)
+    parser.add_argument('--batch_size', default=None, type=int,
+                        help="Training batch size; default 128 for cifar10 (as in the paper), else 256")
     parser.add_argument('--eval_batch_size', default=None, type=int,
                         help="Batch size for evaluating in-memory probe sets; default depends on the dataset")
     parser.add_argument('--lr', default=1e-3, type=float, help="AdamW learning rate")
@@ -110,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parses arguments and fills in dataset-dependent defaults, attack list and poisoning ratios."""
     args = build_parser().parse_args(argv)
+    if args.batch_size is None:
+        args.batch_size = 128 if args.dataset == 'cifar10' else 256
     defaults = dataset_defaults(args.dataset, args.batch_size)
     if args.num_epochs is not None:  # An explicit epoch count also applies to BaDLoss retraining
         defaults['badloss_retrain_epochs'] = args.num_epochs
