@@ -113,7 +113,7 @@ def run(exp):
     poison_scores[missing_vals] = 1.1  # Always removed
 
     print("!! Including training probe examples with their clean labels for retraining...")
-    probe_new_idx = [i for i, x in enumerate(dataset_probe_identity) if x in {"unused_probe", "probe"}]
+    probe_new_idx = [i for i, x in enumerate(dataset_probe_identity) if x == "probe"]
     assert len(probe_new_idx) == len(exp.probe_original_idx)
     # Retrain on the probes' original training-set positions; remove their probe-set copies
     poison_scores[exp.probe_original_idx] = 0.

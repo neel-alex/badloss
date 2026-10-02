@@ -166,11 +166,6 @@ def get_pattern(attack_name, img_size, dataset, output_dir, main_proc, data_root
     return pattern
 
 
-class Identity(object):
-    def __call__(self, x):
-        return x
-
-
 def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, pattern=None, alpha_boost=1,
                          data_root='./data'):
     """Returns (transform applying the attack's trigger, trigger pattern). `pattern` reuses an existing
@@ -192,8 +187,6 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
     elif attack_name == "frequency":
         magnitude = 90 if dataset in {"imagenette", "imagenet"} else 30  # Stronger on large images
         backdoor = FrequencyAttack(boost=alpha_boost, magnitude=magnitude)
-    elif attack_name == "clean":
-        backdoor = Identity()
     else:
         raise NameError(f"Attack type {attack_name} is not a valid attack type.")
     backdoor_transform = transforms.Compose([backdoor, ClampRangeTransform()])
@@ -214,26 +207,12 @@ def make_image_set(indices, dataset, labels, transform=None, track_idx=True):
     return image_set
 
 
-def make_probe_imgs(num_classes, dataset, train_set_wo_aug, num_probes, output_dir, main_proc, img_size,
-                    poison_indices):
-    """The defender's bona fide clean probes: num_probes clean training examples (not used by any poison).
-
-    Returns (probe_imgs, unused_probe_imgs). The latter is a second, unused set of clean examples left over from
-    MAP-D's backdoor probes; it is kept for now because removing it changes the RNG stream.
-    """
-    np.random.choice(np.arange(num_classes))  # Vestigial target class draw, kept so the RNG stream is unchanged
+def make_probe_imgs(train_set_wo_aug, num_probes, poison_indices):
+    """The defender's bona fide clean probes: num_probes clean training examples (not used by any poison)."""
     valid_indices = [i for i in range(len(train_set_wo_aug)) if i not in poison_indices]
-    probe_indices = np.random.choice(valid_indices, size=2 * num_probes, replace=False)
-
-    identity, _ = make_probe_transform('clean', img_size, dataset, output_dir, main_proc)
-    unused_idx = probe_indices[:num_probes]
-    unused_labels = np.array([train_set_wo_aug[i][1] for i in unused_idx])
-    unused_probe_imgs = make_image_set(unused_idx, train_set_wo_aug, unused_labels, transform=identity)
-
-    clean_idx = probe_indices[num_probes:]
-    clean_labels = np.array([train_set_wo_aug[i][1] for i in clean_idx])
-    probe_imgs = make_image_set(clean_idx, train_set_wo_aug, clean_labels)
-    return probe_imgs, unused_probe_imgs
+    probe_idx = np.random.choice(valid_indices, size=num_probes, replace=False)
+    probe_labels = np.array([train_set_wo_aug[i][1] for i in probe_idx])
+    return make_image_set(probe_idx, train_set_wo_aug, probe_labels)
 
 
 def make_poison_imgs(num_classes, dataset, train_set_wo_aug, poison_ratios, attacks, output_dir, main_proc,

@@ -110,9 +110,8 @@ class Experiment:
         self.poison_imgs, self.attack_targets, blend_r_pattern = make_poison_imgs(
             self.num_classes, args.dataset, self.train_set_wo_aug, args.poison_ratios, self.attacks,
             self.output_dir, self.main_proc, self.img_size, data_root=args.data_dir)
-        self.probe_imgs, unused_probe_imgs = make_probe_imgs(
-            self.num_classes, args.dataset, self.train_set_wo_aug, args.num_train_probes, self.output_dir,
-            self.main_proc, self.img_size, poison_indices=all_poison_indices(self.poison_imgs))
+        self.probe_imgs = make_probe_imgs(self.train_set_wo_aug, args.num_train_probes,
+                                          poison_indices=all_poison_indices(self.poison_imgs))
         self.poison_imgs_test = make_poison_imgs_test(self.test_set, args.dataset, args.num_test_probes, self.attacks,
                                                       self.attack_targets, blend_r_pattern, self.output_dir,
                                                       self.main_proc, self.img_size, data_root=args.data_dir)
@@ -120,11 +119,11 @@ class Experiment:
         # BaDLoss adds its probes to the training set (as separate examples); other defenses don't
         self.probe_sets = []
         if args.defense == "badloss":
-            self.probe_sets = [('unused_probe', unused_probe_imgs), ('probe', self.probe_imgs)]
-            plot_probe_examples(self.probe_imgs, {'unused_probe': unused_probe_imgs, **self.poison_imgs},
-                                args.dataset, self.train_set, self.rank, self.output_dir, log_wandb=self.log_wandb)
+            self.probe_sets = [('probe', self.probe_imgs)]
+            plot_probe_examples(self.probe_imgs, self.poison_imgs, args.dataset, self.train_set, self.rank,
+                                self.output_dir, log_wandb=self.log_wandb)
         # Image sets in the training set, evaluated during training
-        self.train_eval_sets = {**dict(self.probe_sets[:1]), **self.poison_imgs, **dict(self.probe_sets[1:])}
+        self.train_eval_sets = {**self.poison_imgs, **dict(self.probe_sets)}
         # Original training-set positions of the probes added to the training set
         self.probe_original_idx = np.concatenate([image_set.idx for _, image_set in self.probe_sets]
                                                  ) if self.probe_sets else np.array([], dtype=int)
