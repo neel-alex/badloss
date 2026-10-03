@@ -210,7 +210,7 @@ class Experiment:
         if cache_dir is None or not all(os.path.exists(os.path.join(cache_dir, f"{n}.pt")) for n in names):
             return None
         print(f"Loading cached {', '.join(names)} from {cache_dir}")
-        return [torch.load(os.path.join(cache_dir, f"{n}.pt"), map_location=self.device, weights_only=False)
+        return [torch.load(os.path.join(cache_dir, f"{n}.pt"), map_location="cpu", weights_only=False)
                 for n in names]
 
     def reset_rngs(self):
