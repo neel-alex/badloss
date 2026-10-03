@@ -26,9 +26,18 @@ def collect_trajectories(exp):
     cached = exp.load_cached(cache_dir, "model", "stats")
     if cached is not None:
         exp.model.load_state_dict(cached[0])
-        exp.reset_rngs()
-        return cached[1]
+        stats = cached[1]
+    else:
+        stats = _train_and_record(exp)
+        exp.save_cached(cache_dir, model=exp.model.state_dict(), stats=stats)
+    if exp.main_proc:  # Also kept with the run's outputs (for analysis)
+        torch.save(stats, os.path.join(exp.output_dir, "trajectories.pt"))
+    exp.reset_rngs()
+    return stats
 
+
+def _train_and_record(exp):
+    args = exp.args
     num_examples = len(exp.new_idx_loader.dataset)
     losses = torch.zeros((num_examples, args.badloss_pretrain_epochs))
     correct_class_probs = torch.zeros((num_examples, args.badloss_pretrain_epochs))
@@ -43,13 +52,7 @@ def collect_trajectories(exp):
         exp.lr_scheduler.step()
 
     exp.evaluate_asr(exp.model, exp.criterion)
-    stats = {'losses': losses, 'probs': correct_class_probs, 'probe_id': exp.dataset_probe_identity}
-    exp.save_cached(cache_dir, model=exp.model.state_dict(), stats=stats)
-    # Also kept with the run's outputs (for analysis)
-    if exp.main_proc:
-        torch.save(stats, os.path.join(exp.output_dir, "trajectories.pt"))
-    exp.reset_rngs()
-    return stats
+    return {'losses': losses, 'probs': correct_class_probs, 'probe_id': exp.dataset_probe_identity}
 
 
 def filter_epochs(trajectories):
