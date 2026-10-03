@@ -35,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Batch size for evaluating in-memory probe sets; default depends on the dataset")
     parser.add_argument('--lr', default=1e-3, type=float, help="AdamW learning rate")
     parser.add_argument('--weight_decay', default=1e-4, type=float)
+    parser.add_argument('--fix_inserted_aug', action='store_true',
+                        help="Don't apply training augmentation to the inserted probe/poison images in the "
+                             "'un-augmented' loaders. The paper's experiments did augment them (unlike the other "
+                             "training examples), and BaDLoss's CIFAR-10 results depend on it")
     parser.add_argument('--arch', default='resnet50', type=str,
                         choices=['resnet50', 'resnet18', 'resnet34', 'vgg16', 'densenet', 'squeezenet',
                                  'efficientnet'])

@@ -160,7 +160,8 @@ class Experiment:
         (self.new_idx_loader, self.train_loader_wo_aug, self.new_idx_loader_wo_aug, self.test_idx_loader,
          self.idx_dataset) = \
             make_index_dataset(self.comb_train_set, self.comb_train_indices, self.test_set, self.no_transform,
-                               self.batch_size, self.distributed, args.num_workers, self.seed)
+                               self.batch_size, self.distributed, args.num_workers, self.seed,
+                               fix_inserted_aug=args.fix_inserted_aug)
 
         # Probe/poison sets are small: keep them on the GPU (the test ones too, except for large images)
         for image_set in self.train_eval_sets.values():
