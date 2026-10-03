@@ -16,7 +16,7 @@ def apply_mask_and_trigger(batch, mask, trigger):
 def train_cleanse(exp, mask, trigger, optimizer, target_class, l1_penalty, log_interval=5):
     """One epoch of mask/trigger optimization towards target_class; returns the adjusted L1 penalty."""
     optimizer.zero_grad()
-    pbar = tqdm(exp.new_idx_loader_wo_aug)
+    pbar = tqdm(exp.train_loader_wo_aug)
     total_in_cls = 0
     for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
         data = data.to(exp.device)

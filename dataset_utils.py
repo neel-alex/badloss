@@ -232,11 +232,15 @@ def make_index_dataset(comb_train_set, comb_train_indices, test_set,
 
     new_idx_loader = get_loader(idx_dataset, distributed, num_workers, seed,
                                 indices=comb_train_indices, batch_size=batch_size)
-    # Evaluation loaders iterate in a fixed order, so their results never depend on how often they were used
+    # Shuffled un-augmented loader, for training/optimizing without augmentation
+    train_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers, seed,
+                                     indices=comb_train_indices, batch_size=batch_size)
+    # Evaluation loaders iterate in a fixed order, so their results never depend on how often they were used.
+    # (Never train on them: the poisons sit in contiguous single-label blocks at the end.)
     new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers, seed,
                                        indices=comb_train_indices, batch_size=batch_size, shuffle=False)
     test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, seed, batch_size=batch_size,
                                  shuffle=False)
 
-    return new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
+    return new_idx_loader, train_loader_wo_aug, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
 

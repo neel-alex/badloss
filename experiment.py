@@ -157,7 +157,8 @@ class Experiment:
         self.model = None
         self.criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)
 
-        self.new_idx_loader, self.new_idx_loader_wo_aug, self.test_idx_loader, self.idx_dataset = \
+        (self.new_idx_loader, self.train_loader_wo_aug, self.new_idx_loader_wo_aug, self.test_idx_loader,
+         self.idx_dataset) = \
             make_index_dataset(self.comb_train_set, self.comb_train_indices, self.test_set, self.no_transform,
                                self.batch_size, self.distributed, args.num_workers, self.seed)
 
@@ -218,6 +219,7 @@ class Experiment:
         whether that phase was computed or loaded from the cache."""
         utils.seed_all(self.seed + 1)
         self.new_idx_loader = self.loader(self.comb_train_indices)
+        self.train_loader_wo_aug = self.loader(self.comb_train_indices, dataset=self.new_idx_loader_wo_aug.dataset)
 
     def loader(self, indices, dataset=None):
         """Shuffled loader over the given indices of the combined training set (with training augmentation)."""

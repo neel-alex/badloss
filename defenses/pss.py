@@ -96,7 +96,7 @@ def run(exp):
     print("!! Performing PSS initial pretraining...")
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
     for epoch in tqdm(range(args.pss_pretrain_epochs)):
-        train(backdoor_model, exp.device, exp.new_idx_loader_wo_aug, optimizer, criterion)
+        train(backdoor_model, exp.device, exp.train_loader_wo_aug, optimizer, criterion)
         if epoch % 2 == 1:
             exp.evaluate(backdoor_model, criterion)
 
@@ -105,7 +105,7 @@ def run(exp):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
     print("!! Performing intraclass training...")
     for epoch in tqdm(range(args.pss_intraclass_epochs)):
-        train_intraclass(backdoor_model, exp.device, exp.new_idx_loader_wo_aug, optimizer, exp.num_classes)
+        train_intraclass(backdoor_model, exp.device, exp.train_loader_wo_aug, optimizer, exp.num_classes)
         scheduler.step()
         if epoch % 5 == 4:
             exp.evaluate(backdoor_model, criterion)

@@ -42,7 +42,7 @@ def _train_and_record(exp):
     losses = torch.zeros((num_examples, args.badloss_pretrain_epochs))
     correct_class_probs = torch.zeros((num_examples, args.badloss_pretrain_epochs))
 
-    loader = exp.new_idx_loader if args.badloss_pretrain_augment else exp.new_idx_loader_wo_aug
+    loader = exp.new_idx_loader if args.badloss_pretrain_augment else exp.train_loader_wo_aug
     for epoch in range(args.badloss_pretrain_epochs):
         train(exp.model, exp.device, loader, exp.optimizer, exp.criterion)
         losses[:, epoch], correct_class_probs[:, epoch] = collect_losses(exp.model, exp.device,
