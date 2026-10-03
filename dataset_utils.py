@@ -1,22 +1,16 @@
 import os
 import random
 import urllib
-import natsort
 import copy
 import itertools
 
 import numpy as np
 import torch
 from torchvision import transforms
-from torchvision.datasets import MNIST, CIFAR10, CIFAR100, GTSRB, ImageFolder, Imagenette
-try:
-    from catalyst.data import DistributedSamplerWrapper
-except ImportError:
-    print("catalyst not found for DistributedSamplerWrapper!")
+from torchvision.datasets import CIFAR10, GTSRB, ImageFolder, Imagenette
 
+from dist_utils import DistributedSamplerWrapper
 from plot_utils import plot
-from backdoors import BackdoorPatch, WarpingAttack, ClampRangeTransform
-
 
 def load_class_mapping(dataset):
     if dataset == "imagenet":
@@ -42,18 +36,6 @@ def load_class_mapping(dataset):
     elif dataset == "cifar10":
         classes = ["airplane", "automobile", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck"]
         label2name = {k: v for k, v in enumerate(classes)}
-    elif dataset == "cifar100":
-        classes = ["beaver", "dolphin", "otter", "seal", "whale", "aquarium fish", "flatfish", "ray", "shark", "trout",
-                   "orchids", "poppies", "roses", "sunflowers", "tulips", "bottles", "bowls", "cans", "cups", "plates",
-                   "apples", "mushrooms", "oranges", "pears", "sweet peppers", "clock", "computer keyboard", "lamp",
-                   "telephone", "television", "bed", "chair", "couch", "table", "wardrobe", "bee", "beetle", "butterfly",
-                   "caterpillar", "cockroach", "bear", "leopard", "lion", "tiger", "wolf", "bridge", "castle", "house",
-                   "road", "skyscraper", "cloud", "forest", "mountain", "plain", "sea", "camel", "cattle", "chimpanzee",
-                   "elephant", "kangaroo", "fox", "porcupine", "possum", "raccoon", "skunk", "crab", "lobster", "snail",
-                   "spider", "worm", "baby", "boy", "girl", "man", "woman", "crocodile", "dinosaur", "lizard", "snake",
-                   "turtle", "hamster", "mouse", "rabbit", "shrew", "squirrel", "maple", "oak", "palm", "pine", "willow",
-                   "bicycle", "bus", "motorcycle", "pickup truck", "train", "lawn-mower", "rocket", "streetcar", "tank", "tractor"]
-        label2name = {k: v for k, v in enumerate(classes)}
     else:
         raise RuntimeError(f"Unknown dataset: {dataset}")
     name2label = {label2name[key]: key for key in label2name.keys()}
@@ -61,22 +43,11 @@ def load_class_mapping(dataset):
     return label2name, name2label
 
 
-def get_settings_for_dataset(dataset, use_augmentations=True):
-    # data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"  # TODO: Configure dataset path
-    data_dir = f"./data/{dataset}/"  # TODO: Configure dataset path
-    # data_dir = f"./rds/user/sma92/hpc-work/mapd_data/{dataset}/"
+def get_settings_for_dataset(dataset, data_root, use_augmentations=True):
+    data_dir = os.path.join(data_root, dataset)
     if dataset == "gtsrb":
         use_augmentations = False
-    if "mnist" in dataset:
-        img_size = (28, 28, 1)
-        train_transform = [transforms.ToTensor()]
-        test_transform = [transforms.ToTensor()]
-        no_transform = test_transform
-
-        train_set = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
-        train_set_wo_aug = MNIST(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
-        test_set = MNIST(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
-    elif "cifar" in dataset:
+    if dataset == "cifar10":
         img_size = (32, 32, 3)
         train_transform = [transforms.RandomHorizontalFlip(),
                            transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
@@ -86,19 +57,16 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
             train_transform = test_transform
         no_transform = test_transform
 
-        DatasetCls = CIFAR100 if dataset == "cifar100" else CIFAR10 if dataset == "cifar10" else None
-        assert DatasetCls is not None
-
-        train_set = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
-        train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
-        test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
+        train_set = CIFAR10(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
+        train_set_wo_aug = CIFAR10(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
+        test_set = CIFAR10(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
     else:
         assert dataset == "imagenet" or dataset == "gtsrb" or dataset == "imagenette"
         img_size = (224, 224, 3)
         if dataset == "gtsrb":  # specifically for GTSRB
             rand_crop_scale = (0.8, 1.0)
-        else:  # imagenet default
-            rand_crop_scale = (0.08, 1.0)
+        else:  # imagenet, imagenette (milder than the usual (0.08, 1.0))
+            rand_crop_scale = (0.8, 1.0)
 
         if use_augmentations:
             print("Training w/ augmentations...")
@@ -124,10 +92,9 @@ def get_settings_for_dataset(dataset, use_augmentations=True):
             train_set_wo_aug.targets = [label for (img, label) in train_set_wo_aug]
             test_set.targets = [label for (img, label) in test_set]
         elif dataset == "imagenet":
-            data_dir = "/ds/images/imagenet/"  # TODO: Configure dataset path
             train_set = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(train_transform))
             train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
-            test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=transforms.Compose(test_transform))
+            test_set = ImageFolder(os.path.join(data_dir, "val"), transform=transforms.Compose(test_transform))
 
             # Replace train_set.classes with real names
             train_set.original_classes = train_set.classes
@@ -163,27 +130,6 @@ class CustomTensorDataset(torch.utils.data.Dataset):
         return self.x.size(0)
 
 
-class ProbeDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, probe_identity, remove_val_in_name=True):
-        self.dataset = dataset
-        if remove_val_in_name:
-            probe_identity = [x.replace("_val", "") for x in probe_identity]
-            print("Validation tag in probe identity removed for probe dataset...")
-        self.probe_identity = probe_identity
-        self.class_names = natsort.natsorted(np.unique(probe_identity))
-        self.iden2label = {iden: i for i, iden in enumerate(self.class_names)}
-        print("Probe to idx map:", self.iden2label)
-
-    def get_probe_map(self):
-        return self.iden2label
-
-    def get_class_names(self):
-        return self.class_names
-
-    def __getitem__(self, idx):
-        return self.dataset[idx], self.iden2label[self.probe_identity[idx]]
-
-
 def seed_worker(worker_id: int) -> None:
     # Torch seeds each worker from the loader's generator; propagate that to numpy/random.
     worker_seed = torch.initial_seed() % 2**32
@@ -191,101 +137,74 @@ def seed_worker(worker_id: int) -> None:
     random.seed(worker_seed)
 
 
-def get_loader(dataset, distributed, num_workers, seed: int, indices=None, batch_size=16, shuffle=False):
-    # Each loader owns its RNG, so data order doesn't depend on unrelated global RNG draws.
+def get_loader(dataset, distributed, num_workers, seed: int, indices=None, batch_size=16, shuffle=True):
+    """Loader over the given indices (default: all), in random order if shuffle, else in the given order.
+
+    Each loader owns its RNG, so data order doesn't depend on unrelated global RNG draws.
+    """
     generator = torch.Generator().manual_seed(seed)
-    sampler = None
-    if indices is not None:
+    if indices is None:
+        indices = range(len(dataset))
+    if shuffle:
         sampler = torch.utils.data.SubsetRandomSampler(indices, generator=generator)
+    else:
+        sampler = list(indices)
     if distributed:
-        if sampler is not None:
-            print("Using distributed sampler on top of previous sampler...")
-            sampler = DistributedSamplerWrapper(sampler)
-        else:
-            sampler = torch.utils.data.distributed.DistributedSampler(dataset, seed=seed)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
-                                         sampler=sampler, num_workers=num_workers, prefetch_factor=4,
+        sampler = DistributedSamplerWrapper(sampler, shuffle=shuffle)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, prefetch_factor=4,
                                          pin_memory=True, worker_init_fn=seed_worker, generator=generator)
     return loader
 
 
-def make_probe_dataset(probes, train_set, dataset, num_train_probes, defense,
-                       train_transform, val_probe_attacks, output_dir, device,
-                       include_val_probe_examples=True):
-    discarded_idx = set(probes['all_backdoor_idx'])
+def _image_set_dataset(images, labels, train_transform):
+    """In-memory dataset applying the training augmentation (minus ToTensor; the images are already tensors)."""
+    return CustomTensorDataset(images.to("cpu"), [int(x) for x in labels.to("cpu").numpy().tolist()],
+                               transform=transforms.Compose(train_transform[:-1]))
+
+
+def make_probe_dataset(train_set, dataset, train_transform, probe_sets, poison_imgs, output_dir):
+    """Build the combined training set: the unmodified training examples, then the defender's probe sets (if
+    any; only BaDLoss adds them), then the poisoned images. The original positions of probe and poison images
+    are excluded from the unmodified part.
+
+    probe_sets: list of (identity, ImageSet); poison_imgs: attack -> ImageSet.
+    Returns (combined dataset, its usable indices, identity of every index, set of excluded original indices),
+    where identities are 'train', the probe set identities, or 'poison_<attack>'.
+    """
+    discarded_idx = set(np.concatenate([image_set.idx for _, image_set in probe_sets] +
+                                       [image_set.idx for image_set in poison_imgs.values()]))
     train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
     print("Discarded examples:", len(train_set) - len(train_indices))
     assert len(train_set) - len(train_indices) == len(discarded_idx)
 
-    if defense == "badloss":
-        if include_val_probe_examples:
-            probes_to_be_used = ["backdoor", "clean", "backdoor_val", "clean_val"]
-        else:
-            probes_to_be_used = ["backdoor", "clean"]
-        print("Selected probes to be used:", probes_to_be_used)
-
-        probe_images = torch.cat([probes[k] for k in probes_to_be_used], dim=0)
-        probe_labels = torch.cat([probes[f"{k}_labels"] for k in probes_to_be_used], dim=0)
-
-        # Filter the train indexes
-        probe_identity = list(itertools.chain(*([identity] * len(probes[identity])
-                                                for identity in probes_to_be_used)))
-
-        assert len(probe_identity) == len(probe_images), f"{len(probe_identity)} != {len(probe_images)}"
-
-        # Shuffle
-        shuffle = False
-        if shuffle:
-            perm = np.random.choice(range(len(probe_images)), size=len(probe_images), replace=False)
-            probe_images = torch.stack([probe_images[i] for i in perm], dim=0).to(device)
-            probe_labels = torch.stack([probe_labels[i] for i in perm], dim=0).to(device)
-            probe_identity = [probe_identity[i] for i in perm]
-        else:
-            print("Skipping shuffling training probes.")  # Since dataloader shuffles...
-
+    parts = [train_set]
+    identities = ["train"] * len(train_set)
+    if probe_sets:
+        probe_images = torch.cat([image_set.images for _, image_set in probe_sets], dim=0)
+        probe_labels = torch.cat([image_set.labels for _, image_set in probe_sets], dim=0)
         print(f"Probe | Images: {probe_images.shape} | Labels: {probe_labels.shape}")
+        probe_dataset = _image_set_dataset(probe_images, probe_labels, train_transform)
+        print("Probe dataset:", len(probe_dataset))
+        plot(probe_images, probe_labels, class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png",
+             output_dir=output_dir)
+        parts.append(probe_dataset)
+        identities += list(itertools.chain(*([identity] * len(image_set) for identity, image_set in probe_sets)))
 
-        probe_dataset = torch.utils.data.TensorDataset(probe_images, probe_labels)
-        probe_dataset_standard = CustomTensorDataset(probe_images.to("cpu"),
-                                                     [int(x) for x in probe_labels.to("cpu").numpy().tolist()],
-                                                     transform=transforms.Compose(train_transform[:-1]))  # Cut off ToTensor transform
-        print("Probe dataset:", len(probe_dataset_standard), probe_dataset_standard[0][0].shape,
-              probe_dataset_standard[0][1])
-        print("Curated probe dataset")
-        plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0),
-             class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png", output_dir=output_dir)
+    poison_images = torch.cat([image_set.images for image_set in poison_imgs.values()], dim=0)
+    poison_labels = torch.cat([image_set.labels for image_set in poison_imgs.values()], dim=0)
+    poison_dataset = _image_set_dataset(poison_images, poison_labels, train_transform)
+    print("Poison dataset:", len(poison_dataset))
+    parts.append(poison_dataset)
+    identities += list(itertools.chain(*([f"poison_{attack}"] * len(image_set)
+                                         for attack, image_set in poison_imgs.items())))
 
-    # TODO: Note how this adds "val".... hopefully this just solves problems and doesn't cause any lol
-    val_probe_identity = list(itertools.chain(*([f"backdoor_{identity}_val"] * len(probes[f"backdoor_{identity}"])
-                                                for identity in val_probe_attacks)))
-
-    # Create the validation set for probes
-    val_probe_images = torch.cat([probes[f"backdoor_{attack}"] for attack in val_probe_attacks], dim=0)
-    val_probe_labels = torch.cat([probes[f"backdoor_{attack}_labels"] for attack in val_probe_attacks], dim=0)
-    val_probe_dataset_standard = CustomTensorDataset(val_probe_images.to("cpu"),
-                                                     [int(x) for x in val_probe_labels.to("cpu").numpy().tolist()],
-                                                     transform=transforms.Compose(train_transform[:-1]))
-    print("Validation probe dataset:", len(val_probe_dataset_standard), val_probe_dataset_standard[0][0].shape,
-          val_probe_dataset_standard[0][1])
-
-    if defense == "badloss":
-        comb_train_set = torch.utils.data.ConcatDataset([train_set, probe_dataset_standard, val_probe_dataset_standard])
-        comb_train_indices = train_indices + [(len(train_set) + x) for x in
-                                              range(len(probe_dataset_standard) + len(val_probe_dataset_standard))]
-        dataset_probe_identity = ["train" for i in range(len(train_set))] + probe_identity + val_probe_identity
-    else:
-        comb_train_set = torch.utils.data.ConcatDataset([train_set, val_probe_dataset_standard])
-        comb_train_indices = train_indices + [(len(train_set) + x) for x in
-                                              range(len(val_probe_dataset_standard))]
-        dataset_probe_identity = ["train" for i in range(len(train_set))] + val_probe_identity
-
+    comb_train_set = torch.utils.data.ConcatDataset(parts)
+    comb_train_indices = train_indices + list(range(len(train_set), len(comb_train_set)))
     print("Indices in combined dataset:", len(comb_train_indices))
     assert len(np.unique(comb_train_indices)) == len(comb_train_indices)
     print("Size of combined dataset:", len(comb_train_set))
-
-    assert len(dataset_probe_identity) == len(comb_train_set), f"{len(dataset_probe_identity)} != {len(comb_train_set)}"
-
-    return comb_train_set, comb_train_indices, dataset_probe_identity, discarded_idx
+    assert len(identities) == len(comb_train_set), f"{len(identities)} != {len(comb_train_set)}"
+    return comb_train_set, comb_train_indices, identities, discarded_idx
 
 
 class IdxDataset(torch.utils.data.Dataset):
@@ -300,19 +219,30 @@ class IdxDataset(torch.utils.data.Dataset):
 
 
 def make_index_dataset(comb_train_set, comb_train_indices, test_set,
-                       no_transform, batch_size, distributed, num_workers, seed: int):
+                       no_transform, batch_size, distributed, num_workers, seed: int, fix_inserted_aug=False):
     # Convert into a dataset which returns indices
     idx_dataset = IdxDataset(comb_train_set)
 
-    # Update dataset transform for evaluation | idx dataset -> concate dataset -> actual training dataset
+    # Un-augmented copy | idx dataset -> concat dataset -> [training set, (probes), poisons].
     idx_dataset_wo_aug = copy.deepcopy(idx_dataset)
     idx_dataset_wo_aug.dataset.datasets[0].transform = transforms.Compose(no_transform)
+    if fix_inserted_aug:
+        # The probe and poison parts hold already-preprocessed tensors: give them no transform at all. By default
+        # (as in the paper's experiments) they keep the training augmentation even in this "un-augmented" copy.
+        for part in idx_dataset_wo_aug.dataset.datasets[1:]:
+            part.transform = None
 
     new_idx_loader = get_loader(idx_dataset, distributed, num_workers, seed,
                                 indices=comb_train_indices, batch_size=batch_size)
+    # Shuffled un-augmented loader, for training/optimizing without augmentation
+    train_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers, seed,
+                                     indices=comb_train_indices, batch_size=batch_size)
+    # Evaluation loaders iterate in a fixed order, so their results never depend on how often they were used.
+    # (Never train on them: the poisons sit in contiguous single-label blocks at the end.)
     new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, distributed, num_workers, seed,
-                                       indices=comb_train_indices, batch_size=batch_size)
-    test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, seed, batch_size=batch_size)
+                                       indices=comb_train_indices, batch_size=batch_size, shuffle=False)
+    test_idx_loader = get_loader(IdxDataset(test_set), distributed, num_workers, seed, batch_size=batch_size,
+                                 shuffle=False)
 
-    return new_idx_loader, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
+    return new_idx_loader, train_loader_wo_aug, new_idx_loader_wo_aug, test_idx_loader, idx_dataset
 

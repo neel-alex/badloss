@@ -1,7 +1,9 @@
-# Taken directly from https://github.com/HanxunH/CognitiveDistillation
+# CognitiveDistillation module taken directly from https://github.com/HanxunH/CognitiveDistillation
 
+import numpy as np
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 
 def total_variation_loss(img, weight=1):
@@ -61,3 +63,32 @@ class CognitiveDistillation(nn.Module):
         if self.norm_only:
             return torch.norm(mask, p=1, dim=[1, 2, 3])
         return mask.detach()
+
+
+def run(exp):
+    """Cognitive Distillation (Huang et al., 2023), adapted to filter the training set and retrain: learn a
+    minimal input mask per example that preserves the model's output; remove the examples with the smallest
+    masks (backdoor triggers are small and sufficient)."""
+    args = exp.args
+    exp.pretrain()
+    exp.report_attacked_model()
+    exp.wandb_prefix = "retraining_"
+
+    cd = CognitiveDistillation(num_steps=args.cd_num_steps)
+    masks = torch.zeros(len(exp.new_idx_loader_wo_aug.dataset), *exp.img_size[:-1])
+    for (data, target), ex_idx in tqdm(exp.new_idx_loader_wo_aug):
+        masks[ex_idx] = cd(exp.model, data.to(exp.device)).squeeze()
+
+    mask_norms = torch.norm(masks, dim=(1, 2), p=1)
+    valid_mask_idx = torch.where(mask_norms != 0)[0]
+    base_idx = np.intersect1d(exp.probe_imgs.idx, valid_mask_idx.numpy())
+    print("Num training examples for cognitive distillation", len(base_idx))
+
+    # Standardize by the clean probes' statistics (only needed for CD's own thresholded detection)
+    mean, std = mask_norms[base_idx].mean(), mask_norms[base_idx].std()
+    mask_norms[valid_mask_idx] -= mean
+    mask_norms[valid_mask_idx] /= std
+
+    identified_indices = mask_norms.argsort()[:int(args.cd_remove_frac * len(mask_norms))]
+    exp.report_detection(identified_indices)
+    exp.retrain(identified_indices)
