@@ -114,6 +114,21 @@ def get_settings_for_dataset(dataset, data_root, use_augmentations=True):
     return img_size, train_transform, test_transform, no_transform, data_dir, train_set, train_set_wo_aug, test_set
 
 
+def subsample_per_class(dataset, frac, rng):
+    """Keep a random `frac` of every class of a torchvision dataset (at least one example each), in place."""
+    targets = np.array(dataset.targets)
+    keep = np.sort(np.concatenate([rng.choice(np.where(targets == c)[0], size=max(1, round(frac * n)), replace=False)
+                                   for c, n in zip(*np.unique(targets, return_counts=True))]))
+    if hasattr(dataset, 'samples'):  # ImageFolder
+        dataset.samples = dataset.imgs = [dataset.samples[i] for i in keep]
+    elif hasattr(dataset, '_samples'):  # GTSRB, Imagenette
+        dataset._samples = [dataset._samples[i] for i in keep]
+    else:  # CIFAR-10
+        dataset.data = dataset.data[keep]
+    dataset.targets = [dataset.targets[i] for i in keep]
+    return keep
+
+
 class CustomTensorDataset(torch.utils.data.Dataset):
     def __init__(self, x: torch.Tensor, y: list, transform=None) -> None:
         self.x = x

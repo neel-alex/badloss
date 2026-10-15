@@ -49,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--arch', default=None, type=str, help="Default resnet18 for imagenet, else resnet50",
                         choices=['resnet50', 'resnet18', 'resnet34', 'vgg16', 'densenet', 'squeezenet',
                                  'efficientnet'])
+    parser.add_argument('--train_subset_frac', default=1.0, type=float,
+                        help="For smoke tests: keep this fraction of every class of the training and test sets")
     parser.add_argument('--num_asr_images', default=None, type=int,
                         help="Triggered test images per attack for measuring ASR; default depends on the dataset")
 

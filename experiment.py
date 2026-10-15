@@ -13,7 +13,8 @@ from tqdm import tqdm
 import dist_utils
 import utils
 from backdoors import make_probe_imgs, make_poison_imgs, make_poison_imgs_test, all_poison_indices
-from dataset_utils import get_settings_for_dataset, make_probe_dataset, make_index_dataset, get_loader
+from dataset_utils import (get_settings_for_dataset, make_probe_dataset, make_index_dataset, get_loader,
+                           subsample_per_class)
 from defenses.feature_extractor import FeatureExtractor
 from detection_metrics import get_confusion_stats, get_auc
 from plot_utils import plot_probe_examples
@@ -119,6 +120,12 @@ class Experiment:
         args, device = self.args, self.device
         (self.img_size, self.train_transform, _, self.no_transform, _, self.train_set, self.train_set_wo_aug,
          self.test_set) = get_settings_for_dataset(args.dataset, args.data_dir)
+        if args.train_subset_frac < 1:  # Smoke tests; own RNG, so later draws are unaffected
+            rng = np.random.default_rng(self.seed)
+            keep = subsample_per_class(self.train_set, args.train_subset_frac, rng)
+            assert (subsample_per_class(self.train_set_wo_aug, args.train_subset_frac, np.random.default_rng(self.seed))
+                    == keep).all()
+            subsample_per_class(self.test_set, args.train_subset_frac, rng)
         print(args.dataset, len(self.train_set), len(self.test_set))
 
         self.num_classes = len(self.train_set.classes)
