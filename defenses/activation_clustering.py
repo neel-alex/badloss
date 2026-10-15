@@ -51,6 +51,11 @@ def run(exp):
         for cls in range(exp.num_classes):
             data = activation_by_predicted_class[cls][0].cpu()
             data = data[:, data.sum(dim=0).bool()]  # remove zero columns, otherwise dim reduction outputs all 0s
+            if len(data) <= args.ac_ica_components:  # Too few examples predicted as this class to cluster
+                clusterings.append(np.zeros(len(data), dtype=int))
+                rsc_scores.append(0.5)
+                sil_scores.append(0.)
+                continue
 
             fit = dim_reducer.fit_transform(data)
             clustering = clusterer.fit_predict(fit)
