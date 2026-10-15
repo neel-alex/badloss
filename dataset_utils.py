@@ -63,10 +63,9 @@ def get_settings_for_dataset(dataset, data_root, use_augmentations=True):
     else:
         assert dataset == "imagenet" or dataset == "gtsrb" or dataset == "imagenette"
         img_size = (224, 224, 3)
-        if dataset == "gtsrb":  # specifically for GTSRB
-            rand_crop_scale = (0.8, 1.0)
-        else:  # imagenet, imagenette (milder than the usual (0.08, 1.0))
-            rand_crop_scale = (0.8, 1.0)
+        # GTSRB is never augmented. Paper (App. H): Imagenette uses the usual (0.08, 1.0); ImageNet, whose images
+        # are pre-resized to 256x256, uses (0.8, 1.0).
+        rand_crop_scale = (0.8, 1.0) if dataset == "imagenet" else (0.08, 1.0)
 
         if use_augmentations:
             print("Training w/ augmentations...")
