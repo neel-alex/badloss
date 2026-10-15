@@ -92,10 +92,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--ac_threshold', default=None, type=float,
                         help="Detection threshold; default 0.15 for sil, 0.3 for rsc")
     parser.add_argument('--ac_ica_components', default=10, type=int)
+    parser.add_argument('--ac_oracle', action='store_true',
+                        help="In attack target classes, remove the cluster containing more poisons (instead of the "
+                             "smaller one); AC still decides which classes are attacked")
 
     # Spectral Signatures
     parser.add_argument('--ss_eps', default=0.1, type=float,
                         help="Assumed poisoning fraction; removes 1.5x this fraction of each class")
+    parser.add_argument('--ss_oracle', action='store_true',
+                        help="In attack target classes, remove exactly as many examples as there are poisons")
 
     # Frequency Analysis
     parser.add_argument('--freq_epochs', default=10, type=int)

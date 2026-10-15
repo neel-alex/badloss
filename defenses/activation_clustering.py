@@ -2,7 +2,8 @@
 
 Per predicted class, reduce penultimate activations with ICA and split them into two clusters; a class whose
 clustering is well separated (silhouette score) or lopsided (relative size) is treated as attacked, and its
-smaller cluster is removed.
+smaller cluster is removed. With --ac_oracle, in attack target classes the cluster containing more poisons is
+removed instead.
 """
 import numpy as np
 import sklearn.cluster
@@ -11,7 +12,8 @@ import sklearn.metrics
 import torch
 
 
-def get_indices_for_class_clusters(detected_classes, clusterings, activation_by_predicted_class):
+def get_indices_for_class_clusters(detected_classes, clusterings, activation_by_predicted_class, oracle=None):
+    """oracle: optional (target classes, is_poison array); in those classes, flag the cluster with more poisons."""
     identified_indices = []
     for cls in detected_classes:
         clustering = clusterings[cls]
@@ -20,6 +22,11 @@ def get_indices_for_class_clusters(detected_classes, clusterings, activation_by_
             selected_indices = np.where(clustering == 0)
         else:
             selected_indices = np.where(clustering == 1)
+        if oracle is not None and cls in oracle[0]:
+            poisons = oracle[1][activation_by_predicted_class[cls][1].cpu().numpy()]
+            in_cluster_1, in_cluster_0 = poisons[clustering == 1].sum(), poisons[clustering == 0].sum()
+            if in_cluster_1 != in_cluster_0:
+                selected_indices = np.where(clustering == (1 if in_cluster_1 > in_cluster_0 else 0))
         identified_indices.append(activation_by_predicted_class[cls][1][selected_indices])
     return torch.hstack(identified_indices) if identified_indices else np.array([], dtype=int)
 
@@ -59,11 +66,12 @@ def run(exp):
         return [i for i in range(exp.num_classes) if rsc_scores[i] < thresh]
 
     auc_threshes = np.geomspace(0.01, 0.5 if args.ac_mode == "sil" else 0.4, num=50)
-    auc_idx = [get_indices_for_class_clusters(detected_classes(t), clusterings, activation_by_predicted_class)
+    oracle = (exp.target_classes(), exp.is_poison()) if args.ac_oracle else None
+    auc_idx = [get_indices_for_class_clusters(detected_classes(t), clusterings, activation_by_predicted_class, oracle)
                for t in auc_threshes]
     exp.report_detection_auc("AC", auc_idx)
 
     identified_indices = get_indices_for_class_clusters(detected_classes(args.ac_threshold), clusterings,
-                                                        activation_by_predicted_class)
+                                                        activation_by_predicted_class, oracle)
     exp.report_detection(identified_indices)
     exp.retrain(identified_indices)

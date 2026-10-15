@@ -183,6 +183,13 @@ class Experiment:
 
     # --- Building blocks ---
 
+    def target_classes(self):
+        return sorted({int(t) for t in self.attack_targets.values()})
+
+    def is_poison(self):
+        """Boolean array over the combined training set: which examples are poisons (ground truth, for oracles)."""
+        return np.array([x.startswith('poison_') for x in self.dataset_probe_identity])
+
     def init_attacked_model(self):
         self.model = self.new_model()
         self.criterion, self.optimizer, self.lr_scheduler = self.new_optimizer(self.model, self.num_epochs)
