@@ -74,12 +74,10 @@ def run(exp):
     exp.report_attacked_model()
     exp.wandb_prefix = "retraining_"
 
-    cd = CognitiveDistillation(num_steps=args.cd_num_steps)
-    masks = torch.zeros(len(exp.new_idx_loader_wo_aug.dataset), *exp.img_size[:-1])
-    for (data, target), ex_idx in tqdm(exp.new_idx_loader_wo_aug):
-        masks[ex_idx] = cd(exp.model, data.to(exp.device)).squeeze()
-
-    mask_norms = torch.norm(masks, dim=(1, 2), p=1)
+    cd = CognitiveDistillation(num_steps=args.cd_num_steps, norm_only=True)
+    mask_norms = torch.zeros(len(exp.new_idx_loader_wo_aug.dataset))  # Only the L1 norms (full masks don't fit in
+    for (data, target), ex_idx in tqdm(exp.new_idx_loader_wo_aug):    # memory on ImageNet)
+        mask_norms[ex_idx] = cd(exp.model, data.to(exp.device))
     valid_mask_idx = torch.where(mask_norms != 0)[0]
     base_idx = np.intersect1d(exp.probe_imgs.idx, valid_mask_idx.numpy())
     print("Num training examples for cognitive distillation", len(base_idx))
