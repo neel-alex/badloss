@@ -383,7 +383,8 @@ class Experiment:
     def retrain(self, identified_indices):
         """Train a fresh model on the combined training set minus the identified examples; report its metrics."""
         print(f"Retraining with {identified_indices.shape[0]} elements removed.")
-        retrain_indices = [x for x in self.comb_train_indices if x not in identified_indices]
+        comb_train_indices = np.asarray(self.comb_train_indices)
+        retrain_indices = comb_train_indices[~np.isin(comb_train_indices, np.asarray(identified_indices))].tolist()
         retrain_set_dl = self.loader(retrain_indices)
 
         clean_model = self.new_model()

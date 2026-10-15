@@ -95,7 +95,6 @@ def run(exp):
 
         # Rows that were never visited: original positions of examples replaced by their probe/poison copies
         missing_vals = (losses == 0).all(dim=1)
-        missing_vals_idx = torch.nonzero(missing_vals).squeeze()
         available_ex = ~missing_vals
         print(f"!! Total loss traj len: {len(losses)} / Modified examples identified: {sum(missing_vals)}")
 
@@ -126,8 +125,8 @@ def run(exp):
         threshold = 1 - args.badloss_reject_frac
         clean_indices = np.where(poison_scores <= threshold)[0]
         print(f"!! [Dataset cleansing] Total examples: {len(poison_scores)} / # clean indices: {len(clean_indices)}")
-        discarded_indices = [i for i in range(len(poison_scores))
-                             if i not in clean_indices and i not in missing_vals_idx]
+        discarded_indices = np.where(~np.isin(np.arange(len(poison_scores)), clean_indices)
+                                     & ~missing_vals.numpy())[0].tolist()
         discarded_identities = Counter(dataset_probe_identity[i] for i in discarded_indices)
         print("!! Discarded example identities:", discarded_identities)
         exp.record_detection(num_removed=len(discarded_indices), removed_identities=dict(discarded_identities))
