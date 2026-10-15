@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Don't apply training augmentation to the inserted probe/poison images in the "
                              "'un-augmented' loaders. The paper's experiments did augment them (unlike the other "
                              "training examples), and BaDLoss's CIFAR-10 results depend on it")
-    parser.add_argument('--arch', default='resnet50', type=str,
+    parser.add_argument('--arch', default=None, type=str, help="Default resnet18 for imagenet, else resnet50",
                         choices=['resnet50', 'resnet18', 'resnet34', 'vgg16', 'densenet', 'squeezenet',
                                  'efficientnet'])
     parser.add_argument('--num_asr_images', default=None, type=int,
@@ -137,6 +137,7 @@ def dataset_defaults(dataset: str, batch_size: int) -> Dict:
     return {
         'num_epochs': {'cifar10': 100, 'gtsrb': 100, 'imagenette': 250, 'imagenet': 50}[dataset],
         'badloss_pretrain_epochs': 15 if dataset == 'imagenet' else 30,
+        'arch': 'resnet18' if dataset == 'imagenet' else 'resnet50',
         'eval_batch_size': 128 if dataset == 'cifar10' else batch_size,
         'num_asr_images': 2000 if dataset == 'imagenet' else 10000,
     }
