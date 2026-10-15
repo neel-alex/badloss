@@ -73,14 +73,16 @@ def to_dct(images):
     return images
 
 
-def get_indices_for_thresh_from_loader(exp, thresh, freq_model):
+@torch.no_grad()
+def poison_probs(exp, freq_model):
+    """The detector's poison probability for every training example (scored once, then thresholded)."""
     freq_model.eval()
-    identified_indices = []
+    all_probs, all_indices = [], []
     for (image, label), indices in tqdm(exp.new_idx_loader_wo_aug):
         image = torch.tensor(to_dct(image.cpu().numpy()), device=exp.device)
-        probs = torch.nn.functional.softmax(freq_model(image), dim=1)[:, 1]
-        identified_indices.append(indices[(probs.cpu() >= thresh).nonzero()[:, 0]])
-    return torch.hstack(identified_indices)
+        all_probs.append(torch.nn.functional.softmax(freq_model(image), dim=1)[:, 1].cpu())
+        all_indices.append(indices)
+    return torch.hstack(all_probs), torch.hstack(all_indices)
 
 
 def run(exp):
@@ -123,10 +125,11 @@ def run(exp):
             print(f"Epoch {epoch+1} loss: {epoch_loss/len(freq_dataset):.6f}, "
                   f"acc: {epoch_correct/len(freq_dataset):.6f}")
 
-        auc_idx = [get_indices_for_thresh_from_loader(exp, t, freq_model) for t in np.linspace(0.1, 0.9, num=9)]
+        probs, indices = poison_probs(exp, freq_model)
+        auc_idx = [indices[probs >= t] for t in np.linspace(0.1, 0.9, num=9)]
         exp.report_detection_auc("Freq", auc_idx)
 
-        identified_indices = get_indices_for_thresh_from_loader(exp, args.freq_threshold, freq_model)
+        identified_indices = indices[probs >= args.freq_threshold]
         exp.report_detection(identified_indices)
         return identified_indices
 
