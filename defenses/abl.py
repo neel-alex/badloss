@@ -17,25 +17,30 @@ def get_indices_from_losses(thresh, num_train, loss_idx, ex_idx):
 def run(exp):
     args = exp.args
     exp.wandb_prefix = "retraining_"
-    model = exp.new_model()
+    def detect():
+        model = exp.new_model()
 
-    print("!! Performing initial pretraining with all examples (using loss flooding)...")
-    criterion, optimizer, _ = exp.new_optimizer(model, args.abl_pretrain_epochs)
-    for epoch in tqdm(range(args.abl_pretrain_epochs)):
-        train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding)
-        if epoch % 5 == 4:
-            exp.evaluate(model, criterion)
+        print("!! Performing initial pretraining with all examples (using loss flooding)...")
+        criterion, optimizer, _ = exp.new_optimizer(model, args.abl_pretrain_epochs)
+        for epoch in tqdm(range(args.abl_pretrain_epochs)):
+            train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding)
+            if epoch % 5 == 4:
+                exp.evaluate(model, criterion)
 
-    # Per-example losses over the training set (NB: computed on the augmented loader)
-    _, pred_output_dict = test(model, exp.device, criterion, exp.new_idx_loader, exp.distributed, exp.rank,
-                               log_predictions=True)
-    loss_idx = np.argsort(pred_output_dict["loss"])  # Ascending
-    ex_idx = pred_output_dict["ex_idx"]
-    num_train = len(exp.train_set)
+        # Per-example losses over the training set (NB: computed on the augmented loader)
+        _, pred_output_dict = test(model, exp.device, criterion, exp.new_idx_loader, exp.distributed, exp.rank,
+                                   log_predictions=True)
+        loss_idx = np.argsort(pred_output_dict["loss"])  # Ascending
+        ex_idx = pred_output_dict["ex_idx"]
+        num_train = len(exp.train_set)
 
-    auc_idx = [get_indices_from_losses(t, num_train, loss_idx, ex_idx) for t in np.geomspace(0.001, 0.5, num=50)]
-    exp.report_detection_auc("ABL", auc_idx)
+        auc_idx = [get_indices_from_losses(t, num_train, loss_idx, ex_idx) for t in np.geomspace(0.001, 0.5, num=50)]
+        exp.report_detection_auc("ABL", auc_idx)
 
-    identified_indices = get_indices_from_losses(args.abl_remove_frac, num_train, loss_idx, ex_idx)
-    exp.report_detection(identified_indices)
-    exp.retrain(identified_indices)
+        identified_indices = get_indices_from_losses(args.abl_remove_frac, num_train, loss_idx, ex_idx)
+        exp.report_detection(identified_indices)
+        return identified_indices
+
+    identified_indices = exp.detect(detect)
+    if identified_indices is not None:
+        exp.retrain(identified_indices)

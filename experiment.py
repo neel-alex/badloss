@@ -3,6 +3,7 @@ import glob
 import hashlib
 import json
 import os
+import random
 import subprocess
 import warnings
 
@@ -43,7 +44,7 @@ def _code_hash():
 
 # Arguments that cannot affect the poisoned training set or the attacked model
 _DEFENSE_ARG_PREFIXES = ('badloss_', 'nc_', 'ac_', 'ss_', 'freq_', 'abl_', 'cd_', 'cbd_', 'pss_')
-_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'cache_dir', 'no_cache'}
+_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'cache_dir', 'no_cache', 'detect_only'}
 
 
 def _jsonable(x):
@@ -231,6 +232,43 @@ class Experiment:
         print(f"Loading cached {', '.join(names)} from {cache_dir}")
         return [torch.load(os.path.join(cache_dir, f"{n}.pt"), map_location="cpu", weights_only=False)
                 for n in names]
+
+    def detect(self, detect_fn):
+        """Run a defense's detection step, or load its result from the cache.
+
+        detect_fn() records the detection metrics and returns what retraining needs (e.g. the flagged indices).
+        The cache also holds those metrics and the RNG states right after detection, which are restored on a hit,
+        so a hit gives exactly the same results as running detect_fn(). Returns None with --detect_only.
+        """
+        defense_args = {k: v for k, v in vars(self.args).items() if k.startswith(f"{self.args.defense}_")}
+        cache_dir = self.cache_dir(f"detection_{self.args.defense}", defense_args=defense_args)
+        cached = self.load_cached(cache_dir, "output", "detection", "rng_state")
+        if cached is not None:
+            output, detection, rng_state = cached
+            self.record_detection(**detection)
+            self._set_rng_state(rng_state)
+        else:
+            output = detect_fn()
+            self.save_cached(cache_dir, output=output, detection=self.results.get("detection", {}),
+                             rng_state=self._get_rng_state())
+        return None if self.args.detect_only else output
+
+    def _loaders(self):
+        return [self.new_idx_loader, self.train_loader_wo_aug, self.new_idx_loader_wo_aug, self.test_idx_loader]
+
+    def _get_rng_state(self):
+        return {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "loaders": [loader.generator.get_state() for loader in self._loaders()]}
+
+    def _set_rng_state(self, state):
+        random.setstate(state["python"])
+        np.random.set_state(state["numpy"])
+        torch.set_rng_state(state["torch"])
+        if state["cuda"] is not None:
+            torch.cuda.set_rng_state_all(state["cuda"])
+        for loader, loader_state in zip(self._loaders(), state["loaders"]):
+            loader.generator.set_state(loader_state)
 
     def reset_rngs(self):
         """Reseed the global RNGs and the training loader after a cacheable phase, so whatever follows is the same

@@ -86,44 +86,50 @@ def get_indices_for_thresh_from_loader(exp, thresh, freq_model):
 def run(exp):
     args = exp.args
     exp.wandb_prefix = "retraining_"
-    freq_probes = {
-        'clean': exp.probe_imgs.images.cpu().numpy(),
-        'backdoor': copy.deepcopy(exp.probe_imgs.images.cpu().numpy()),
-    }
-    for i in range(freq_probes['backdoor'].shape[0]):
-        freq_probes['backdoor'][i] = apply_random_transform(freq_probes['backdoor'][i])
-    for key in freq_probes:
-        to_dct(freq_probes[key])
+    def detect():
+        freq_probes = {
+            'clean': exp.probe_imgs.images.cpu().numpy(),
+            'backdoor': copy.deepcopy(exp.probe_imgs.images.cpu().numpy()),
+        }
+        for i in range(freq_probes['backdoor'].shape[0]):
+            freq_probes['backdoor'][i] = apply_random_transform(freq_probes['backdoor'][i])
+        for key in freq_probes:
+            to_dct(freq_probes[key])
 
-    freq_train_set = torch.vstack((torch.tensor(freq_probes['clean']), torch.tensor(freq_probes['backdoor'])))
-    freq_labels = torch.hstack((torch.zeros(freq_probes['clean'].shape[0], dtype=torch.long),
-                                torch.ones(freq_probes['backdoor'].shape[0], dtype=torch.long)))
-    freq_dataset = TensorDataset(freq_train_set, freq_labels)
-    freq_dataloader = DataLoader(freq_dataset, batch_size=32, shuffle=True,
-                                 generator=torch.Generator().manual_seed(exp.seed))
+        freq_train_set = torch.vstack((torch.tensor(freq_probes['clean']), torch.tensor(freq_probes['backdoor'])))
+        freq_labels = torch.hstack((torch.zeros(freq_probes['clean'].shape[0], dtype=torch.long),
+                                    torch.ones(freq_probes['backdoor'].shape[0], dtype=torch.long)))
+        freq_dataset = TensorDataset(freq_train_set, freq_labels)
+        freq_dataloader = DataLoader(freq_dataset, batch_size=32, shuffle=True,
+                                     generator=torch.Generator().manual_seed(exp.seed))
 
-    freq_model = FreqCNN(freq_train_set[0].shape).to(exp.device)
-    freq_criterion = torch.nn.CrossEntropyLoss()
-    freq_optimizer = torch.optim.Adadelta(freq_model.parameters(), lr=args.freq_lr, weight_decay=1e-4)
+        freq_model = FreqCNN(freq_train_set[0].shape).to(exp.device)
+        freq_criterion = torch.nn.CrossEntropyLoss()
+        freq_optimizer = torch.optim.Adadelta(freq_model.parameters(), lr=args.freq_lr, weight_decay=1e-4)
 
-    for epoch in range(args.freq_epochs):
-        epoch_loss = 0.
-        epoch_correct = 0
-        for batch, labels in freq_dataloader:
-            batch, labels = batch.to(exp.device), labels.to(exp.device)
-            freq_optimizer.zero_grad()
-            outputs = freq_model(batch)
-            loss = freq_criterion(outputs, labels)
-            loss.backward()
-            freq_optimizer.step()
+        for epoch in range(args.freq_epochs):
+            epoch_loss = 0.
+            epoch_correct = 0
+            for batch, labels in freq_dataloader:
+                batch, labels = batch.to(exp.device), labels.to(exp.device)
+                freq_optimizer.zero_grad()
+                outputs = freq_model(batch)
+                loss = freq_criterion(outputs, labels)
+                loss.backward()
+                freq_optimizer.step()
 
-            epoch_loss += loss.item()
-            epoch_correct += (outputs.argmax(axis=1) == labels).sum().item()
-        print(f"Epoch {epoch+1} loss: {epoch_loss/len(freq_dataset):.6f}, acc: {epoch_correct/len(freq_dataset):.6f}")
+                epoch_loss += loss.item()
+                epoch_correct += (outputs.argmax(axis=1) == labels).sum().item()
+            print(f"Epoch {epoch+1} loss: {epoch_loss/len(freq_dataset):.6f}, "
+                  f"acc: {epoch_correct/len(freq_dataset):.6f}")
 
-    auc_idx = [get_indices_for_thresh_from_loader(exp, t, freq_model) for t in np.linspace(0.1, 0.9, num=9)]
-    exp.report_detection_auc("Freq", auc_idx)
+        auc_idx = [get_indices_for_thresh_from_loader(exp, t, freq_model) for t in np.linspace(0.1, 0.9, num=9)]
+        exp.report_detection_auc("Freq", auc_idx)
 
-    identified_indices = get_indices_for_thresh_from_loader(exp, args.freq_threshold, freq_model)
-    exp.report_detection(identified_indices)
-    exp.retrain(identified_indices)
+        identified_indices = get_indices_for_thresh_from_loader(exp, args.freq_threshold, freq_model)
+        exp.report_detection(identified_indices)
+        return identified_indices
+
+    identified_indices = exp.detect(detect)
+    if identified_indices is not None:
+        exp.retrain(identified_indices)

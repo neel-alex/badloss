@@ -33,6 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "models and BaDLoss trajectories (keyed by code + settings) to <output_root>/cache/")
     parser.add_argument('--cache_dir', default=None, type=str, help="Default: <output_root>/cache")
     parser.add_argument('--no_cache', action='store_true', help="Never read or write cached artifacts")
+    parser.add_argument('--detect_only', action='store_true',
+                        help="Stop after the defense's detection step (cached, so a later run without this flag goes "
+                             "straight to retraining). Not available for cbd and pss, which have no separate step")
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--num_epochs', default=None, type=int,
                         help="Epochs for (re)training models; default depends on the dataset")
@@ -147,6 +150,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             setattr(args, key, value)
     if args.ac_threshold is None:
         args.ac_threshold = 0.15 if args.ac_mode == 'sil' else 0.3
+    if args.detect_only and args.defense in {'cbd', 'pss'}:
+        build_parser().error(f"--detect_only: {args.defense} has no separate detection step")
     args.attacks = get_attacks(args.attack, args.dataset)
     unknown = [a for a in args.attacks if a not in ATTACKS]
     if unknown:

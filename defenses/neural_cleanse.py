@@ -72,81 +72,87 @@ def run(exp):
     exp.wandb_prefix = "retraining_"
     model = exp.model
 
-    # Optionally subsample classes (always keeping the attack targets) and the data the masks are optimized on
-    rng = np.random.default_rng(exp.seed)
-    classes = list(range(exp.num_classes))
-    if args.nc_class_frac < 1:
-        targets = sorted({int(t) for t in exp.attack_targets.values()})
-        others = [c for c in classes if c not in targets]
-        num_others = max(0, round(args.nc_class_frac * exp.num_classes) - len(targets))
-        classes = sorted(targets + [int(c) for c in rng.choice(others, size=num_others, replace=False)])
-        print(f"Neural Cleanse on {len(classes)} classes (attack targets: {targets})")
-    cleanse_loader = exp.train_loader_wo_aug
-    if args.nc_data_frac < 1:
-        subset = rng.choice(exp.comb_train_indices, size=round(args.nc_data_frac * len(exp.comb_train_indices)),
-                            replace=False)
-        cleanse_loader = exp.loader(subset, dataset=exp.new_idx_loader_wo_aug.dataset)
+    def detect():
+        # Optionally subsample classes (always keeping the attack targets) and the data the masks are optimized on
+        rng = np.random.default_rng(exp.seed)
+        classes = list(range(exp.num_classes))
+        if args.nc_class_frac < 1:
+            targets = sorted({int(t) for t in exp.attack_targets.values()})
+            others = [c for c in classes if c not in targets]
+            num_others = max(0, round(args.nc_class_frac * exp.num_classes) - len(targets))
+            classes = sorted(targets + [int(c) for c in rng.choice(others, size=num_others, replace=False)])
+            print(f"Neural Cleanse on {len(classes)} classes (attack targets: {targets})")
+        cleanse_loader = exp.train_loader_wo_aug
+        if args.nc_data_frac < 1:
+            subset = rng.choice(exp.comb_train_indices, size=round(args.nc_data_frac * len(exp.comb_train_indices)),
+                                replace=False)
+            cleanse_loader = exp.loader(subset, dataset=exp.new_idx_loader_wo_aug.dataset)
 
-    masks, norms, triggers = {}, [], {}
-    mask_shape = exp.img_size[-1:] + exp.img_size[:-1]  # CHW
-    for cls in classes:
-        l1_penalty = 1.0
-        mask = torch.nn.Parameter(torch.rand(size=mask_shape, device=exp.device))
-        trigger = torch.nn.Parameter(torch.rand(size=mask_shape, device=exp.device))
-        cleanse_opt = torch.optim.Adam((mask, trigger))
-        for _ in range(args.nc_cleanse_epochs):
-            l1_penalty = train_cleanse(exp, cleanse_loader, mask, trigger, cleanse_opt, cls, l1_penalty)
+        masks, norms, triggers = {}, [], {}
+        mask_shape = exp.img_size[-1:] + exp.img_size[:-1]  # CHW
+        for cls in classes:
+            l1_penalty = 1.0
+            mask = torch.nn.Parameter(torch.rand(size=mask_shape, device=exp.device))
+            trigger = torch.nn.Parameter(torch.rand(size=mask_shape, device=exp.device))
+            cleanse_opt = torch.optim.Adam((mask, trigger))
+            for _ in range(args.nc_cleanse_epochs):
+                l1_penalty = train_cleanse(exp, cleanse_loader, mask, trigger, cleanse_opt, cls, l1_penalty)
 
-        masks[cls] = mask.detach()
-        triggers[cls] = trigger.detach()
-        norms.append(torch.norm(mask, p=1))
-        print(f"Trained mask for class {cls}. Final l1 penalty: {l1_penalty}, final mask magnitude: {mask.norm(p=1)}")
+            masks[cls] = mask.detach()
+            triggers[cls] = trigger.detach()
+            norms.append(torch.norm(mask, p=1))
+            print(f"Trained mask for class {cls}. Final l1 penalty: {l1_penalty}, "
+                  f"final mask magnitude: {mask.norm(p=1)}")
 
-    # Median absolute deviation (1.4826 makes it consistent with the std for normal data)
-    norms = torch.tensor(norms)
-    median = norms.median()
-    absolute_deviations = (norms - median).abs()
-    mad = 1.4826 * absolute_deviations.median()
-    anomaly_index = absolute_deviations / mad
+        # Median absolute deviation (1.4826 makes it consistent with the std for normal data)
+        norms = torch.tensor(norms)
+        median = norms.median()
+        absolute_deviations = (norms - median).abs()
+        mad = 1.4826 * absolute_deviations.median()
+        anomaly_index = absolute_deviations / mad
 
-    flagged = (anomaly_index >= args.nc_anomaly_threshold).nonzero()[:, 0]
-    print("Skipping detected attacks where norm is above median.")
-    flagged = flagged[(norms[flagged] <= median).nonzero()[:, 0]].tolist()  # Positions in `classes`
-    attacked_classes = [classes[i] for i in flagged]
+        flagged = (anomaly_index >= args.nc_anomaly_threshold).nonzero()[:, 0]
+        print("Skipping detected attacks where norm is above median.")
+        flagged = flagged[(norms[flagged] <= median).nonzero()[:, 0]].tolist()  # Positions in `classes`
+        attacked_classes = [classes[i] for i in flagged]
 
-    clean_activations, clean_indices, _, _ = exp.last_layer_activations(model, exp.new_idx_loader_wo_aug)
-    clean_order = clean_indices.argsort()
-    clean_activations, clean_indices = clean_activations[clean_order], clean_indices[clean_order]
-    # Positions of the clean probes (they are ordinary training examples for this defense)
-    clean_probe_indices = np.array(exp.probe_imgs.idx)
-    indices_to_check = torch.isin(clean_indices, torch.tensor(clean_probe_indices)).nonzero()[:, 0]
+        clean_activations, clean_indices, _, _ = exp.last_layer_activations(model, exp.new_idx_loader_wo_aug)
+        clean_order = clean_indices.argsort()
+        clean_activations, clean_indices = clean_activations[clean_order], clean_indices[clean_order]
+        # Positions of the clean probes (they are ordinary training examples for this defense)
+        clean_probe_indices = np.array(exp.probe_imgs.idx)
+        indices_to_check = torch.isin(clean_indices, torch.tensor(clean_probe_indices)).nonzero()[:, 0]
 
-    poison_acts_by_class = []
-    for pos, atk_class in zip(flagged, attacked_classes):
-        mask, trigger = masks[atk_class], triggers[atk_class]
-        dirty_activations, dirty_indices, _, dirty_predictions = exp.last_layer_activations(
-            model, exp.new_idx_loader_wo_aug, masking_op=lambda img: apply_mask_and_trigger(img, mask, trigger))
-        attack_success = (dirty_predictions == atk_class).sum()
-        print(f"Anomalous class {atk_class} with index {anomaly_index[pos].item():.3f} "
-              f"has mask magnitude {norms[pos].item():.3f} which classifies {attack_success.item()} as {atk_class}")
-        # Align triggered activations with the clean ones by example
-        dirty_order = dirty_indices.argsort()
-        dirty_activations, dirty_indices = dirty_activations[dirty_order], dirty_indices[dirty_order]
+        poison_acts_by_class = []
+        for pos, atk_class in zip(flagged, attacked_classes):
+            mask, trigger = masks[atk_class], triggers[atk_class]
+            dirty_activations, dirty_indices, _, dirty_predictions = exp.last_layer_activations(
+                model, exp.new_idx_loader_wo_aug, masking_op=lambda img: apply_mask_and_trigger(img, mask, trigger))
+            attack_success = (dirty_predictions == atk_class).sum()
+            print(f"Anomalous class {atk_class} with index {anomaly_index[pos].item():.3f} "
+                  f"has mask magnitude {norms[pos].item():.3f} which classifies {attack_success.item()} as {atk_class}")
+            # Align triggered activations with the clean ones by example
+            dirty_order = dirty_indices.argsort()
+            dirty_activations, dirty_indices = dirty_activations[dirty_order], dirty_indices[dirty_order]
 
-        # Neurons most increased by the trigger; their mean activation on the clean image is the poison score
-        mean_activation_diff = (dirty_activations - clean_activations).mean(axis=0)
-        neurons_to_select = int(len(mean_activation_diff) * args.nc_neuron_frac)
-        poisoned_neurons = mean_activation_diff.sort()[1][-neurons_to_select:]
-        poison_acts_by_class.append(clean_activations[:, poisoned_neurons].mean(axis=1))
+            # Neurons most increased by the trigger; their mean activation on the clean image is the poison score
+            mean_activation_diff = (dirty_activations - clean_activations).mean(axis=0)
+            neurons_to_select = int(len(mean_activation_diff) * args.nc_neuron_frac)
+            poisoned_neurons = mean_activation_diff.sort()[1][-neurons_to_select:]
+            poison_acts_by_class.append(clean_activations[:, poisoned_neurons].mean(axis=1))
 
-    fpr_thresh = args.nc_fpr / max(len(attacked_classes), 1)
-    auc_idx = [get_indices_for_thresh(t, clean_probe_indices, attacked_classes, poison_acts_by_class,
-                                      indices_to_check, clean_indices)
-               for t in np.geomspace(fpr_thresh / 20, 0.8, num=50)]
-    exp.report_detection_auc("NC", auc_idx)
+        fpr_thresh = args.nc_fpr / max(len(attacked_classes), 1)
+        auc_idx = [get_indices_for_thresh(t, clean_probe_indices, attacked_classes, poison_acts_by_class,
+                                          indices_to_check, clean_indices)
+                   for t in np.geomspace(fpr_thresh / 20, 0.8, num=50)]
+        exp.report_detection_auc("NC", auc_idx)
 
-    identified_indices = get_indices_for_thresh(fpr_thresh, clean_probe_indices, attacked_classes,
-                                                poison_acts_by_class, indices_to_check, clean_indices)
-    exp.report_detection(identified_indices)
-    exp.retrain(identified_indices)
+        identified_indices = get_indices_for_thresh(fpr_thresh, clean_probe_indices, attacked_classes,
+                                                    poison_acts_by_class, indices_to_check, clean_indices)
+        exp.report_detection(identified_indices)
+        return identified_indices
+
+    identified_indices = exp.detect(detect)
+    if identified_indices is not None:
+        exp.retrain(identified_indices)
     print("Done with nc")

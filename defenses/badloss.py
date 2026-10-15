@@ -87,49 +87,56 @@ def run(exp):
     stats = collect_trajectories(exp)
     exp.report_attacked_model()
 
-    losses = stats['losses'] if args.badloss_metric == 'loss' else stats['probs']
-    dataset_probe_identity = np.array(exp.dataset_probe_identity)
-    clean_idx = np.where(dataset_probe_identity == 'probe')[0]
-    print("Training the trajectory classifier...")
+    def detect():
+        losses = stats['losses'] if args.badloss_metric == 'loss' else stats['probs']
+        dataset_probe_identity = np.array(exp.dataset_probe_identity)
+        clean_idx = np.where(dataset_probe_identity == 'probe')[0]
+        print("Training the trajectory classifier...")
 
-    # Rows that were never visited: original positions of examples replaced by their probe/poison copies
-    missing_vals = (losses == 0).all(dim=1)
-    missing_vals_idx = torch.nonzero(missing_vals).squeeze()
-    available_ex = ~missing_vals
-    print(f"!! Total loss traj len: {len(losses)} / Modified examples identified: {sum(missing_vals)}")
+        # Rows that were never visited: original positions of examples replaced by their probe/poison copies
+        missing_vals = (losses == 0).all(dim=1)
+        missing_vals_idx = torch.nonzero(missing_vals).squeeze()
+        available_ex = ~missing_vals
+        print(f"!! Total loss traj len: {len(losses)} / Modified examples identified: {sum(missing_vals)}")
 
-    if not args.badloss_no_epoch_filter:
-        losses = losses[:, filter_epochs(losses[available_ex])]
-    probs = anomaly_scores(losses[available_ex], losses[clean_idx], args.badloss_k, args.badloss_eps,
-                           log_scores=not args.badloss_linear_scores)
+        if not args.badloss_no_epoch_filter:
+            losses = losses[:, filter_epochs(losses[available_ex])]
+        probs = anomaly_scores(losses[available_ex], losses[clean_idx], args.badloss_k, args.badloss_eps,
+                               log_scores=not args.badloss_linear_scores)
 
-    # Convert scores to ranks in [0, 1], so that thresholding removes a fixed fraction of examples
-    ranks = np.zeros(len(probs))
-    ranks[probs.argsort()] = np.linspace(0, 1, len(probs))
+        # Convert scores to ranks in [0, 1], so that thresholding removes a fixed fraction of examples
+        ranks = np.zeros(len(probs))
+        ranks[probs.argsort()] = np.linspace(0, 1, len(probs))
 
-    is_poison = np.array([x.startswith('poison_') for x in dataset_probe_identity])
-    x, y, _ = roc_curve(is_poison[available_ex].astype(int), ranks)
-    print("AUC:", auc(x, y))
-    exp.record_detection(auc=auc(x, y))
-    poison_scores = np.zeros(len(losses), dtype=ranks.dtype)
-    poison_scores[available_ex] = ranks
-    poison_scores[missing_vals] = 1.1  # Always removed
+        is_poison = np.array([x.startswith('poison_') for x in dataset_probe_identity])
+        x, y, _ = roc_curve(is_poison[available_ex].astype(int), ranks)
+        print("AUC:", auc(x, y))
+        exp.record_detection(auc=auc(x, y))
+        poison_scores = np.zeros(len(losses), dtype=ranks.dtype)
+        poison_scores[available_ex] = ranks
+        poison_scores[missing_vals] = 1.1  # Always removed
 
-    print("!! Including training probe examples with their clean labels for retraining...")
-    probe_new_idx = [i for i, x in enumerate(dataset_probe_identity) if x == "probe"]
-    assert len(probe_new_idx) == len(exp.probe_original_idx)
-    # Retrain on the probes' original training-set positions; remove their probe-set copies
-    poison_scores[exp.probe_original_idx] = 0.
-    poison_scores[probe_new_idx] = 1.1
+        print("!! Including training probe examples with their clean labels for retraining...")
+        probe_new_idx = [i for i, x in enumerate(dataset_probe_identity) if x == "probe"]
+        assert len(probe_new_idx) == len(exp.probe_original_idx)
+        # Retrain on the probes' original training-set positions; remove their probe-set copies
+        poison_scores[exp.probe_original_idx] = 0.
+        poison_scores[probe_new_idx] = 1.1
 
-    threshold = 1 - args.badloss_reject_frac
-    exp.wandb_prefix = f"cleaned_thresh_{threshold}_"
-    clean_indices = np.where(poison_scores <= threshold)[0]
-    print(f"!! [Dataset cleansing] Total examples: {len(poison_scores)} / # clean indices: {len(clean_indices)}")
-    discarded_indices = [i for i in range(len(poison_scores)) if i not in clean_indices and i not in missing_vals_idx]
-    discarded_identities = Counter(dataset_probe_identity[i] for i in discarded_indices)
-    print("!! Discarded example identities:", discarded_identities)
-    exp.record_detection(num_removed=len(discarded_indices), removed_identities=dict(discarded_identities))
+        threshold = 1 - args.badloss_reject_frac
+        clean_indices = np.where(poison_scores <= threshold)[0]
+        print(f"!! [Dataset cleansing] Total examples: {len(poison_scores)} / # clean indices: {len(clean_indices)}")
+        discarded_indices = [i for i in range(len(poison_scores))
+                             if i not in clean_indices and i not in missing_vals_idx]
+        discarded_identities = Counter(dataset_probe_identity[i] for i in discarded_indices)
+        print("!! Discarded example identities:", discarded_identities)
+        exp.record_detection(num_removed=len(discarded_indices), removed_identities=dict(discarded_identities))
+        return clean_indices
+
+    clean_indices = exp.detect(detect)
+    if clean_indices is None:
+        return
+    exp.wandb_prefix = f"cleaned_thresh_{1 - args.badloss_reject_frac}_"
 
     retrain_loader = exp.loader(clean_indices)
     clean_model = exp.new_model()

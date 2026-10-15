@@ -74,19 +74,24 @@ def run(exp):
     exp.report_attacked_model()
     exp.wandb_prefix = "retraining_"
 
-    cd = CognitiveDistillation(num_steps=args.cd_num_steps, norm_only=True)
-    mask_norms = torch.zeros(len(exp.new_idx_loader_wo_aug.dataset))  # Only the L1 norms (full masks don't fit in
-    for (data, target), ex_idx in tqdm(exp.new_idx_loader_wo_aug):    # memory on ImageNet)
-        mask_norms[ex_idx] = cd(exp.model, data.to(exp.device))
-    valid_mask_idx = torch.where(mask_norms != 0)[0]
-    base_idx = np.intersect1d(exp.probe_imgs.idx, valid_mask_idx.numpy())
-    print("Num training examples for cognitive distillation", len(base_idx))
+    def detect():
+        cd = CognitiveDistillation(num_steps=args.cd_num_steps, norm_only=True)
+        mask_norms = torch.zeros(len(exp.new_idx_loader_wo_aug.dataset))  # Only the L1 norms (full masks don't fit in
+        for (data, target), ex_idx in tqdm(exp.new_idx_loader_wo_aug):    # memory on ImageNet)
+            mask_norms[ex_idx] = cd(exp.model, data.to(exp.device))
+        valid_mask_idx = torch.where(mask_norms != 0)[0]
+        base_idx = np.intersect1d(exp.probe_imgs.idx, valid_mask_idx.numpy())
+        print("Num training examples for cognitive distillation", len(base_idx))
 
-    # Standardize by the clean probes' statistics (only needed for CD's own thresholded detection)
-    mean, std = mask_norms[base_idx].mean(), mask_norms[base_idx].std()
-    mask_norms[valid_mask_idx] -= mean
-    mask_norms[valid_mask_idx] /= std
+        # Standardize by the clean probes' statistics (only needed for CD's own thresholded detection)
+        mean, std = mask_norms[base_idx].mean(), mask_norms[base_idx].std()
+        mask_norms[valid_mask_idx] -= mean
+        mask_norms[valid_mask_idx] /= std
 
-    identified_indices = mask_norms.argsort()[:int(args.cd_remove_frac * len(mask_norms))]
-    exp.report_detection(identified_indices)
-    exp.retrain(identified_indices)
+        identified_indices = mask_norms.argsort()[:int(args.cd_remove_frac * len(mask_norms))]
+        exp.report_detection(identified_indices)
+        return identified_indices
+
+    identified_indices = exp.detect(detect)
+    if identified_indices is not None:
+        exp.retrain(identified_indices)
