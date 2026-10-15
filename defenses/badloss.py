@@ -133,8 +133,8 @@ def run(exp):
 
     retrain_loader = exp.loader(clean_indices)
     clean_model = exp.new_model()
-    criterion, optimizer, lr_scheduler = exp.new_optimizer(clean_model, args.badloss_retrain_epochs)
-    for _ in range(args.badloss_retrain_epochs):
+    criterion, optimizer, lr_scheduler = exp.new_optimizer(clean_model, exp.num_epochs)
+    for _ in range(exp.num_epochs):
         train(clean_model, exp.device, retrain_loader, optimizer, criterion)
         lr_scheduler.step()
     exp.save_model(clean_model, "retrained_model.pth")
