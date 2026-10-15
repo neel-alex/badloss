@@ -129,6 +129,8 @@ def run(exp):
                                      & ~missing_vals.numpy())[0].tolist()
         discarded_identities = Counter(dataset_probe_identity[i] for i in discarded_indices)
         print("!! Discarded example identities:", discarded_identities)
+        # Detection rates as for the other defenses (the probe copies, always removed, aren't detections)
+        exp.report_detection(np.setdiff1d(discarded_indices, probe_new_idx))
         exp.record_detection(num_removed=len(discarded_indices), removed_identities=dict(discarded_identities))
         return clean_indices
 
