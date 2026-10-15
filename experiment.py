@@ -68,8 +68,10 @@ class Experiment:
         utils.seed_all(self.seed)
 
         ratio_tag = ''.join(f"_{r}" for r in args.poisoning_ratio)
-        self.output_dir = os.path.join(args.output_root,
-                                       f"{args.dataset}_{args.attack}_{args.defense}_s{args.seed}{ratio_tag}")
+        budget_tag = "_bm" if args.budget_matched_to else ""
+        attack_tag = args.attack.replace(',', '+')
+        self.output_dir = os.path.join(args.output_root, f"{args.dataset}_{attack_tag}_{args.defense}_s{args.seed}"
+                                                         f"{ratio_tag}{budget_tag}")
         self.code_hash = _code_hash()
 
         self.log_wandb = False
@@ -126,7 +128,8 @@ class Experiment:
 
         self.poison_imgs, self.attack_targets, blend_r_pattern = make_poison_imgs(
             self.num_classes, args.dataset, self.train_set_wo_aug, args.poison_ratios, self.attacks,
-            self.output_dir, self.main_proc, self.img_size, data_root=args.data_dir)
+            self.output_dir, self.main_proc, self.img_size, data_root=args.data_dir,
+            budget_matched_to=args.budget_matched_to)
         self.probe_imgs = make_probe_imgs(self.train_set_wo_aug, args.num_probes,
                                           poison_indices=all_poison_indices(self.poison_imgs))
         self.poison_imgs_test = make_poison_imgs_test(self.test_set, args.dataset, args.num_asr_images, self.attacks,

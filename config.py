@@ -4,6 +4,7 @@ from typing import List, Dict, Optional
 
 DATASETS = ['cifar10', 'gtsrb', 'imagenette', 'imagenet']
 ATTACKS = ['patch', 'single_pix', 'blend_r', 'blend_p', 'sinusoid', 'narcissus', 'frequency']
+CLEAN_LABEL_ATTACKS = {'sinusoid', 'narcissus'}  # Ratios are fractions of the target class
 DEFENSES = ['badloss', 'nc', 'ac', 'ss', 'freq', 'abl', 'cd', 'cbd', 'pss']
 
 
@@ -12,7 +13,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Main arguments
     parser.add_argument('--dataset', default='cifar10', type=str, choices=DATASETS)
-    parser.add_argument('--attack', default='all', type=str, choices=['all'] + ATTACKS)
+    parser.add_argument('--attack', default='all', type=str,
+                        help="'all' (every attack used for the dataset), one attack, or a comma-separated list of: "
+                             + ", ".join(ATTACKS))
+    parser.add_argument('--budget_matched_to', default=None, type=str,
+                        help="Comma-separated attack list: give the (single, dirty-label) --attack the total poison "
+                             "count of these attacks, and the target class it gets when they are run together "
+                             "(same seed and order)")
     parser.add_argument('--defense', default='badloss', type=str, choices=DEFENSES)
     parser.add_argument('--poisoning_ratio', nargs='*', default=[],
                         help="Poisoning ratios as key=value pairs, e.g. patch=0.03")
@@ -129,6 +136,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     if args.ac_threshold is None:
         args.ac_threshold = 0.15 if args.ac_mode == 'sil' else 0.3
     args.attacks = get_attacks(args.attack, args.dataset)
+    unknown = [a for a in args.attacks if a not in ATTACKS]
+    if unknown:
+        build_parser().error(f"unknown attack(s): {unknown}")
+    if args.budget_matched_to is not None:
+        args.budget_matched_to = get_attacks(args.budget_matched_to, args.dataset)
+        if len(args.attacks) != 1 or args.attacks[0] not in args.budget_matched_to:
+            build_parser().error("--budget_matched_to needs a single --attack from its list")
+        if CLEAN_LABEL_ATTACKS & set(args.budget_matched_to):
+            build_parser().error("--budget_matched_to only supports dirty-label attacks")
     args.poison_ratios = get_poisoning_ratio(args.dataset, args.poisoning_ratio)
     return args
 
@@ -153,8 +169,7 @@ def get_attacks(attack: str, dataset: str) -> List[str]:
                     'sinusoid', 'frequency']
         elif dataset == 'imagenette' or dataset == 'imagenet':
             return ['patch', 'blend_r', 'blend_p', 'sinusoid', 'frequency']
-    else:
-        return [attack]
+    return attack.split(',')
 
 
 def get_default_poisoning_ratio(dataset: str) -> Dict[str, float]:

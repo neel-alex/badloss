@@ -9,6 +9,7 @@ from torchvision import transforms
 import cv2
 
 import dist_utils
+from config import CLEAN_LABEL_ATTACKS
 
 
 BLEND_R_ALPHA = 0.075
@@ -19,7 +20,6 @@ IMAGENETTE_ALPHA = 0.15
 
 BLENDING_ATTACKS = {'blend_r', 'blend_p', 'sinusoid', 'narcissus', 'frequency'}
 BOOSTING_RATIO = 2  # Trigger strength multiplier for the additional "_boosted" ASR evaluation
-CLEAN_LABEL_ATTACKS = {'sinusoid', 'narcissus'}
 
 
 @dataclass
@@ -216,21 +216,28 @@ def make_probe_imgs(train_set_wo_aug, num_probes, poison_indices):
 
 
 def make_poison_imgs(num_classes, dataset, train_set_wo_aug, poison_ratios, attacks, output_dir, main_proc,
-                     img_size, data_root='./data'):
+                     img_size, data_root='./data', budget_matched_to=None):
     """Poisoned training images for each attack (no image is attacked twice).
+
+    budget_matched_to: optional list of (dirty-label) attacks containing the single attack in `attacks`. That
+    attack then gets their total poison count, and the target class it would get if they were run together.
 
     Returns (poison_imgs: attack -> ImageSet, attack_targets: attack -> target class, blend_r pattern).
     """
     poison_imgs = {}
-    attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in attacks}
+    target_attacks = attacks if budget_matched_to is None else budget_matched_to
+    attack_targets = {attack: np.random.choice(np.arange(num_classes)) for attack in target_attacks}
     if 'sinusoid' in attacks and dataset == "gtsrb":
         class_counts = collections.Counter(train_set_wo_aug.targets)
         while class_counts[attack_targets['sinusoid']] < 1000:
             attack_targets['sinusoid'] = np.random.choice(np.arange(num_classes))
     if 'narcissus' in attacks:
         attack_targets['narcissus'] = narcissus_classes[dataset]
+    attack_numbers = {attack: int(len(train_set_wo_aug) * poison_ratios[attack]) for attack in target_attacks}
+    if budget_matched_to is not None:
+        attack_targets = {attack: attack_targets[attack] for attack in attacks}
+        attack_numbers = {attacks[0]: sum(attack_numbers.values())}
     print("Chosen attack targets:", attack_targets)
-    attack_numbers = {attack: int(len(train_set_wo_aug) * poison_ratios[attack]) for attack in attacks}
     print("Making attack image quantities:", attack_numbers, "(clean label attacks may be incorrect)")
     train_indices = list(range(len(train_set_wo_aug)))
     blend_r_pattern = None
