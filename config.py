@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--nc_anomaly_threshold', default=2.0, type=float, help="MAD anomaly index threshold")
     parser.add_argument('--nc_neuron_frac', default=0.01, type=float, help="Fraction of neurons treated as poisoned")
     parser.add_argument('--nc_fpr', default=0.05, type=float, help="Target false-positive rate on clean probes")
+    parser.add_argument('--nc_class_frac', default=1.0, type=float,
+                        help="Reverse-engineer triggers for only this fraction of classes (for many-class datasets): "
+                             "the attack targets (oracle) plus random others")
+    parser.add_argument('--nc_data_frac', default=1.0, type=float,
+                        help="Optimize the masks on a random subset of this fraction of the training set")
 
     # Activation Clustering
     parser.add_argument('--ac_mode', default='sil', type=str, choices=['sil', 'rsc'],
