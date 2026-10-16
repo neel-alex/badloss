@@ -95,7 +95,8 @@ def run(exp):
 
     print("!! Performing PSS initial pretraining...")
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
-    for epoch in tqdm(range(args.pss_pretrain_epochs)):
+    for epoch in exp.epochs("pss_pretrain", args.pss_pretrain_epochs,
+                            {"model": backdoor_model, "optimizer": optimizer}):
         train(backdoor_model, exp.device, exp.train_loader_wo_aug, optimizer, criterion)
         if epoch % 2 == 1:
             exp.evaluate(backdoor_model, criterion)
@@ -104,7 +105,8 @@ def run(exp):
     optimizer = torch.optim.SGD(backdoor_model.parameters(), lr=args.pss_lr, momentum=0.9, weight_decay=5e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
     print("!! Performing intraclass training...")
-    for epoch in tqdm(range(args.pss_intraclass_epochs)):
+    state = {"model": backdoor_model, "optimizer": optimizer, "scheduler": scheduler}
+    for epoch in exp.epochs("pss_intraclass", args.pss_intraclass_epochs, state):
         train_intraclass(backdoor_model, exp.device, exp.train_loader_wo_aug, optimizer, exp.num_classes)
         scheduler.step()
         if epoch % 5 == 4:
@@ -124,7 +126,8 @@ def run(exp):
     optimizer = torch.optim.SGD(model.parameters(), lr=args.pss_unlearn_lr, momentum=0.9, weight_decay=5e-4)
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
     print("!! Performing PSS backdoor defense...")
-    for epoch in tqdm(range(args.pss_unlearn_epochs)):
+    for epoch in exp.epochs("pss_unlearn", args.pss_unlearn_epochs, {"model": model, "optimizer": optimizer},
+                            extra_loaders=[clean_dl, pois_dl]):
         pss_unlearn(model, exp.device, clean_dl, pois_dl, optimizer, criterion)
         if epoch % 5 == 4:
             exp.evaluate(model, criterion)

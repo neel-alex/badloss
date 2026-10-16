@@ -43,7 +43,9 @@ def _train_and_record(exp):
     correct_class_probs = torch.zeros((num_examples, args.badloss_pretrain_epochs))
 
     loader = exp.new_idx_loader if args.badloss_pretrain_augment else exp.train_loader_wo_aug
-    for epoch in range(args.badloss_pretrain_epochs):
+    state = {"model": exp.model, "optimizer": exp.optimizer, "lr_scheduler": exp.lr_scheduler,
+             "losses": losses, "correct_class_probs": correct_class_probs}
+    for epoch in exp.epochs("badloss_trajectories", args.badloss_pretrain_epochs, state):
         train(exp.model, exp.device, loader, exp.optimizer, exp.criterion)
         losses[:, epoch], correct_class_probs[:, epoch] = collect_losses(exp.model, exp.device,
                                                                          exp.new_idx_loader_wo_aug, exp.criterion)
@@ -142,7 +144,8 @@ def run(exp):
     retrain_loader = exp.loader(clean_indices)
     clean_model = exp.new_model()
     criterion, optimizer, lr_scheduler = exp.new_optimizer(clean_model, exp.num_epochs)
-    for _ in range(exp.num_epochs):
+    state = {"model": clean_model, "optimizer": optimizer, "lr_scheduler": lr_scheduler}
+    for _ in exp.epochs("retrain", exp.num_epochs, state, extra_loaders=[retrain_loader]):
         train(clean_model, exp.device, retrain_loader, optimizer, criterion)
         lr_scheduler.step()
     exp.save_model(clean_model, "retrained_model.pth")

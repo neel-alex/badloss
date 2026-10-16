@@ -144,7 +144,8 @@ def run(exp):
 
     print("!! Performing CBD initial pretraining...")
     criterion, optimizer, _ = exp.new_optimizer(backdoor_model, args.cbd_pretrain_epochs)
-    for epoch in tqdm(range(args.cbd_pretrain_epochs)):
+    state = {"model": backdoor_model, "optimizer": optimizer}
+    for epoch in exp.epochs("cbd_pretrain", args.cbd_pretrain_epochs, state):
         train(backdoor_model, exp.device, exp.new_idx_loader, optimizer, criterion)
         if epoch % 5 == 4:
             exp.evaluate(backdoor_model, criterion)
@@ -159,7 +160,9 @@ def run(exp):
 
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20, 70], gamma=0.1)
-    for epoch in range(exp.num_epochs):
+    state = {"model": clean_model, "discriminator": discriminator, "optimizer": optimizer,
+             "adv_optimizer": adv_optimizer, "scheduler": scheduler, "adv_scheduler": adv_scheduler}
+    for epoch in exp.epochs("cbd_train", exp.num_epochs, state):
         train_cbd(clean_model, backdoor_model, discriminator, exp.device, exp.new_idx_loader, optimizer,
                   adv_optimizer, criterion, args.cbd_ce_gamma)
         if epoch % 5 == 4:

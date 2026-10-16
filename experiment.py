@@ -5,6 +5,7 @@ import json
 import os
 import random
 import subprocess
+import time
 import warnings
 
 import numpy as np
@@ -44,7 +45,12 @@ def _code_hash():
 
 # Arguments that cannot affect the poisoned training set or the attacked model
 _DEFENSE_ARG_PREFIXES = ('badloss_', 'nc_', 'ac_', 'ss_', 'freq_', 'abl_', 'cd_', 'cbd_', 'pss_')
-_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'cache_dir', 'no_cache', 'detect_only'}
+_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'cache_dir', 'no_cache', 'detect_only', 'time_limit_hours'}
+
+
+class TimeLimitReached(Exception):
+    """Raised between epochs when the next one might not finish within --time_limit_hours. Progress is checkpointed:
+    rerunning the same command resumes."""
 
 
 def _jsonable(x):
@@ -63,6 +69,9 @@ class Experiment:
 
     def __init__(self, args):
         self.args = args
+        self.start_time = time.time()
+        self._max_epoch_time = 0.0  # Longest training epoch so far in this process (for --time_limit_hours)
+        self._epochs_run = 0
         print(args.dataset, args.attack, args.defense, args.poisoning_ratio)
         self.attacks = args.attacks
         self.seed = args.seed
@@ -204,12 +213,16 @@ class Experiment:
         arguments that can affect it and `extra`. Artifacts are reused only if all of these match."""
         if self.args.no_cache:
             return None
+        cache_root = self.args.cache_dir or os.path.join(self.args.output_root, "cache")
+        return os.path.join(cache_root, f"{kind}_{self._key(kind, **extra)}")
+
+    def _key(self, kind, **extra):
+        """Hash of the source code, the arguments that can affect the attacked model and `extra`."""
         key_args = {k: v for k, v in vars(self.args).items()
                     if k not in _NON_SEMANTIC_ARGS and not k.startswith(_DEFENSE_ARG_PREFIXES)}
         key = json.dumps({"kind": kind, "code": self.code_hash, "args": key_args, "extra": extra},
                          sort_keys=True, default=str)
-        cache_root = self.args.cache_dir or os.path.join(self.args.output_root, "cache")
-        return os.path.join(cache_root, f"{kind}_{hashlib.sha256(key.encode()).hexdigest()[:16]}")
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
 
     def save_cached(self, cache_dir, **items):
         """Atomically write torch-serializable items into cache_dir (with the key's description)."""
@@ -254,19 +267,72 @@ class Experiment:
     def _loaders(self):
         return [self.new_idx_loader, self.train_loader_wo_aug, self.new_idx_loader_wo_aug, self.test_idx_loader]
 
-    def _get_rng_state(self):
+    def _get_rng_state(self, extra_loaders=()):
         return {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-                "loaders": [loader.generator.get_state() for loader in self._loaders()]}
+                "loaders": [loader.generator.get_state() for loader in self._loaders() + list(extra_loaders)]}
 
-    def _set_rng_state(self, state):
+    def _set_rng_state(self, state, extra_loaders=()):
         random.setstate(state["python"])
         np.random.set_state(state["numpy"])
         torch.set_rng_state(state["torch"])
         if state["cuda"] is not None:
             torch.cuda.set_rng_state_all(state["cuda"])
-        for loader, loader_state in zip(self._loaders(), state["loaders"]):
+        loaders = self._loaders() + list(extra_loaders)
+        assert len(loaders) == len(state["loaders"])
+        for loader, loader_state in zip(loaders, state["loaders"]):
             loader.generator.set_state(loader_state)
+
+    def epochs(self, name, num_epochs, state, extra_loaders=()):
+        """Epoch numbers 0..num_epochs-1 for a training loop that can be resumed by a later run of the same command.
+
+        After each epoch, checkpoints `state` (name -> a tensor, or an object with state_dict()/load_state_dict()),
+        the global RNG states and the loaders' generators (the shared ones plus extra_loaders) to
+        <output_dir>/checkpoints/<name>.pt. If that file exists, the loop resumes from it; results are the same as
+        an uninterrupted run. With --time_limit_hours, raises TimeLimitReached between epochs when the next epoch
+        might not finish in time. `name` must be unique within a run.
+        """
+        path = os.path.join(self.output_dir, "checkpoints", f"{name}.pt")
+        defense_args = {k: v for k, v in vars(self.args).items() if k.startswith(_DEFENSE_ARG_PREFIXES)}
+        key = self._key(f"checkpoint_{name}", defense=self.args.defense, defense_args=defense_args)
+        start, max_epoch_time = 0, self._max_epoch_time
+        if os.path.exists(path):
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            if ckpt["key"] != key:
+                raise RuntimeError(f"{path} is from a different code version or settings; delete it to start over")
+            for k, obj in state.items():
+                if torch.is_tensor(obj):
+                    obj.copy_(ckpt["state"][k])
+                else:
+                    obj.load_state_dict(ckpt["state"][k])
+            self._set_rng_state(ckpt["rng_state"], extra_loaders)
+            start, max_epoch_time = ckpt["epoch"], max(max_epoch_time, ckpt["max_epoch_time"])
+            print(f"Resuming {name} from epoch {start} ({path})")
+        if start < num_epochs:
+            self._check_time_limit(name, start, num_epochs, max_epoch_time)
+        for epoch in range(start, num_epochs):
+            t0 = time.time()
+            yield epoch
+            max_epoch_time = self._max_epoch_time = max(max_epoch_time, time.time() - t0)
+            self._epochs_run += 1
+            if self.main_proc:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                ckpt = {"key": key, "epoch": epoch + 1, "max_epoch_time": max_epoch_time,
+                        "state": {k: obj if torch.is_tensor(obj) else obj.state_dict() for k, obj in state.items()},
+                        "rng_state": self._get_rng_state(extra_loaders)}
+                tmp = f"{path}.tmp{os.getpid()}"
+                torch.save(ckpt, tmp)
+                os.replace(tmp, path)
+            if epoch + 1 < num_epochs:
+                self._check_time_limit(name, epoch + 1, num_epochs, max_epoch_time)
+
+    def _check_time_limit(self, name, epoch, num_epochs, max_epoch_time):
+        """Raise TimeLimitReached if another epoch (taking 1.5x the longest so far) would overrun --time_limit_hours.
+        Never before this process has trained an epoch, so every run makes progress."""
+        limit, elapsed = self.args.time_limit_hours, time.time() - self.start_time
+        if limit is not None and self._epochs_run > 0 and elapsed + 1.5 * max_epoch_time > limit * 3600:
+            raise TimeLimitReached(f"{name}: stopping at epoch {epoch}/{num_epochs} ({elapsed / 3600:.2f} h "
+                                   f"elapsed, epochs take up to {max_epoch_time / 60:.1f} min)")
 
     def reset_rngs(self):
         """Reseed the global RNGs and the training loader after a cacheable phase, so whatever follows is the same
@@ -353,6 +419,10 @@ class Experiment:
             torch.save(model.state_dict(), os.path.join(self.output_dir, name))
 
     def finish(self):
+        """End of a completed run: drop the training checkpoints."""
+        if self.main_proc:
+            for f in glob.glob(os.path.join(self.output_dir, "checkpoints", "*.pt")):
+                os.remove(f)
         if self.log_wandb:
             import wandb
             wandb.finish()
@@ -368,7 +438,8 @@ class Experiment:
         if cached is not None:
             self.model.load_state_dict(cached[0])
         else:
-            for epoch in range(self.num_epochs):
+            state = {"model": self.model, "optimizer": self.optimizer, "lr_scheduler": self.lr_scheduler}
+            for epoch in self.epochs("pretrain", self.num_epochs, state):
                 train(self.model, self.device, self.new_idx_loader, self.optimizer, self.criterion)
                 if (epoch + 1) % 5 == 0:
                     print(f"Stats for epoch {epoch + 1}")
@@ -388,7 +459,8 @@ class Experiment:
         clean_model = self.new_model()
         clean_criterion, clean_optimizer, clean_lr_scheduler = self.new_optimizer(clean_model, self.num_epochs)
 
-        for epoch in range(self.num_epochs):
+        state = {"model": clean_model, "optimizer": clean_optimizer, "lr_scheduler": clean_lr_scheduler}
+        for epoch in self.epochs("retrain", self.num_epochs, state, extra_loaders=[retrain_set_dl]):
             train(clean_model, self.device, retrain_set_dl, clean_optimizer, clean_criterion)
             if (epoch + 1) % 5 == 0:
                 print(f"Stats for epoch {epoch + 1}")

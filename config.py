@@ -36,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--detect_only', action='store_true',
                         help="Stop after the defense's detection step (cached, so a later run without this flag goes "
                              "straight to retraining). Not available for cbd and pss, which have no separate step")
+    parser.add_argument('--time_limit_hours', default=None, type=float,
+                        help="Stop (exit code 75) between epochs when the next epoch might not finish within this "
+                             "many hours of the start. Training loops are checkpointed, so rerunning the same command "
+                             "resumes where it stopped")
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--num_epochs', default=None, type=int,
                         help="Epochs for (re)training models; default depends on the dataset")

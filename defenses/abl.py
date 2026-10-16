@@ -4,7 +4,6 @@ Train briefly with loss flooding, then flag the examples with the lowest loss. A
 are removed and the model is retrained from scratch (ABL's unlearning step was unstable in testing).
 """
 import numpy as np
-from tqdm import tqdm
 
 from torch_utils import train, test
 
@@ -22,7 +21,7 @@ def run(exp):
 
         print("!! Performing initial pretraining with all examples (using loss flooding)...")
         criterion, optimizer, _ = exp.new_optimizer(model, args.abl_pretrain_epochs)
-        for epoch in tqdm(range(args.abl_pretrain_epochs)):
+        for epoch in exp.epochs("abl_pretrain", args.abl_pretrain_epochs, {"model": model, "optimizer": optimizer}):
             train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding)
             if epoch % 5 == 4:
                 exp.evaluate(model, criterion)
