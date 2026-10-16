@@ -12,5 +12,3 @@ matplotlib==3.11.2
 natsort==8.4.0
 tqdm==4.70.1
 wandb==0.30.0
-# Optional, multi-GPU (DDP) runs only: catalyst (DistributedSamplerWrapper). Untested with the
-# versions above, and installing it pulls in its own torch.
