@@ -152,7 +152,7 @@ def run(exp):
 
     clean_model = exp.new_model()
     feature_dim = classifier_layer(clean_model).in_features
-    discriminator = DisenEstimator(feature_dim, feature_dim, dropout=0.2)
+    discriminator = DisenEstimator(feature_dim, feature_dim, dropout=0.2).to(exp.device)
     adv_optimizer = torch.optim.Adam(discriminator.parameters(), lr=args.cbd_adv_lr)
     adv_scheduler = torch.optim.lr_scheduler.StepLR(adv_optimizer, step_size=20, gamma=0.1)
     optimizer = torch.optim.SGD(clean_model.parameters(), lr=args.cbd_lr, momentum=0.9, weight_decay=1e-4,
