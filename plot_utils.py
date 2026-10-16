@@ -21,11 +21,12 @@ def plot(x, y=None, class_names=None, output_dir=None, output_file=None, diff_im
     fig, ax = plt.subplots(plot_rows, num_plots_per_row, figsize=(plot_size * num_plots_per_row, plot_size * plot_rows),
                            sharex=True, sharey=True)
 
-    input = x.cpu().numpy()
+    num_plotted = plot_rows * num_plots_per_row
+    input = x[:num_plotted].cpu().numpy()
     is_grayscale = input.shape[1] == 1
     input = input[:, 0, :, :] if is_grayscale else np.transpose(input, (0, 2, 3, 1))
     if class_names is not None:
-        y = [class_names[int(i)] for i in y]
+        y = [class_names[int(i)] for i in y[:num_plotted]]
 
     if diff_image:
         input = np.abs(input)

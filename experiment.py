@@ -174,12 +174,10 @@ class Experiment:
                                self.batch_size, self.distributed, args.num_workers, self.seed,
                                fix_inserted_aug=args.fix_inserted_aug)
 
-        # Probe/poison sets are small: keep them on the GPU (the test ones too, except for large images)
-        for image_set in self.train_eval_sets.values():
+        # Probe/poison sets are small: keep them on the GPU, the ASR test sets too (~8 GB on ImageNet, which would
+        # otherwise sit in host memory for the whole run)
+        for image_set in list(self.train_eval_sets.values()) + list(self.poison_imgs_test.values()):
             image_set.to(device)
-        if args.dataset not in {"gtsrb", "imagenette", "imagenet"}:
-            for image_set in self.poison_imgs_test.values():
-                image_set.to(device)
 
 
     # --- Building blocks ---

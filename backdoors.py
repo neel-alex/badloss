@@ -26,13 +26,12 @@ BOOSTING_RATIO = 2  # Trigger strength multiplier for the additional "_boosted" 
 class ImageSet:
     """A set of (possibly triggered) images with their training labels.
 
-    idx: positions of the source images in their dataset; original/diff: the untriggered images and the
-    trigger's effect (original - triggered), kept for plotting.
+    idx: positions of the source images in their dataset; diff: the trigger's effect (untriggered - triggered)
+    on the first few images, for plotting.
     """
     images: torch.Tensor
     labels: torch.Tensor
     idx: Optional[np.ndarray] = None
-    original: Optional[torch.Tensor] = None
     diff: Optional[torch.Tensor] = None
 
     def __len__(self):
@@ -193,17 +192,19 @@ def make_probe_transform(attack_name, img_size, dataset, output_dir, main_proc, 
     return backdoor_transform, pattern
 
 
+NUM_PLOTTED = 9  # plot_utils.plot shows the first 9 images
+
+
 def make_image_set(indices, dataset, labels, transform=None, track_idx=True):
     """Stack dataset[i] for the given indices, optionally applying a trigger transform."""
-    originals = torch.stack([dataset[i][0] for i in indices], dim=0) if transform is None or track_idx else None
     if transform is None:
-        images = originals
+        images = torch.stack([dataset[i][0] for i in indices], dim=0)
     else:
         images = torch.stack([transform(dataset[i][0]) for i in indices], dim=0)
     image_set = ImageSet(images, torch.from_numpy(labels), idx=indices if track_idx else None)
     if transform is not None and track_idx:
-        image_set.original = originals
-        image_set.diff = originals - images
+        originals = torch.stack([dataset[i][0] for i in indices[:NUM_PLOTTED]], dim=0)
+        image_set.diff = originals - images[:NUM_PLOTTED]
     return image_set
 
 
