@@ -1,6 +1,6 @@
+import json
 import os
 import random
-import urllib
 import copy
 import itertools
 
@@ -14,12 +14,9 @@ from plot_utils import plot
 
 def load_class_mapping(dataset):
     if dataset == "imagenet":
-        # Load idx to class name mapping
-        url = "https://gist.githubusercontent.com/yrevar/942d3a0ac09ec9e5eb3a/raw/238f720ff059c1f82f368259d1ca4ffa5dd8f9f5/imagenet1000_clsidx_to_labels.txt"
-        response = urllib.request.urlopen(url)
-        lines = response.readlines()
-        string = ''.join([line.decode("utf-8") for line in lines])
-        label2name = eval(string)
+        # From https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a (imagenet1000_clsidx_to_labels.txt)
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "imagenet_classes.json")) as f:
+            label2name = dict(enumerate(json.load(f)))
     elif dataset == "imagenette":
         classes = ["tench", "english springer", "cassette player", "chain saw", "church", "french horn", "garbage truck",
                    "gas pump", "golf ball", "parachute"]
