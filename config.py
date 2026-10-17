@@ -40,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Stop (exit code 75) between epochs when the next epoch might not finish within this "
                              "many hours of the start. Training loops are checkpointed, so rerunning the same command "
                              "resumes where it stopped")
+    parser.add_argument('--amp', action='store_true',
+                        help="Train with bf16 autocast and channels_last (faster on A100s; changes results). "
+                             "Evaluation and detection scoring stay in fp32")
     parser.add_argument('--eval_every', default=None, type=int,
                         help="Evaluate during training every this many epochs (test set, un-augmented training set, "
                              "probes); default 10 for imagenet, else 5")

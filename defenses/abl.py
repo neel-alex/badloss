@@ -22,7 +22,8 @@ def run(exp):
         print("!! Performing initial pretraining with all examples (using loss flooding)...")
         criterion, optimizer, _ = exp.new_optimizer(model, args.abl_pretrain_epochs)
         for epoch in exp.epochs("abl_pretrain", args.abl_pretrain_epochs, {"model": model, "optimizer": optimizer}):
-            train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding)
+            train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding,
+                  amp=args.amp)
             if exp.eval_due(epoch):
                 exp.evaluate(model, criterion)
 

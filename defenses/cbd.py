@@ -82,8 +82,10 @@ class DisenEstimator(nn.Module):
 
 
 def train_cbd(clean_model, backdoor_model, discriminator, device, loader, optimizer, adv_optimizer, criterion,
-              ce_gamma=1.0):
-    """One epoch: a pass maximizing the discriminator's MI estimate, then a pass training the clean model."""
+              ce_gamma=1.0, amp=False):
+    """One epoch: a pass maximizing the discriminator's MI estimate, then a pass training the clean model.
+    amp: model forward passes under bf16 autocast (the discriminator stays in fp32)."""
+    autocast = lambda: torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp)  # noqa: E731
     backdoor_model.eval()
     backdoor_model.to(device)
     clean_model.train()
@@ -96,11 +98,11 @@ def train_cbd(clean_model, backdoor_model, discriminator, device, loader, optimi
     pbar = tqdm(loader)
     for (data, target), ex_idx in pbar:
         data = data.to(device)
-        output1, z_hidden = clean_model_fe(data)
-        with torch.no_grad():
+        with torch.no_grad(), autocast():  # (Only the hidden features are used: no graph needed)
+            output1, z_hidden = clean_model_fe(data)
             output2, r_hidden = backdoor_model_fe(data)
 
-        r_hidden, z_hidden = r_hidden.detach(), z_hidden.detach()
+        r_hidden, z_hidden = r_hidden.detach().float(), z_hidden.detach().float()
         dis_loss = - discriminator(r_hidden, z_hidden)
         adv_optimizer.zero_grad()
         dis_loss.backward()
@@ -113,13 +115,16 @@ def train_cbd(clean_model, backdoor_model, discriminator, device, loader, optimi
         data = data.to(device)
         target = target.to(device)
 
-        output1, z_hidden = clean_model_fe(data)
+        with autocast():
+            output1, z_hidden = clean_model_fe(data)
+            with torch.no_grad():
+                output2, r_hidden = backdoor_model_fe(data)
+        output1, z_hidden, output2 = output1.float(), z_hidden.float(), output2.float()
         with torch.no_grad():
-            output2, r_hidden = backdoor_model_fe(data)
             loss_bias = criterion(output2, target)
             loss_d = criterion(output1, target).detach()
 
-        r_hidden = r_hidden.detach()
+        r_hidden = r_hidden.detach().float()
         dis_loss = discriminator(r_hidden, z_hidden)
 
         # Upweight examples the backdoored model finds hard
@@ -146,7 +151,7 @@ def run(exp):
     criterion, optimizer, _ = exp.new_optimizer(backdoor_model, args.cbd_pretrain_epochs)
     state = {"model": backdoor_model, "optimizer": optimizer}
     for epoch in exp.epochs("cbd_pretrain", args.cbd_pretrain_epochs, state):
-        train(backdoor_model, exp.device, exp.new_idx_loader, optimizer, criterion)
+        train(backdoor_model, exp.device, exp.new_idx_loader, optimizer, criterion, amp=args.amp)
         if exp.eval_due(epoch):
             exp.evaluate(backdoor_model, criterion)
 
@@ -164,7 +169,7 @@ def run(exp):
              "adv_optimizer": adv_optimizer, "scheduler": scheduler, "adv_scheduler": adv_scheduler}
     for epoch in exp.epochs("cbd_train", exp.num_epochs, state):
         train_cbd(clean_model, backdoor_model, discriminator, exp.device, exp.new_idx_loader, optimizer,
-                  adv_optimizer, criterion, args.cbd_ce_gamma)
+                  adv_optimizer, criterion, args.cbd_ce_gamma, amp=args.amp)
         if exp.eval_due(epoch):
             print(f"Evaluation at epoch {epoch+1}")
             exp.evaluate(clean_model, criterion)

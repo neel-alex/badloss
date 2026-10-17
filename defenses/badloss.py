@@ -46,7 +46,7 @@ def _train_and_record(exp):
     state = {"model": exp.model, "optimizer": exp.optimizer, "lr_scheduler": exp.lr_scheduler,
              "losses": losses, "correct_class_probs": correct_class_probs}
     for epoch in exp.epochs("badloss_trajectories", args.badloss_pretrain_epochs, state):
-        train(exp.model, exp.device, loader, exp.optimizer, exp.criterion)
+        train(exp.model, exp.device, loader, exp.optimizer, exp.criterion, amp=args.amp)
         losses[:, epoch], correct_class_probs[:, epoch] = collect_losses(exp.model, exp.device,
                                                                          exp.new_idx_loader_wo_aug, exp.criterion)
         if exp.eval_due(epoch):
@@ -146,7 +146,7 @@ def run(exp):
     criterion, optimizer, lr_scheduler = exp.new_optimizer(clean_model, exp.num_epochs)
     state = {"model": clean_model, "optimizer": optimizer, "lr_scheduler": lr_scheduler}
     for _ in exp.epochs("retrain", exp.num_epochs, state, extra_loaders=[retrain_loader]):
-        train(clean_model, exp.device, retrain_loader, optimizer, criterion)
+        train(clean_model, exp.device, retrain_loader, optimizer, criterion, amp=args.amp)
         lr_scheduler.step()
     exp.save_model(clean_model, "retrained_model.pth")
 

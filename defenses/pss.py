@@ -97,7 +97,7 @@ def run(exp):
     criterion = torch.nn.CrossEntropyLoss(reduction='none').to(exp.device)
     for epoch in exp.epochs("pss_pretrain", args.pss_pretrain_epochs,
                             {"model": backdoor_model, "optimizer": optimizer}):
-        train(backdoor_model, exp.device, exp.train_loader_wo_aug, optimizer, criterion)
+        train(backdoor_model, exp.device, exp.train_loader_wo_aug, optimizer, criterion, amp=args.amp)
         if epoch % 2 == 1:
             exp.evaluate(backdoor_model, criterion)
 

@@ -204,7 +204,8 @@ class Experiment:
         self.criterion, self.optimizer, self.lr_scheduler = self.new_optimizer(self.model, self.num_epochs)
 
     def new_model(self):
-        return get_model(self.args.dataset, self.num_classes, self.device, self.local_rank, arch=self.args.arch)
+        return get_model(self.args.dataset, self.num_classes, self.device, self.local_rank, arch=self.args.arch,
+                         channels_last=self.args.amp)
 
     def new_optimizer(self, model, num_epochs):
         return get_optimizer(model, self.device, self.args.lr, self.args.weight_decay, num_epochs)
@@ -449,7 +450,8 @@ class Experiment:
         else:
             state = {"model": self.model, "optimizer": self.optimizer, "lr_scheduler": self.lr_scheduler}
             for epoch in self.epochs("pretrain", self.num_epochs, state):
-                train(self.model, self.device, self.new_idx_loader, self.optimizer, self.criterion)
+                train(self.model, self.device, self.new_idx_loader, self.optimizer, self.criterion,
+                      amp=self.args.amp)
                 if self.eval_due(epoch):
                     print(f"Stats for epoch {epoch + 1}")
                     self.evaluate(self.model, self.criterion)
@@ -470,7 +472,7 @@ class Experiment:
 
         state = {"model": clean_model, "optimizer": clean_optimizer, "lr_scheduler": clean_lr_scheduler}
         for epoch in self.epochs("retrain", self.num_epochs, state, extra_loaders=[retrain_set_dl]):
-            train(clean_model, self.device, retrain_set_dl, clean_optimizer, clean_criterion)
+            train(clean_model, self.device, retrain_set_dl, clean_optimizer, clean_criterion, amp=self.args.amp)
             if self.eval_due(epoch):
                 print(f"Stats for epoch {epoch + 1}")
                 self.evaluate(clean_model, clean_criterion)

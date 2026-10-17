@@ -8,7 +8,7 @@ import dist_utils
 from dist_utils import DistributedSamplerWrapper
 
 
-def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='resnet50'):
+def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='resnet50', channels_last=False):
     if arch in {'resnet18', 'resnet34', 'resnet50'}:
         model = getattr(models, arch)(weights=None, num_classes=num_classes)
         if dataset == "cifar10":  # Small-image stem: 3x3 conv, stride 1 (and a fresh classifier head)
@@ -25,6 +25,8 @@ def get_model(dataset, num_classes, device, local_rank, verbose=False, arch='res
     else:
         raise ValueError(f"Unknown architecture: {arch}")
     model = model.to(device)
+    if channels_last:  # Faster convolutions under bf16 autocast
+        model = model.to(memory_format=torch.channels_last)
     if verbose:
         print(model)
     model = dist_utils.convert_to_distributed(model, local_rank=local_rank, sync_bn=True)
@@ -39,8 +41,9 @@ def get_optimizer(model, device, lr, wd, num_epochs):
     return criterion, optimizer, lr_scheduler
 
 
-def train(model, device, train_loader, optimizer, criterion, log_interval=10, flooding_threshold=None):
-    """One epoch of training. criterion must use reduction='none'. flooding_threshold enables loss flooding (ABL)."""
+def train(model, device, train_loader, optimizer, criterion, log_interval=10, flooding_threshold=None, amp=False):
+    """One epoch of training. criterion must use reduction='none'. flooding_threshold enables loss flooding (ABL).
+    amp: forward pass under bf16 autocast."""
     model.train()
     optimizer.zero_grad()
 
@@ -50,8 +53,9 @@ def train(model, device, train_loader, optimizer, criterion, log_interval=10, fl
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
 
-        output = model(data)
-        loss = criterion(output, target)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+            output = model(data)
+            loss = criterion(output, target)
         loss = torch.clamp(loss, max=100)
         if flooding_threshold is not None:
             loss = (loss - flooding_threshold).abs() + flooding_threshold
