@@ -45,7 +45,8 @@ def _code_hash():
 
 # Arguments that cannot affect the poisoned training set or the attacked model
 _DEFENSE_ARG_PREFIXES = ('badloss_', 'nc_', 'ac_', 'ss_', 'freq_', 'abl_', 'cd_', 'cbd_', 'pss_')
-_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'cache_dir', 'no_cache', 'detect_only', 'time_limit_hours'}
+_NON_SEMANTIC_ARGS = {'defense', 'wandb', 'output_root', 'cache_dir', 'no_cache', 'detect_only', 'time_limit_hours',
+                      'eval_every'}
 
 
 class TimeLimitReached(Exception):
@@ -335,9 +336,13 @@ class Experiment:
                                    f"elapsed, epochs take up to {max_epoch_time / 60:.1f} min)")
 
     def reset_rngs(self):
-        """Reseed the global RNGs and the training loader after a cacheable phase, so whatever follows is the same
+        """Reseed the global RNGs and the loaders after a cacheable phase, so whatever follows is the same
         whether that phase was computed or loaded from the cache."""
         utils.seed_all(self.seed + 1)
+        # The sequential loaders' generators seed their workers, which augment the inserted images; they advance
+        # with every evaluation pass made while computing the phase (none on a cache hit).
+        for loader in (self.new_idx_loader_wo_aug, self.test_idx_loader):
+            loader.generator.manual_seed(self.seed)
         self.new_idx_loader = self.loader(self.comb_train_indices)
         self.train_loader_wo_aug = self.loader(self.comb_train_indices, dataset=self.new_idx_loader_wo_aug.dataset)
 
@@ -347,6 +352,10 @@ class Experiment:
                           self.seed, indices=indices, batch_size=self.batch_size)
 
     # --- Evaluation and results ---
+
+    def eval_due(self, epoch):
+        """Whether to evaluate mid-training after this (0-based) epoch: every --eval_every epochs."""
+        return (epoch + 1) % self.args.eval_every == 0
 
     def evaluate(self, model, criterion, train_loader=None):
         """Evaluate on the test set, the training set (un-augmented unless train_loader is given) and each probe
@@ -441,7 +450,7 @@ class Experiment:
             state = {"model": self.model, "optimizer": self.optimizer, "lr_scheduler": self.lr_scheduler}
             for epoch in self.epochs("pretrain", self.num_epochs, state):
                 train(self.model, self.device, self.new_idx_loader, self.optimizer, self.criterion)
-                if (epoch + 1) % 5 == 0:
+                if self.eval_due(epoch):
                     print(f"Stats for epoch {epoch + 1}")
                     self.evaluate(self.model, self.criterion)
                     self.evaluate_asr(self.model, self.criterion)
@@ -462,7 +471,7 @@ class Experiment:
         state = {"model": clean_model, "optimizer": clean_optimizer, "lr_scheduler": clean_lr_scheduler}
         for epoch in self.epochs("retrain", self.num_epochs, state, extra_loaders=[retrain_set_dl]):
             train(clean_model, self.device, retrain_set_dl, clean_optimizer, clean_criterion)
-            if (epoch + 1) % 5 == 0:
+            if self.eval_due(epoch):
                 print(f"Stats for epoch {epoch + 1}")
                 self.evaluate(clean_model, clean_criterion)
             clean_lr_scheduler.step()

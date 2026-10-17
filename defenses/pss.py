@@ -109,7 +109,7 @@ def run(exp):
     for epoch in exp.epochs("pss_intraclass", args.pss_intraclass_epochs, state):
         train_intraclass(backdoor_model, exp.device, exp.train_loader_wo_aug, optimizer, exp.num_classes)
         scheduler.step()
-        if epoch % 5 == 4:
+        if exp.eval_due(epoch):
             exp.evaluate(backdoor_model, criterion)
 
     # Step 3: split the training set by feature consistency
@@ -129,7 +129,7 @@ def run(exp):
     for epoch in exp.epochs("pss_unlearn", args.pss_unlearn_epochs, {"model": model, "optimizer": optimizer},
                             extra_loaders=[clean_dl, pois_dl]):
         pss_unlearn(model, exp.device, clean_dl, pois_dl, optimizer, criterion)
-        if epoch % 5 == 4:
+        if exp.eval_due(epoch):
             exp.evaluate(model, criterion)
     exp.save_model(model, "retrained_model.pth")
 

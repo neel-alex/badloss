@@ -147,7 +147,7 @@ def run(exp):
     state = {"model": backdoor_model, "optimizer": optimizer}
     for epoch in exp.epochs("cbd_pretrain", args.cbd_pretrain_epochs, state):
         train(backdoor_model, exp.device, exp.new_idx_loader, optimizer, criterion)
-        if epoch % 5 == 4:
+        if exp.eval_due(epoch):
             exp.evaluate(backdoor_model, criterion)
 
     clean_model = exp.new_model()
@@ -165,7 +165,7 @@ def run(exp):
     for epoch in exp.epochs("cbd_train", exp.num_epochs, state):
         train_cbd(clean_model, backdoor_model, discriminator, exp.device, exp.new_idx_loader, optimizer,
                   adv_optimizer, criterion, args.cbd_ce_gamma)
-        if epoch % 5 == 4:
+        if exp.eval_due(epoch):
             print(f"Evaluation at epoch {epoch+1}")
             exp.evaluate(clean_model, criterion)
         if epoch % 50 == 49:

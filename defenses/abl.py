@@ -23,7 +23,7 @@ def run(exp):
         criterion, optimizer, _ = exp.new_optimizer(model, args.abl_pretrain_epochs)
         for epoch in exp.epochs("abl_pretrain", args.abl_pretrain_epochs, {"model": model, "optimizer": optimizer}):
             train(model, exp.device, exp.new_idx_loader, optimizer, criterion, flooding_threshold=args.abl_flooding)
-            if epoch % 5 == 4:
+            if exp.eval_due(epoch):
                 exp.evaluate(model, criterion)
 
         # Per-example losses over the training set (NB: computed on the augmented loader)

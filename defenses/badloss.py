@@ -49,7 +49,7 @@ def _train_and_record(exp):
         train(exp.model, exp.device, loader, exp.optimizer, exp.criterion)
         losses[:, epoch], correct_class_probs[:, epoch] = collect_losses(exp.model, exp.device,
                                                                          exp.new_idx_loader_wo_aug, exp.criterion)
-        if epoch % 5 == 4:
+        if exp.eval_due(epoch):
             exp.evaluate_asr(exp.model, exp.criterion)
         exp.lr_scheduler.step()
 

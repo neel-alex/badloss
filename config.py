@@ -40,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Stop (exit code 75) between epochs when the next epoch might not finish within this "
                              "many hours of the start. Training loops are checkpointed, so rerunning the same command "
                              "resumes where it stopped")
+    parser.add_argument('--eval_every', default=None, type=int,
+                        help="Evaluate during training every this many epochs (test set, un-augmented training set, "
+                             "probes); default 10 for imagenet, else 5")
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--num_epochs', default=None, type=int,
                         help="Epochs for (re)training models; default depends on the dataset")
@@ -174,6 +177,7 @@ def dataset_defaults(dataset: str, batch_size: int) -> Dict:
     return {
         'num_epochs': {'cifar10': 100, 'gtsrb': 100, 'imagenette': 250, 'imagenet': 50}[dataset],
         'badloss_pretrain_epochs': 15 if dataset == 'imagenet' else 30,
+        'eval_every': 10 if dataset == 'imagenet' else 5,
         'arch': 'resnet18' if dataset == 'imagenet' else 'resnet50',
         'eval_batch_size': 128 if dataset == 'cifar10' else batch_size,
         'num_asr_images': 2000 if dataset == 'imagenet' else 10000,
