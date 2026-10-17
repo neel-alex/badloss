@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import torch
 from torchvision import models
@@ -42,6 +44,7 @@ def train(model, device, train_loader, optimizer, criterion, log_interval=10, fl
     model.train()
     optimizer.zero_grad()
 
+    start, loss_sum, num_examples = time.time(), torch.zeros((), device=device), 0
     pbar = tqdm(train_loader)
     for batch_idx, ((data, target), ex_idx) in enumerate(pbar):
         data, target = data.to(device), target.to(device)
@@ -59,9 +62,13 @@ def train(model, device, train_loader, optimizer, criterion, log_interval=10, fl
         loss.backward()
         optimizer.step()
 
+        loss_sum += loss.detach() * len(data)
+        num_examples += len(data)
         if batch_idx % log_interval == 0:
             pbar.set_description(f"Loss: {float(loss.detach()):.4f}")
     pbar.close()
+    print(f"Train epoch: loss {float(loss_sum) / max(num_examples, 1):.4f} over {num_examples} examples, "
+          f"{time.time() - start:.0f} s")
 
 
 def test(model, device, criterion, test_loader, distributed, rank, set_name="Test", log_predictions=False):
