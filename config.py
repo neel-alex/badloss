@@ -132,6 +132,10 @@ def build_parser() -> argparse.ArgumentParser:
     # Cognitive Distillation
     parser.add_argument('--cd_num_steps', default=100, type=int)
     parser.add_argument('--cd_remove_frac', default=0.15, type=float)
+    parser.add_argument('--cd_data_frac', default=1.0, type=float,
+                        help="Compute masks for all poisons and probes plus a random fraction of the other (clean) "
+                             "training examples (oracle, for compute); removes --cd_remove_frac of the scored "
+                             "examples, never unscored ones, and reports detection over the scored examples")
 
     # CBD
     parser.add_argument('--cbd_ce_gamma', default=1.0, type=float)
