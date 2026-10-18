@@ -294,19 +294,9 @@ class Experiment:
         an uninterrupted run. With --time_limit_hours, raises TimeLimitReached between epochs when the next epoch
         might not finish in time. `name` must be unique within a run.
         """
-        path = os.path.join(self.output_dir, "checkpoints", f"{name}.pt")
-        defense_args = {k: v for k, v in vars(self.args).items() if k.startswith(_DEFENSE_ARG_PREFIXES)}
-        key = self._key(f"checkpoint_{name}", defense=self.args.defense, defense_args=defense_args)
+        path, key, ckpt = self._load_checkpoint(name, state)
         start, max_epoch_time = 0, self._max_epoch_time
-        if os.path.exists(path):
-            ckpt = torch.load(path, map_location="cpu", weights_only=False)
-            if ckpt["key"] != key:
-                raise RuntimeError(f"{path} is from a different code version or settings; delete it to start over")
-            for k, obj in state.items():
-                if torch.is_tensor(obj):
-                    obj.copy_(ckpt["state"][k])
-                else:
-                    obj.load_state_dict(ckpt["state"][k])
+        if ckpt is not None:
             self._set_rng_state(ckpt["rng_state"], extra_loaders)
             start, max_epoch_time = ckpt["epoch"], max(max_epoch_time, ckpt["max_epoch_time"])
             print(f"Resuming {name} from epoch {start} ({path})")
@@ -317,24 +307,72 @@ class Experiment:
             yield epoch
             max_epoch_time = self._max_epoch_time = max(max_epoch_time, time.time() - t0)
             self._epochs_run += 1
-            if self.main_proc:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                ckpt = {"key": key, "epoch": epoch + 1, "max_epoch_time": max_epoch_time,
-                        "state": {k: obj if torch.is_tensor(obj) else obj.state_dict() for k, obj in state.items()},
-                        "rng_state": self._get_rng_state(extra_loaders)}
-                tmp = f"{path}.tmp{os.getpid()}"
-                torch.save(ckpt, tmp)
-                os.replace(tmp, path)
+            self._save_checkpoint(path, key, state, extra_loaders, epoch=epoch + 1, max_epoch_time=max_epoch_time)
             if epoch + 1 < num_epochs:
                 self._check_time_limit(name, epoch + 1, num_epochs, max_epoch_time)
+
+    def resumable_pass(self, name, loader, state, num_chunks=100):
+        """(batch_idx, batch) for one pass over a sequential loader whose per-batch work is slow (e.g. CD's mask
+        optimization), resumable like epochs(): checkpoints `state` and the RNGs every 1/num_chunks of the pass and
+        may raise TimeLimitReached between chunks. A resumed run re-reads (but skips) the finished batches, so the
+        loader's workers are seeded as in an uninterrupted run; requires the loader's generator to be in the same
+        state when this is called (as after reset_rngs)."""
+        path, key, ckpt = self._load_checkpoint(name, state)
+        done, max_chunk_time = (0, 0.0) if ckpt is None else (ckpt["batch"], ckpt["max_chunk_time"])
+        if ckpt is not None:
+            print(f"Resuming {name} from batch {done}/{len(loader)} ({path})")
+        ends = {round(len(loader) * k / num_chunks) for k in range(1, num_chunks)}
+        t0 = time.time()
+        for batch_idx, batch in enumerate(loader):
+            if batch_idx < done:
+                continue
+            if batch_idx == done and ckpt is not None:
+                self._set_rng_state(ckpt["rng_state"])
+                t0 = time.time()
+            yield batch_idx, batch
+            if batch_idx + 1 in ends:
+                max_chunk_time = max(max_chunk_time, time.time() - t0)
+                self._epochs_run += 1
+                self._save_checkpoint(path, key, state, (), batch=batch_idx + 1, max_chunk_time=max_chunk_time)
+                self._check_time_limit(name, batch_idx + 1, len(loader), max_chunk_time)
+                t0 = time.time()
+
+    def _load_checkpoint(self, name, state):
+        """(path, key, checkpoint or None) for a resumable loop; restores `state` from the checkpoint if there is
+        one (the caller restores the RNGs)."""
+        path = os.path.join(self.output_dir, "checkpoints", f"{name}.pt")
+        defense_args = {k: v for k, v in vars(self.args).items() if k.startswith(_DEFENSE_ARG_PREFIXES)}
+        key = self._key(f"checkpoint_{name}", defense=self.args.defense, defense_args=defense_args)
+        if not os.path.exists(path):
+            return path, key, None
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        if ckpt["key"] != key:
+            raise RuntimeError(f"{path} is from a different code version or settings; delete it to start over")
+        for k, obj in state.items():
+            if torch.is_tensor(obj):
+                obj.copy_(ckpt["state"][k])
+            else:
+                obj.load_state_dict(ckpt["state"][k])
+        return path, key, ckpt
+
+    def _save_checkpoint(self, path, key, state, extra_loaders, **progress):
+        if not self.main_proc:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ckpt = {"key": key, **progress,
+                "state": {k: obj if torch.is_tensor(obj) else obj.state_dict() for k, obj in state.items()},
+                "rng_state": self._get_rng_state(extra_loaders)}
+        tmp = f"{path}.tmp{os.getpid()}"
+        torch.save(ckpt, tmp)
+        os.replace(tmp, path)
 
     def _check_time_limit(self, name, epoch, num_epochs, max_epoch_time):
         """Raise TimeLimitReached if another epoch (taking 1.5x the longest so far) would overrun --time_limit_hours.
         Never before this process has trained an epoch, so every run makes progress."""
         limit, elapsed = self.args.time_limit_hours, time.time() - self.start_time
         if limit is not None and self._epochs_run > 0 and elapsed + 1.5 * max_epoch_time > limit * 3600:
-            raise TimeLimitReached(f"{name}: stopping at epoch {epoch}/{num_epochs} ({elapsed / 3600:.2f} h "
-                                   f"elapsed, epochs take up to {max_epoch_time / 60:.1f} min)")
+            raise TimeLimitReached(f"{name}: stopping at {epoch}/{num_epochs} ({elapsed / 3600:.2f} h elapsed, the next "
+                                   f"step takes up to {max_epoch_time / 60:.1f} min)")
 
     def reset_rngs(self):
         """Reseed the global RNGs and the loaders after a cacheable phase, so whatever follows is the same

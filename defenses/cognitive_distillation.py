@@ -77,7 +77,9 @@ def run(exp):
     def detect():
         cd = CognitiveDistillation(num_steps=args.cd_num_steps, norm_only=True)
         mask_norms = torch.zeros(len(exp.new_idx_loader_wo_aug.dataset))  # Only the L1 norms (full masks don't fit in
-        for (data, target), ex_idx in tqdm(exp.new_idx_loader_wo_aug):    # memory on ImageNet)
+        loader = exp.new_idx_loader_wo_aug                                 # memory on ImageNet)
+        for _, ((data, target), ex_idx) in tqdm(exp.resumable_pass("cd_masks", loader, {"mask_norms": mask_norms}),
+                                                total=len(loader)):
             mask_norms[ex_idx] = cd(exp.model, data.to(exp.device))
         valid_mask_idx = torch.where(mask_norms != 0)[0]
         base_idx = np.intersect1d(exp.probe_imgs.idx, valid_mask_idx.numpy())
