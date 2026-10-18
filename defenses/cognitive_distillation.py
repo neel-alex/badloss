@@ -5,8 +5,6 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from dataset_utils import get_loader
-
 
 def total_variation_loss(img, weight=1):
     b, c, h, w = img.size()
@@ -80,19 +78,6 @@ def run(exp):
         cd = CognitiveDistillation(num_steps=args.cd_num_steps, norm_only=True)
         mask_norms = torch.zeros(len(exp.new_idx_loader_wo_aug.dataset))  # Only the L1 norms (full masks don't fit in
         loader = exp.new_idx_loader_wo_aug                                 # memory on ImageNet)
-        scored_valid_idx = None
-        if args.cd_data_frac < 1:
-            # Oracle subsample (compute): every inserted example (poisons, probes) plus a random fraction of the rest,
-            # and the probes' originals (used for standardization below)
-            rng = np.random.default_rng(exp.seed)
-            valid_idx = np.asarray(exp.valid_idx)
-            sample = rng.choice(valid_idx, size=round(args.cd_data_frac * len(valid_idx)), replace=False)
-            scored_valid_idx = np.union1d(sample, np.intersect1d(exp.probe_imgs.idx, valid_idx))
-            inserted = np.setdiff1d(np.asarray(exp.comb_train_indices), valid_idx)
-            loader = get_loader(loader.dataset, exp.distributed, args.num_workers, exp.seed, shuffle=False,
-                                indices=np.concatenate([scored_valid_idx, inserted]).tolist(),
-                                batch_size=loader.batch_size)
-            print(f"CD on {len(scored_valid_idx)} of {len(valid_idx)} unmodified examples + {len(inserted)} inserted")
         for _, ((data, target), ex_idx) in tqdm(exp.resumable_pass("cd_masks", loader, {"mask_norms": mask_norms}),
                                                 total=len(loader)):
             mask_norms[ex_idx] = cd(exp.model, data.to(exp.device))
@@ -105,12 +90,8 @@ def run(exp):
         mask_norms[valid_mask_idx] -= mean
         mask_norms[valid_mask_idx] /= std
 
-        if scored_valid_idx is None:
-            identified_indices = mask_norms.argsort()[:int(args.cd_remove_frac * len(mask_norms))]
-        else:
-            order = valid_mask_idx[mask_norms[valid_mask_idx].argsort()]
-            identified_indices = order[:int(args.cd_remove_frac * len(valid_mask_idx))]
-        exp.report_detection(identified_indices, valid_idx=scored_valid_idx)
+        identified_indices = mask_norms.argsort()[:int(args.cd_remove_frac * len(mask_norms))]
+        exp.report_detection(identified_indices)
         return identified_indices
 
     identified_indices = exp.detect(detect)

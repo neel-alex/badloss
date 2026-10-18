@@ -456,11 +456,10 @@ class Experiment:
         print(f"{name} AUC", det_auc)
         self.record_detection(auc=det_auc)
 
-    def report_detection(self, identified_indices, valid_idx=None):
-        """valid_idx: the unmodified training examples the detector scored (default: all)."""
+    def report_detection(self, identified_indices):
         per_class_det = {}
-        fpr, tpr = get_confusion_stats(identified_indices, self.valid_idx if valid_idx is None else valid_idx,
-                                       self.dataset_probe_identity, per_class_out=per_class_det)
+        fpr, tpr = get_confusion_stats(identified_indices, self.valid_idx, self.dataset_probe_identity,
+                                       per_class_out=per_class_det)
         self.record_detection(fpr=fpr, tpr=tpr, num_removed=len(identified_indices), detection_rate=per_class_det)
 
     def save_model(self, model, name):
