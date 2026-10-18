@@ -443,6 +443,10 @@ class Experiment:
         """Train the attacked model on the poisoned training set (the model inspected by most defenses).
         Cached across defenses."""
         self.init_attacked_model()
+        if self.args.attacked_model is not None:
+            self.load_attacked_model(self.args.attacked_model)
+            self.reset_rngs()
+            return
         cache_dir = self.cache_dir("attacked_model")
         cached = self.load_cached(cache_dir, "model")
         if cached is not None:
@@ -459,6 +463,16 @@ class Experiment:
                 self.lr_scheduler.step()
             self.save_cached(cache_dir, model=self.model.state_dict())
         self.reset_rngs()
+
+    def load_attacked_model(self, path):
+        """Load an attacked model's state dict (optionally wrapped as {"model": ...} or saved from DDP)."""
+        with open(path, "rb") as f:
+            sha256 = hashlib.sha256(f.read()).hexdigest()
+        print(f"Loading the attacked model from {path} (sha256 {sha256})")
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        state = state.get("model", state)
+        self.model.load_state_dict({k.removeprefix("module."): v for k, v in state.items()})
+        self.results["attacked_model"] = {"path": os.path.abspath(path), "sha256": sha256}
 
     def retrain(self, identified_indices):
         """Train a fresh model on the combined training set minus the identified examples; report its metrics."""

@@ -46,11 +46,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--eval_every', default=None, type=int,
                         help="Evaluate during training every this many epochs (test set, un-augmented training set, "
                              "probes); default 10 for imagenet, else 5")
+    parser.add_argument('--attacked_model', default=None, type=str,
+                        help="Load the attacked model from this state dict instead of training it (e.g. one trained "
+                             "elsewhere or by older code); its path and sha256 are recorded in results.json")
     parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--num_epochs', default=None, type=int,
                         help="Epochs for (re)training models; default depends on the dataset")
     parser.add_argument('--batch_size', default=None, type=int,
-                        help="Training batch size; default 128 for cifar10 (as in the paper), else 256")
+                        help="Training batch size; default 128 for cifar10, 512 for imagenet (what the paper's "
+                             "ImageNet runs used; App. H says 256), else 256")
     parser.add_argument('--eval_batch_size', default=None, type=int,
                         help="Batch size for evaluating in-memory probe sets; default depends on the dataset")
     parser.add_argument('--lr', default=1e-3, type=float, help="AdamW learning rate")
@@ -153,7 +157,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parses arguments and fills in dataset-dependent defaults, attack list and poisoning ratios."""
     args = build_parser().parse_args(argv)
     if args.batch_size is None:
-        args.batch_size = 128 if args.dataset == 'cifar10' else 256
+        args.batch_size = {'cifar10': 128, 'imagenet': 512}.get(args.dataset, 256)
     defaults = dataset_defaults(args.dataset, args.batch_size)
     for key, value in defaults.items():
         if getattr(args, key) is None:
