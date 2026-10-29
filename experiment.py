@@ -539,6 +539,7 @@ class Experiment:
 
     # --- Features ---
 
+    @torch.no_grad()
     def last_layer_activations(self, model, loader, masking_op=None):
         """Penultimate-layer activations over a loader.
 
